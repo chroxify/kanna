@@ -17,6 +17,16 @@ import type { ChatPreview, ChatTouchedFilesResult, ProviderAuthSnapshot } from "
 import { playChatNotificationSound, shouldPlayChatSound } from "../lib/chatSounds"
 import { getBrowserPageStatus, getBrowserWindowTitle, getChatSoundBurstCount } from "./chatNotifications"
 
+import { KannaSidebar } from "./KannaSidebar"
+import { ChatPage } from "./ChatPage"
+import { LocalProjectsPage } from "./LocalProjectsPage"
+import { OpenRouterCallbackPage } from "./OpenRouterCallbackPage"
+import { SettingsPage } from "./SettingsPage"
+import { TerminalPage } from "./TerminalPage"
+import { useKannaState } from "./useKannaState"
+import { useSidebarStore } from "../stores/sidebarStore"
+import type { AppSettingsSnapshot } from "../../shared/types"
+
 /** Upserts `<meta name=… content=…>` in the document head. */
 function setMetaTag(name: string, content: string) {
   let tag = document.head.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)
@@ -27,15 +37,6 @@ function setMetaTag(name: string, content: string) {
   }
   if (tag.content !== content) tag.content = content
 }
-import { KannaSidebar } from "./KannaSidebar"
-import { ChatPage } from "./ChatPage"
-import { LocalProjectsPage } from "./LocalProjectsPage"
-import { OpenRouterCallbackPage } from "./OpenRouterCallbackPage"
-import { SettingsPage } from "./SettingsPage"
-import { TerminalPage } from "./TerminalPage"
-import { useKannaState } from "./useKannaState"
-import { useSidebarStore } from "../stores/sidebarStore"
-import type { AppSettingsSnapshot } from "../../shared/types"
 
 const AUTH_STATUS_RETRY_DELAY_MS = 500
 
