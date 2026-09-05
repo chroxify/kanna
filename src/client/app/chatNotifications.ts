@@ -50,6 +50,47 @@ interface ChatNotificationSnapshot {
   waitingChatIds: Set<string>
 }
 
+/**
+ * What the active chat is doing, for hosts that show it outside the page —
+ * Floaty reads it from `<meta name="floaty:status">` and draws a dot on the
+ * tab. Deliberately coarser than KannaStatus: a tab needs "is it working, does
+ * it need me, is it finished", not the state machine.
+ *
+ * - working: the agent is running
+ * - waiting: it stopped to ask you something
+ * - done:    it finished and you haven't looked yet
+ * - failed:  the turn errored
+ * - idle:    nothing to say
+ */
+export type BrowserPageStatus = "idle" | "working" | "waiting" | "done" | "failed"
+
+export function getBrowserPageStatus(args: {
+  sidebarData: SidebarData
+  activeChatId: string | null
+}): { status: BrowserPageStatus; badge: number } {
+  const badge = getNotificationTitleCount(args.sidebarData)
+  if (!args.activeChatId) return { status: "idle", badge }
+
+  let chat: SidebarChatRow | undefined
+  for (const group of args.sidebarData.projectGroups) {
+    chat = getSidebarGroupChats(group).find((row) => row.chatId === args.activeChatId)
+    if (chat) break
+  }
+  if (!chat) return { status: "idle", badge }
+
+  switch (chat.status) {
+    case "starting":
+    case "running":
+      return { status: "working", badge }
+    case "waiting_for_user":
+      return { status: "waiting", badge }
+    case "failed":
+      return { status: "failed", badge }
+    case "idle":
+      return { status: chat.unread ? "done" : "idle", badge }
+  }
+}
+
 export function getChatNotificationSnapshot(sidebarData: SidebarData): ChatNotificationSnapshot {
   let unreadCount = 0
   const waitingChatIds = new Set<string>()
