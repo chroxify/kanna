@@ -15,6 +15,7 @@ import { openExternal } from "./external-open"
 import { KeybindingsManager } from "./keybindings"
 import { killLocalHttpServer, listLocalHttpServers } from "./local-http-servers"
 import type { PortTunnelManager } from "./port-tunnels"
+import { exposePreviewPort, getRemotePreviewInfo, unexposePreviewPort } from "./tailscale-preview"
 import { cloneRepository, createDirectory, ensureProjectDirectory, initializeProjectDirectory, listDirectory, resolveClonePath, resolveLocalPath } from "./paths"
 import { listRecentGitHubRepos } from "./github"
 import { SERVER_PROVIDERS, applyPiFaveModels } from "./provider-catalog"
@@ -1126,6 +1127,21 @@ export function createWsRouter({
           if (!portTunnels) throw new Error("Port tunnels are not available.")
           const result = portTunnels.unexpose(command.port)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "preview.remoteInfo": {
+          const result = await getRemotePreviewInfo({ force: command.force })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "preview.expose": {
+          const result = await exposePreviewPort(command.port)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "preview.unexpose": {
+          await unexposePreviewPort(command.port)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           return
         }
         case "project.readQuickActions": {

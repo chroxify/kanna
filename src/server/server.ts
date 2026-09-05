@@ -23,6 +23,7 @@ import { KannaAnalyticsReporter } from "./analytics"
 import { AppSettingsManager } from "./app-settings"
 import { refreshInstalledEditors } from "./editor-detection"
 import { refreshInstalledTerminals } from "./terminal-detection"
+import { restorePreviewRelays } from "./tailscale-preview"
 import { UsageLimitsManager } from "./usage-limits"
 import { DiffStore } from "./diff-store"
 import { WorktreeProbe } from "./worktree-probe"
@@ -229,6 +230,11 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   // fine (nothing greyed out) until the result lands.
   void refreshInstalledEditors(appSettings)
   void refreshInstalledTerminals(appSettings)
+  // Remote previews published by the previous run point at relays that died
+  // with it; bring them back. Not awaited — it shells out to tailscale.
+  void restorePreviewRelays().then((ports) => {
+    if (ports.length > 0) console.log(`${LOG_PREFIX} remote previews restored on ports ${ports.join(", ")}`)
+  })
   await keybindings.initialize()
   const analytics = new KannaAnalyticsReporter({
     settings: appSettings,

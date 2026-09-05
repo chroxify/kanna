@@ -135,6 +135,11 @@ export type ClientCommand =
   | { type: "browser.killLocalHttpServer"; port: number }
   | { type: "browser.exposeLocalHttpServer"; port: number }
   | { type: "browser.unexposeLocalHttpServer"; port: number }
+  /** Ack result: RemotePreviewInfo (shared/remote-preview.ts). */
+  | { type: "preview.remoteInfo"; force?: boolean }
+  /** Publish a loopback port on the tailnet. Ack result: `{ url: string }`. */
+  | { type: "preview.expose"; port: number }
+  | { type: "preview.unexpose"; port: number }
   | { type: "project.readQuickActions"; projectId: string }
   | { type: "project.writeQuickActions"; projectId: string; quickActions: ProjectQuickAction[] }
   | { type: "update.check"; force?: boolean }
