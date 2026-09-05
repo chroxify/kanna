@@ -16,7 +16,18 @@ import { getSetupLaunchAction, useProviderAuthStore } from "../stores/providerAu
 import { SetupWizard } from "../components/auth/SetupWizard"
 import type { ChatPreview, ChatTouchedFilesResult, ProviderAuthSnapshot } from "../../shared/types"
 import { playChatNotificationSound, shouldPlayChatSound } from "../lib/chatSounds"
-import { getBrowserWindowTitle, getChatNotificationEvents, getChatSoundBurstCount, type ChatNotificationEvent } from "./chatNotifications"
+import { getBrowserPageStatus, getBrowserWindowTitle, getChatNotificationEvents, getChatSoundBurstCount, type ChatNotificationEvent } from "./chatNotifications"
+
+/** Upserts `<meta name=… content=…>` in the document head. */
+function setMetaTag(name: string, content: string) {
+  let tag = document.head.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)
+  if (!tag) {
+    tag = document.createElement("meta")
+    tag.name = name
+    document.head.appendChild(tag)
+  }
+  if (tag.content !== content) tag.content = content
+}
 import { KannaSidebar } from "./KannaSidebar"
 import { ChatPage } from "./ChatPage"
 import { LocalProjectsPage } from "./LocalProjectsPage"
@@ -364,6 +375,18 @@ function KannaLayout() {
   useLayoutEffect(() => {
     document.title = browserTitle
   }, [browserTitle, location.key])
+
+  // Published next to the title for hosts that can show more than a title —
+  // Floaty draws a dot on the tab from these. Meta tags rather than anything
+  // host-specific, so any wrapper can read them without knowing Kanna.
+  const pageStatus = useSidebarStore((store) => getBrowserPageStatus({
+    sidebarData: store.data,
+    activeChatId: state.activeChatId,
+  }))
+  useLayoutEffect(() => {
+    setMetaTag("floaty:status", pageStatus.status)
+    setMetaTag("floaty:badge", String(pageStatus.badge))
+  }, [pageStatus.status, pageStatus.badge])
 
   useEffect(() => {
     function handlePageShow() {
