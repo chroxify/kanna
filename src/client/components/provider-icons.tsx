@@ -46,6 +46,20 @@ export function CursorIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
   )
 }
 
+export function GrokIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      className={cn("shrink-0", className)}
+      {...props}
+    >
+      <path d="M12 1.5 14.2 8l6.8.4-5.3 4.2 1.8 6.6L12 15.7 6.5 19.2 8.3 12.6 3 8.4 9.8 8 12 1.5Z" />
+    </svg>
+  )
+}
+
 export function PiIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
@@ -98,6 +112,7 @@ export const PROVIDER_ICONS: Record<AgentProvider, IconComponent> = {
   claude: AnthropicIcon,
   codex: OpenAIIcon,
   cursor: CursorIcon,
+  grok: GrokIcon,
   pi: PiIcon,
 }
 
@@ -105,6 +120,7 @@ export const AUTH_SERVICE_ICONS: Record<AuthServiceId, IconComponent> = {
   claude: AnthropicIcon,
   codex: OpenAIIcon,
   cursor: CursorIcon,
+  grok: GrokIcon,
   gh: GitHubIcon,
   openrouter: OpenRouterIcon,
 }
