@@ -246,6 +246,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   const usageLimits = new UsageLimitsManager(path.join(store.dataDir, "usage-limits.json"), {
     fetchClaudeUsage: () => agent.fetchClaudeUsage(),
     fetchCodexRateLimits: () => agent.fetchCodexRateLimits(),
+    fetchGrokUsage: () => agent.fetchGrokUsage(),
   })
   await usageLimits.initialize()
   agent.setClaudeRateLimitListener((info) => usageLimits.recordClaudeRateLimitPush(info))
@@ -263,6 +264,9 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
       void usageLimits.refresh({ force: true }).catch(() => undefined)
       if (service === "cursor") {
         void agent.refreshCursorModelCatalog()
+      }
+      if (service === "grok") {
+        void agent.refreshGrokModelCatalog()
       }
       if (service === "codex") {
         void agent.refreshCodexModelCatalog()
@@ -300,6 +304,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   // catalog (no-op when the CLI is missing or logged out); broadcasts on change.
   void agent.refreshCursorModelCatalog()
   void agent.refreshCodexModelCatalog()
+  void agent.refreshGrokModelCatalog()
   // Seed the pi provider's model picker from saved fave models before the
   // first snapshots go out.
   void readLlmProviderSnapshot()
