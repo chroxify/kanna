@@ -1589,7 +1589,13 @@ export interface DeleteFileToolCall
   extends ToolCallBase<"delete_file", { filePath: string; content?: string }> { }
 
 export interface SubagentTaskToolCall
-  extends ToolCallBase<"subagent_task", { subagentType?: string }> { }
+  extends ToolCallBase<"subagent_task", {
+    subagentType?: string
+    /** The short label the caller gave the task; the row's title. */
+    description?: string
+    /** The full task text. Unbounded, so it lives in the payload sidecar. */
+    prompt?: string
+  }> { }
 
 export interface McpGenericToolCall
   extends ToolCallBase<"mcp_generic", { server: string; tool: string; payload?: Record<string, unknown> }> { }

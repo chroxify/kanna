@@ -61,7 +61,8 @@ export function ToolCallMessage({ message, isLoading = false, localPath }: Props
       return `${toTitleCase(message.input.tool)} from ${toTitleCase(message.input.server)}`
     }
     if (message.toolKind === "subagent_task") {
-      return message.input.subagentType || message.toolName
+      const agent = message.input.subagentType || message.toolName
+      return message.input.description ? `${agent}: ${message.input.description}` : agent
     }
     return message.toolName
   }, [message.input, message.toolName, localPath])

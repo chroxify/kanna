@@ -351,6 +351,7 @@ function collabToolCall(item: CollabAgentToolCallItem): TranscriptEntry {
       toolId: item.id,
       input: {
         subagentType: item.tool,
+        ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
       },
       rawInput: item as unknown as Record<string, unknown>,
     },
