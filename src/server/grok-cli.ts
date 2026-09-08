@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline"
 import type { Readable, Writable } from "node:stream"
-import type { ContextWindowUsageSnapshot, HarnessSkill } from "../shared/types"
+import type { ContextWindowUsageSnapshot, HarnessSkill, TodoItem } from "../shared/types"
 import { asNumber, asRecord, asString } from "../shared/json"
 import { normalizeToolCall } from "../shared/tools"
 import type { HarnessEvent, HarnessTurn } from "./harness-types"
@@ -281,7 +281,13 @@ function translateGrokTool(
       }
     case "todowrite":
     case "updatetodos":
-      return { toolName: "TodoWrite", input: { todos: Array.isArray(args.todos) ? args.todos : [] } }
+      return {
+        toolName: "TodoWrite",
+        input: {
+          todos: normalizeGrokTodoItems(args.todos),
+          merge: args.merge === true,
+        },
+      }
     case "websearch":
       return { toolName: "WebSearch", input: { query: args.query ?? args.search_term ?? "" } }
     case "webfetch":
@@ -298,6 +304,93 @@ function translateGrokTool(
       return { toolName: "Task", input: args }
     default:
       return { toolName: rawName, input: args }
+  }
+}
+
+function grokTodoStatus(value: unknown): TodoItem["status"] {
+  const status = String(value ?? "").toLowerCase().replace(/[^a-z]/g, "")
+  if (status === "completed" || status === "complete" || status === "done") return "completed"
+  if (status === "inprogress" || status === "running") return "in_progress"
+  return "pending"
+}
+
+function grokTodoText(item: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = item[key]
+    if (typeof value === "string" && value.trim()) return value
+  }
+  return ""
+}
+
+export function normalizeGrokTodoItems(value: unknown): TodoItem[] {
+  const items = Array.isArray(value) ? value : []
+  const todos: TodoItem[] = []
+  for (const raw of items) {
+    const item = asRecord(raw)
+    if (!item) continue
+    const content = grokTodoText(item, ["content", "text", "title", "description", "step", "label"])
+    const activeForm = grokTodoText(item, ["activeForm", "active_form"]) || content
+    const id = asString(item.id)
+    todos.push({
+      content,
+      status: grokTodoStatus(item.status),
+      activeForm,
+      ...(id ? { id } : {}),
+    } as TodoItem)
+  }
+  return todos
+}
+
+function grokTodosFromPayload(value: unknown): { todos: TodoItem[]; merge: boolean } | null {
+  const record = asRecord(value)
+  if (!record) return null
+  const rawInput = asRecord(record.rawInput) ?? record
+  const rawOutput = asRecord(record.rawOutput)
+  const updated = asRecord(rawOutput?.TodosUpdated) ?? asRecord(rawOutput?.todosUpdated)
+  const lists = [
+    rawInput.todos,
+    updated?.todos,
+    record.todos,
+  ]
+  for (const list of lists) {
+    if (!Array.isArray(list) || list.length === 0) continue
+    return {
+      todos: normalizeGrokTodoItems(list),
+      merge: rawInput.merge === true || record.merge === true,
+    }
+  }
+  const stateTodos = asRecord(asRecord(updated?.state)?.todos)
+  if (stateTodos && Object.keys(stateTodos).length > 0) {
+    return {
+      todos: normalizeGrokTodoItems(
+        Object.entries(stateTodos).map(([id, item]) => ({ id, ...asRecord(item) })),
+      ),
+      merge: false,
+    }
+  }
+  return null
+}
+
+export class GrokTodoTracker {
+  private readonly todos = new Map<string, TodoItem & { id: string }>()
+
+  apply(payload: { todos: TodoItem[]; merge: boolean }): TodoItem[] | null {
+    if (!payload.merge) this.todos.clear()
+    for (const [index, todo] of payload.todos.entries()) {
+      const id = asString((todo as TodoItem & { id?: string }).id) || String(index + 1)
+      const previous = this.todos.get(id)
+      const content = todo.content.trim() || previous?.content || ""
+      const activeForm = todo.activeForm.trim() || content || previous?.activeForm || ""
+      this.todos.set(id, {
+        id,
+        content,
+        status: todo.status,
+        activeForm,
+      })
+    }
+    const merged = [...this.todos.values()].map(({ id: _id, ...todo }) => todo)
+    if (!merged.some((todo) => todo.content.length > 0)) return null
+    return merged
   }
 }
 
@@ -394,15 +487,30 @@ export function parseGrokLine(line: string, configuredModel: string): HarnessEve
     }
 
     case "tool_call_update": {
+      const events: HarnessEvent[] = []
+      const callId = asString(value.toolCallId) ?? asString(value.call_id)
+      const todoPayload = grokTodosFromPayload(value)
+      if (todoPayload && callId) {
+        events.push({
+          type: "transcript",
+          entry: timestamped({
+            kind: "tool_call",
+            tool: normalizeToolCall({
+              toolName: "TodoWrite",
+              toolId: callId,
+              input: { todos: todoPayload.todos, merge: todoPayload.merge },
+            }),
+          }),
+        })
+      }
       const status = asString(value.status)
       const hasContent = Array.isArray(value.content) ? value.content.length > 0 : value.content != null
       if (status !== "completed" && status !== "failed" && status !== "error" && !hasContent && value.rawOutput == null) {
-        return []
+        return events
       }
-      const callId = asString(value.toolCallId) ?? asString(value.call_id)
-      if (!callId) return []
+      if (!callId) return events
       const isError = status === "failed" || status === "error"
-      return [{
+      events.push({
         type: "transcript",
         entry: timestamped({
           kind: "tool_result",
@@ -410,7 +518,8 @@ export function parseGrokLine(line: string, configuredModel: string): HarnessEve
           content: extractToolResultContent(value),
           isError,
         }),
-      }]
+      })
+      return events
     }
 
     case "usage": {
@@ -454,6 +563,7 @@ export function parseGrokLine(line: string, configuredModel: string): HarnessEve
 export class GrokStreamCoalescer {
   private text = ""
   private sawInit = false
+  private readonly todos = new GrokTodoTracker()
 
   push(events: HarnessEvent[]): HarnessEvent[] {
     const out: HarnessEvent[] = []
@@ -468,9 +578,33 @@ export class GrokStreamCoalescer {
       }
       const flushed = this.flushText()
       if (flushed) out.push(flushed)
-      out.push(event)
+      const rewritten = this.rewriteTodoEvent(event)
+      if (rewritten) out.push(rewritten)
     }
     return out
+  }
+
+  /**
+   * Grok's later todo_write calls are merge patches: `{ id, status }` with no
+   * title. Fold them onto the last full list so the Progress card keeps text.
+   */
+  private rewriteTodoEvent(event: HarnessEvent): HarnessEvent | null {
+    if (event.type !== "transcript" || event.entry?.kind !== "tool_call") return event
+    const tool = event.entry.tool
+    if (tool.toolKind !== "todo_write") return event
+    const merge = asRecord(tool.rawInput)?.merge === true || asRecord(tool.input)?.merge === true
+    const merged = this.todos.apply({ todos: tool.input.todos ?? [], merge })
+    if (!merged) return null
+    return {
+      ...event,
+      entry: {
+        ...event.entry,
+        tool: {
+          ...tool,
+          input: { todos: merged },
+        },
+      },
+    }
   }
 
   finish(): HarnessEvent[] {

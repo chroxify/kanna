@@ -3,7 +3,9 @@ import { PassThrough } from "node:stream"
 import {
   GrokCliManager,
   GrokStreamCoalescer,
+  GrokTodoTracker,
   grokModelLabel,
+  normalizeGrokTodoItems,
   grokProductUsageWindows,
   grokSessionDir,
   normalizeGrokUsage,
@@ -170,6 +172,95 @@ describe("parseGrokLine", () => {
   test("malformed lines produce no entries", () => {
     expect(parseGrokLine("not json", "grok-4.6")).toEqual([])
     expect(parseGrokLine("", "grok-4.6")).toEqual([])
+  })
+})
+
+describe("Grok todos", () => {
+  test("fills activeForm from content so in-progress rows have a title", () => {
+    expect(normalizeGrokTodoItems([
+      { id: "1", content: "Spec the copy skill", status: "in_progress" },
+      { id: "2", text: "Read the pages", status: "pending" },
+    ])).toEqual([
+      { content: "Spec the copy skill", status: "in_progress", activeForm: "Spec the copy skill", id: "1" },
+      { content: "Read the pages", status: "pending", activeForm: "Read the pages", id: "2" },
+    ])
+  })
+
+  test("merge patches keep titles from the last full list", () => {
+    const tracker = new GrokTodoTracker()
+    expect(tracker.apply({
+      merge: false,
+      todos: normalizeGrokTodoItems([
+        { id: "1", content: "Spec the copy skill", status: "in_progress" },
+        { id: "2", content: "Read the pages", status: "pending" },
+      ]),
+    })).toEqual([
+      { content: "Spec the copy skill", status: "in_progress", activeForm: "Spec the copy skill" },
+      { content: "Read the pages", status: "pending", activeForm: "Read the pages" },
+    ])
+    expect(tracker.apply({
+      merge: true,
+      todos: normalizeGrokTodoItems([
+        { id: "1", status: "completed" },
+        { id: "2", status: "in_progress" },
+      ]),
+    })).toEqual([
+      { content: "Spec the copy skill", status: "completed", activeForm: "Spec the copy skill" },
+      { content: "Read the pages", status: "in_progress", activeForm: "Read the pages" },
+    ])
+  })
+
+  test("status-only todo_write events do not replace the Progress card with blank rows", () => {
+    const coalescer = new GrokStreamCoalescer()
+    const first = coalescer.push(parseGrokLine(JSON.stringify({
+      type: "tool_call",
+      toolCallId: "t-1",
+      toolName: "todo_write",
+      rawInput: {
+        merge: false,
+        todos: [
+          { id: "1", content: "Spec the copy skill", status: "in_progress" },
+          { id: "2", content: "Read the pages", status: "pending" },
+        ],
+      },
+    }), "grok-4.6"))
+    expect(transcriptEntries(first)[0]).toMatchObject({
+      kind: "tool_call",
+      tool: {
+        toolKind: "todo_write",
+        input: {
+          todos: [
+            { content: "Spec the copy skill", status: "in_progress" },
+            { content: "Read the pages", status: "pending" },
+          ],
+        },
+      },
+    })
+
+    const merged = coalescer.push(parseGrokLine(JSON.stringify({
+      type: "tool_call",
+      toolCallId: "t-2",
+      toolName: "todo_write",
+      rawInput: {
+        merge: true,
+        todos: [
+          { id: "1", status: "completed" },
+          { id: "2", status: "in_progress" },
+        ],
+      },
+    }), "grok-4.6"))
+    expect(transcriptEntries(merged)[0]).toMatchObject({
+      kind: "tool_call",
+      tool: {
+        toolKind: "todo_write",
+        input: {
+          todos: [
+            { content: "Spec the copy skill", status: "completed" },
+            { content: "Read the pages", status: "in_progress", activeForm: "Read the pages" },
+          ],
+        },
+      },
+    })
   })
 })
 
