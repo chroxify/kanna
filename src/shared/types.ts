@@ -1517,6 +1517,20 @@ interface TranscriptEntryBase {
   hidden?: boolean
   debugRaw?: string
   /**
+   * Set on entries a subagent produced: the `toolId` of the `subagent_task`
+   * call that spawned it (the SDK's `parent_tool_use_id`). Absent on the
+   * main thread.
+   *
+   * The Claude SDK streams a subagent's text and tool calls on the same
+   * iterator as the main thread, so without this they read as the main
+   * agent's own work: an Explore agent's forty Greps and its findings sat
+   * inline in the chat, and the findings then arrived a second time as the
+   * Agent tool's result. Readers fold entries with this set under their
+   * parent row, and skip them where the main thread alone matters (sidebar
+   * previews, handoff, the transcript window count).
+   */
+  parentToolUseId?: string
+  /**
    * Set when this entry is in header form: its unbounded tool payload fields
    * are in the server's payload sidecar (`server/transcript-payloads.ts`), to
    * be fetched with `chat.getToolEntries` if the row is opened.
@@ -1972,6 +1986,13 @@ export interface HydratedToolCallBase<TKind extends string, TInput, TResult> {
   /** As `inputTrimmed`, for the result body — fetch by `resultEntryId`. */
   resultTrimmed?: boolean
   timestamp: string
+  /**
+   * What a subagent did, in order: the entries stamped with this call's
+   * `toolId` as `parentToolUseId`, hydrated the same way as the main thread.
+   * Only ever set on a `subagent_task` call. Absent when the agent has not
+   * produced anything yet, or the provider does not stream sidechains.
+   */
+  children?: HydratedTranscriptMessage[]
 }
 
 export interface AskUserQuestionToolResult {

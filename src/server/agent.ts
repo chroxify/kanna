@@ -432,6 +432,21 @@ export function normalizeClaudeStreamMessage(
     structuredToolIds?: ReadonlySet<string>
   }
 ): TranscriptEntry[] {
+  const entries = normalizeClaudeStreamMessageEntries(message, options)
+  // Subagent (sidechain) messages arrive on the same iterator as the main
+  // thread, told apart only by this id. Stamp it on everything the message
+  // produced so readers can fold the subagent's work under its Agent row.
+  const parentToolUseId = typeof message?.parent_tool_use_id === "string" && message.parent_tool_use_id
+    ? message.parent_tool_use_id
+    : undefined
+  if (!parentToolUseId) return entries
+  return entries.map((entry) => ({ ...entry, parentToolUseId }))
+}
+
+function normalizeClaudeStreamMessageEntries(
+  message: any,
+  options?: { structuredToolIds?: ReadonlySet<string> }
+): TranscriptEntry[] {
   // Raw SDK JSON is kept only on system_init, for the raw JSON view. Tool
   // results used to carry it too, so `tool_use_result` could be lifted out
   // later; that copy held every screenshot twice and grew chats past 100 MB

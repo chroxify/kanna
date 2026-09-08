@@ -84,7 +84,7 @@ export function ToolCallMessage({ message, isLoading = false, localPath }: Props
     <MetaRow className="w-full" onPointerEnter={prefetchOwnPayloads}>
       {/* Creating the element is free; `ExpandableRow` only mounts it — and so
           only runs the work inside it — once the row is opened. */}
-      <ExpandableRow expandedContent={<ToolCallExpandedContent message={message} />}>
+      <ExpandableRow expandedContent={<ToolCallExpandedContent message={message} isLoading={isLoading} localPath={localPath} />}>
         <div className="w-5 h-5 relative flex items-center justify-center">
           {(() => {
             if (message.isError) {

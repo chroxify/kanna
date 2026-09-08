@@ -4,6 +4,7 @@ import type { NormalizedToolCall, TranscriptEntry } from "../../../shared/types"
 import { hydrateToolResult } from "../../../shared/tools"
 import { MetaCodeBlock, VerticalLineContainer } from "./shared"
 import { FileContentView } from "./FileContentView"
+import { SubagentTranscript } from "./SubagentTranscript"
 import { useToolPayload } from "./tool-payload-context"
 
 /**
@@ -126,7 +127,14 @@ export function ReadResultImages({ images }: { images: ReadonlyArray<ReadImageBl
   )
 }
 
-export function ToolCallExpandedContent({ message: row }: { message: ProcessedToolCall }) {
+interface Props {
+  message: ProcessedToolCall
+  /** Whether the chat is still streaming; a subagent's open calls shimmer on it. */
+  isLoading?: boolean
+  localPath?: string | null
+}
+
+export function ToolCallExpandedContent({ message: row, isLoading = false, localPath }: Props) {
   // Mounting this component is the signal that the payloads are wanted; these
   // request them if the transcript arrived without them.
   const fetchedCall = useToolPayload(row.inputTrimmed ? row.id : undefined)
@@ -225,6 +233,9 @@ export function ToolCallExpandedContent({ message: row }: { message: ProcessedTo
           } copyText={inputText}>
             {inputText}
           </MetaCodeBlock>
+        )}
+        {message.toolKind === "subagent_task" && message.children && message.children.length > 0 && (
+          <SubagentTranscript messages={message.children} isLoading={isLoading} localPath={localPath} />
         )}
         {hasResult && isReadTool && !message.isError && (
           readImages.length > 0 ? (
