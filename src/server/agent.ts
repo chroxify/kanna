@@ -771,6 +771,11 @@ async function startClaudeSession(args: {
       permissionMode: args.planMode ? "plan" : "acceptEdits",
       canUseTool,
       tools: claudeToolset(args.autoPlan),
+      // By default the SDK forwards only a subagent's tool calls. Its text
+      // (what it is doing, and its final report) completes the nested view
+      // under the Agent row; the normalizer stamps it with parent_tool_use_id
+      // like the rest.
+      forwardSubagentText: true,
       settingSources: ["user", "project", "local"],
       // Append-only: the claude_code preset stays intact, Kanna's git
       // attribution rides on the end of it (see attribution.ts).
