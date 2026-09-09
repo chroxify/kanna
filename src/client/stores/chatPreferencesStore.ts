@@ -9,17 +9,20 @@ import {
   type CursorModelOptions,
   type DefaultProviderPreference,
   type PiModelOptions,
+  type ProviderDefaultsPatch,
   type ProviderPreference,
   type ProviderModelOptionsByProvider,
 } from "../../shared/types"
 import {
   createDefaultProviderDefaults,
+  mergeProviderDefaultsPatch,
   normalizeClaudePreference,
   normalizeCodexPreference,
   normalizeCursorPreference,
   normalizePiPreference,
   normalizeProviderDefaults,
   normalizeProviderPreference,
+  resolveProviderModelOptions,
   PROVIDER_NORMALIZERS,
   type ProviderModelOptionsInput,
   type ProviderPreferenceInput,
@@ -57,9 +60,13 @@ export function normalizeDefaultProvider(value?: string): DefaultProviderPrefere
 }
 
 function composerStateForProvider(provider: AgentProvider, value?: ProviderPreferenceInput): ComposerState {
+  // `modelDefaults` is settings state (which options each model starts with),
+  // not composer state — a chat holds the options it resolved to, so drop the
+  // map rather than copying a snapshot of it onto every chat.
+  const { modelDefaults: _modelDefaults, ...preference } = normalizeProviderPreference(provider, value)
   // The normalizer record is keyed by provider, so the provider tag always matches
   // its normalized modelOptions shape; TS can't prove that across the union.
-  return { provider, ...normalizeProviderPreference(provider, value) } as ComposerState
+  return { provider, ...preference } as ComposerState
 }
 
 type PersistedComposerState = ProviderPreferenceInput & { provider: AgentProvider }
@@ -86,11 +93,28 @@ function logChatPreferences(message: string, details?: unknown) {
   console.info(`[chat-preferences] ${message}`, details)
 }
 
+/**
+ * Materializes a composer state for a provider on a given model, taking that
+ * model's own saved defaults when it has them (Opus at medium, Fable at high)
+ * and the provider-wide defaults otherwise. `model` omitted means the
+ * provider's default model.
+ */
 function composerFromProviderDefaults(
   provider: AgentProvider,
-  providerDefaults: ChatProviderPreferences
+  providerDefaults: ChatProviderPreferences,
+  model?: string
 ): ComposerState {
-  return composerStateForProvider(provider, providerDefaults[provider])
+  const preference = providerDefaults[provider]
+  const targetModel = model ?? preference.model
+  return composerStateForProvider(provider, {
+    ...preference,
+    model: targetModel,
+    modelOptions: resolveProviderModelOptions(
+      provider,
+      preference,
+      targetModel
+    ) as ProviderModelOptionsInput,
+  })
 }
 
 /**
@@ -106,11 +130,9 @@ export interface ComposerSeed {
 
 function composerFromChatSeed(seed: ComposerSeed, providerDefaults: ChatProviderPreferences): ComposerState {
   // Options (effort, context window…) aren't recorded per chat, so those still
-  // come from the provider's defaults; the model is the chat's own.
-  return composerStateForProvider(seed.provider, {
-    ...providerDefaults[seed.provider],
-    ...(seed.model ? { model: seed.model } : {}),
-  })
+  // come from the defaults — the chat's own model picks which ones, so a chat
+  // that ran on Opus reopens with Opus's saved options.
+  return composerFromProviderDefaults(seed.provider, providerDefaults, seed.model)
 }
 
 function cloneComposerState(state: ComposerState): ComposerState {
@@ -258,6 +280,18 @@ interface ChatPreferencesState {
     modelOptions: Partial<ProviderModelOptionsByProvider[TProvider]>
   ) => void
   setProviderDefaultMode: (provider: AgentProvider, mode: ChatMode) => void
+  /**
+   * Saves options for one model of a provider ("Opus always medium"). Merged
+   * over that model's current entry, or over the provider-wide defaults when
+   * the model has none.
+   */
+  setProviderModelDefault: <TProvider extends AgentProvider>(
+    provider: TProvider,
+    model: string,
+    modelOptions: Partial<ProviderModelOptionsByProvider[TProvider]>
+  ) => void
+  /** Drops a model's saved options so it follows the provider-wide defaults again. */
+  clearProviderModelDefault: (provider: AgentProvider, model: string) => void
   /** `seed` is the chat's own record (see ComposerSeed); used only when nothing is stored for it. */
   getComposerState: (chatId: string, seed?: ComposerSeed | null) => ComposerState
   initializeComposerForChat: (chatId: string, options?: { sourceState?: ComposerState | null }) => void
@@ -368,6 +402,20 @@ export const useChatPreferencesStore = create<ChatPreferencesState>()(
               ...chatModeToFlags(mode, state.providerDefaults[provider].autoPlan),
             },
           },
+        })),
+      // Both go through the shared patch merge, so the optimistic state here
+      // is exactly what the server will write and echo back.
+      setProviderModelDefault: (provider, model, modelOptions) =>
+        set((state) => ({
+          providerDefaults: mergeProviderDefaultsPatch(state.providerDefaults, {
+            [provider]: { modelDefaults: { [model]: modelOptions } },
+          } as ProviderDefaultsPatch),
+        })),
+      clearProviderModelDefault: (provider, model) =>
+        set((state) => ({
+          providerDefaults: mergeProviderDefaultsPatch(state.providerDefaults, {
+            [provider]: { modelDefaults: { [model]: null } },
+          } as ProviderDefaultsPatch),
         })),
       getComposerState: (chatId, seed) => cloneComposerState(getStoredComposerState(get(), chatId, seed)),
       initializeComposerForChat: (chatId, options) =>

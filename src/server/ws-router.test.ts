@@ -114,6 +114,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
         contextWindow: "1m",
         fastMode: false,
       },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     },
@@ -123,6 +124,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
         reasoningEffort: "high",
         fastMode: false,
       },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     },
@@ -131,6 +133,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
       modelOptions: {
         fastMode: false,
       },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     },
@@ -139,6 +142,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
       modelOptions: {
         reasoningEffort: "high",
       },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     },
@@ -147,6 +151,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
       modelOptions: {
         reasoningEffort: "medium",
       },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     },
