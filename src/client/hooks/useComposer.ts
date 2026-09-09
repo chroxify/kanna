@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react"
 import type { AgentProvider, ChatMode, ClaudeContextWindow, ProviderCatalogEntry } from "../../shared/types"
 import {
+  applyModelSelection,
   applyModelToComposerState,
   deriveComposerOptionControls,
   deriveComposerView,
@@ -134,10 +135,10 @@ export function useComposer(args: {
     // a chat whose session pinned a different harness).
     useChatPreferencesStore.getState().setComposerState(
       view.composerChatId,
-      applyModelToComposerState(view.effectiveState, modelId, view.providerConfig)
+      applyModelSelection(view.effectiveState, modelId, providerDefaults, view.providerConfig)
     )
     return true
-  }, [view])
+  }, [providerDefaults, view])
 
   const optionControls = useMemo(
     () => deriveComposerOptionControls(view.effectiveState, view.providerConfig),
