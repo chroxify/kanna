@@ -23,6 +23,7 @@ import type { AnalyticsReporter } from "./analytics"
 import { NoopAnalyticsReporter } from "./analytics"
 import { CodexAppServerManager } from "./codex-app-server"
 import { CursorCliManager } from "./cursor-cli"
+import { fetchGrokAccountUsage, GrokCliManager } from "./grok-cli"
 import { PiAgentManager, resolvePiConnection } from "./pi-agent"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import type { ClaudeRateLimitInfoRaw, ClaudeUsageRaw } from "./usage-limits"
@@ -35,6 +36,7 @@ import {
   scanClaudeSkills,
   scanCodexSkills,
   scanCursorSkills,
+  scanGrokSkills,
 } from "./harness-skills"
 import {
   buildKannaAgentCorrection,
@@ -46,12 +48,14 @@ import {
   applyClaudeSdkModels,
   applyCodexModels,
   applyCursorModels,
+  applyGrokModels,
   type ClaudeSdkModelInfo,
   cursorModelIdForOptions,
   getServerProviderCatalog,
   normalizeClaudeModelOptions,
   normalizeCodexModelOptions,
   normalizeCursorModelOptions,
+  normalizeGrokModelOptions,
   normalizePiModelOptions,
   normalizeServerModel,
   serviceTierFromModelOptions,
@@ -191,6 +195,7 @@ interface AgentCoordinatorArgs {
   analytics?: AnalyticsReporter
   codexManager?: CodexAppServerManager
   cursorManager?: CursorCliManager
+  grokManager?: GrokCliManager
   piManager?: PiAgentManager
   resolvePiConnection?: () => Promise<import("./pi-agent").PiConnection | null>
   generateTitle?: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
@@ -871,6 +876,7 @@ export class AgentCoordinator {
   private readonly analytics: AnalyticsReporter
   private readonly codexManager: CodexAppServerManager
   private readonly cursorManager: CursorCliManager
+  private readonly grokManager: GrokCliManager
   private readonly piManager: PiAgentManager
   private readonly resolvePiConnection: () => Promise<import("./pi-agent").PiConnection | null>
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
@@ -879,6 +885,7 @@ export class AgentCoordinator {
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
   private cursorModelCatalogApplied = false
+  private grokModelCatalogApplied = false
   private codexModelCatalogRefresh: Promise<void> | null = null
   readonly activeTurns = new Map<string, ActiveTurn>()
   readonly drainingStreams = new Map<string, { turn: HarnessTurn }>()
@@ -890,6 +897,7 @@ export class AgentCoordinator {
     this.analytics = args.analytics ?? NoopAnalyticsReporter
     this.codexManager = args.codexManager ?? new CodexAppServerManager()
     this.cursorManager = args.cursorManager ?? new CursorCliManager()
+    this.grokManager = args.grokManager ?? new GrokCliManager()
     this.piManager = args.piManager ?? new PiAgentManager()
     this.resolvePiConnection = args.resolvePiConnection ?? resolvePiConnection
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
@@ -941,6 +949,23 @@ export class AgentCoordinator {
   /** Read Codex account rate limits on demand (reuses a live app-server or probes). */
   async fetchCodexRateLimits() {
     return await this.codexManager.readAccountRateLimits(homedir())
+  }
+
+  async fetchGrokUsage() {
+    return await fetchGrokAccountUsage()
+  }
+
+  async refreshGrokModelCatalog() {
+    if (this.grokModelCatalogApplied) return
+    try {
+      const models = await this.grokManager.listModels()
+      this.grokModelCatalogApplied = true
+      if (applyGrokModels(models)) {
+        this.emitStateChange(undefined, { immediate: true })
+      }
+    } catch {
+      // grok missing or signed out — keep the static catalog.
+    }
   }
 
   getCodexManager() {
@@ -1081,6 +1106,17 @@ export class AgentCoordinator {
         effort: undefined,
         serviceTier: undefined,
         planMode: false,
+        autoPlan: false,
+      }
+    }
+
+    if (provider === "grok") {
+      const modelOptions = normalizeGrokModelOptions(options.modelOptions, options.effort)
+      return {
+        model: normalizeServerModel(provider, options.model),
+        effort: modelOptions.reasoningEffort,
+        serviceTier: undefined,
+        planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
         autoPlan: false,
       }
     }
@@ -1244,6 +1280,11 @@ export class AgentCoordinator {
       }
       case "cursor":
         return this.checkSessionArtifactFn("cursor", { cwd: args.cwd, sessionToken: args.sessionToken }) === "missing"
+      case "grok":
+        return this.checkSessionArtifactFn("grok", {
+          cwd: args.cwd,
+          sessionToken: args.pendingForkSessionToken ?? args.sessionToken,
+        }) === "missing"
       case "codex": {
         // No token → nothing to resume; a fork in progress must not be disturbed.
         if (!args.sessionToken || args.pendingForkSessionToken) return false
@@ -1478,6 +1519,22 @@ export class AgentCoordinator {
         content: cursorContent,
         model: args.model,
         sessionToken: chat.sessionToken,
+      })
+    } else if (args.provider === "grok") {
+      void this.refreshGrokModelCatalog()
+      let grokContent = buildPromptText(wireContent, args.attachments)
+      grokContent = appendSystemMessageBlock(
+        grokContent,
+        buildKannaAttributionSystemMessage(buildKannaAgentId("grok", args.model)),
+      )
+      turn = await this.grokManager.startTurn({
+        cwd: project.localPath,
+        content: grokContent,
+        model: args.model,
+        effort: args.effort,
+        planMode: args.planMode,
+        sessionToken: chat.pendingForkSessionToken ?? chat.sessionToken,
+        forkSession: Boolean(chat.pendingForkSessionToken),
       })
     } else if (args.provider === "pi") {
       // A missing connection or session boot failure surfaces as an error
@@ -1856,6 +1913,13 @@ export class AgentCoordinator {
         // Cursor has no enumeration protocol; the scan mirrors the CLI's own
         // skill discovery roots, and invocation is failsafe-only by design.
         return { provider: "cursor", skills: scanCursorSkills({ cwd }), origin: "filesystem" }
+      case "grok": {
+        const live = await this.grokManager.listSkills({ cwd })
+        if (live.length > 0) {
+          return { provider: "grok", skills: live, origin: "live" }
+        }
+        return { provider: "grok", skills: scanGrokSkills({ cwd }), origin: "filesystem" }
+      }
       case "pi": {
         const skills = await this.piManager.listSkills({ chatId: command.chatId, cwd })
         return { provider: "pi", skills, origin: "live" }

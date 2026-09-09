@@ -54,6 +54,7 @@ interface AppSettingsFile {
     claude?: ProviderPreferenceInput
     codex?: ProviderPreferenceInput
     cursor?: ProviderPreferenceInput
+    grok?: ProviderPreferenceInput
     pi?: ProviderPreferenceInput
   }
   newSidebarEnabled?: unknown
@@ -133,7 +134,7 @@ function normalizeSubmitWhileRunning(value: unknown): SubmitWhileRunning {
 }
 
 function normalizeDefaultProvider(value: unknown): DefaultProviderPreference {
-  return value === "claude" || value === "codex" || value === "cursor" || value === "pi" || value === "last_used"
+  return value === "claude" || value === "codex" || value === "cursor" || value === "grok" || value === "pi" || value === "last_used"
     ? value
     : "last_used"
 }
