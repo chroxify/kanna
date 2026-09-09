@@ -52,6 +52,7 @@ describe("migrateChatPreferencesState", () => {
       // The version-pinned id folds into the alias while keeping max effort.
       model: "opus",
       modelOptions: { reasoningEffort: "max", contextWindow: "1m", fastMode: false },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     })
@@ -89,30 +90,35 @@ describe("migrateChatPreferencesState", () => {
         claude: {
           model: "opus",
           modelOptions: { reasoningEffort: "low", contextWindow: "1m", fastMode: false },
+          modelDefaults: {},
           planMode: true,
           autoPlan: false,
         },
         codex: {
           model: "gpt-5.3-codex",
           modelOptions: { reasoningEffort: "minimal", fastMode: true },
+          modelDefaults: {},
           planMode: false,
           autoPlan: false,
         },
         cursor: {
           model: "composer-2.5",
           modelOptions: { fastMode: false },
+          modelDefaults: {},
           planMode: false,
           autoPlan: false,
         },
         grok: {
           model: "grok-4.6",
           modelOptions: { reasoningEffort: "high" },
+          modelDefaults: {},
           planMode: false,
           autoPlan: false,
         },
         pi: {
           model: "~anthropic/claude-fable-latest",
           modelOptions: { reasoningEffort: "medium" },
+          modelDefaults: {},
           planMode: false,
           autoPlan: false,
         },
@@ -179,6 +185,7 @@ describe("migrateChatPreferencesState", () => {
     expect(migrated.providerDefaults.codex).toEqual({
       model: "gpt-5.3-codex",
       modelOptions: { reasoningEffort: "low", fastMode: true },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     })
@@ -216,6 +223,7 @@ describe("migrateChatPreferencesState", () => {
     expect(migrated.providerDefaults.codex).toEqual({
       model: "gpt-5.3-codex-spark",
       modelOptions: { reasoningEffort: "low", fastMode: true },
+      modelDefaults: {},
       planMode: true,
       autoPlan: false,
     })
@@ -251,6 +259,7 @@ describe("migrateChatPreferencesState", () => {
     expect(migrated.providerDefaults.codex).toEqual({
       model: "gpt-5.6-terra",
       modelOptions: { reasoningEffort: "ultra", fastMode: true },
+      modelDefaults: {},
       planMode: true,
       autoPlan: false,
     })
@@ -262,6 +271,7 @@ describe("chat preference store", () => {
     expect(INITIAL_STATE.providerDefaults.codex).toEqual({
       model: "gpt-5.6-sol",
       modelOptions: { reasoningEffort: "medium", fastMode: false },
+      modelDefaults: {},
       planMode: false,
       autoPlan: false,
     })
@@ -619,6 +629,76 @@ describe("chat preference store", () => {
     useChatPreferencesStore.getState().setChatComposerModel("chat-a", "gpt-5.3-codex-spark")
     expect(useChatPreferencesStore.getState().getComposerState("chat-a", { provider: "codex", model: "gpt-5.5" }).model)
       .toBe("gpt-5.3-codex-spark")
+  })
+
+  test("seeds a chat from its own model's saved defaults", () => {
+    useChatPreferencesStore.setState({
+      ...INITIAL_STATE,
+      providerDefaults: {
+        ...INITIAL_STATE.providerDefaults,
+        claude: {
+          model: "sonnet",
+          modelOptions: { reasoningEffort: "high", contextWindow: "1m", fastMode: false },
+          modelDefaults: { opus: { reasoningEffort: "medium", contextWindow: "1m", fastMode: false } },
+          planMode: false,
+          autoPlan: false,
+        },
+      },
+    })
+
+    // The chat last ran on Opus, which is pinned to medium.
+    expect(useChatPreferencesStore.getState().getComposerState("chat-a", { provider: "claude", model: "opus" }))
+      .toMatchObject({ model: "opus", modelOptions: { reasoningEffort: "medium" } })
+    // Haiku has no entry, so it still follows the provider-wide defaults.
+    expect(useChatPreferencesStore.getState().getComposerState("chat-b", { provider: "claude", model: "haiku" }))
+      .toMatchObject({ model: "haiku", modelOptions: { reasoningEffort: "high" } })
+  })
+
+  test("new chats open the default model on its saved defaults", () => {
+    useChatPreferencesStore.setState({
+      ...INITIAL_STATE,
+      defaultProvider: "claude",
+      providerDefaults: {
+        ...INITIAL_STATE.providerDefaults,
+        claude: {
+          model: "opus",
+          modelOptions: { reasoningEffort: "high", contextWindow: "1m", fastMode: false },
+          modelDefaults: { opus: { reasoningEffort: "medium", contextWindow: "1m", fastMode: false } },
+          planMode: false,
+          autoPlan: false,
+        },
+      },
+    })
+
+    useChatPreferencesStore.getState().initializeComposerForChat("chat-new")
+
+    expect(useChatPreferencesStore.getState().getComposerState("chat-new"))
+      .toMatchObject({ model: "opus", modelOptions: { reasoningEffort: "medium" } })
+  })
+
+  test("setProviderModelDefault pins one model and clearProviderModelDefault releases it", () => {
+    useChatPreferencesStore.setState({ ...INITIAL_STATE })
+    const store = useChatPreferencesStore.getState()
+
+    store.setProviderModelDefault("claude", "opus", { reasoningEffort: "medium" })
+    const pinned = useChatPreferencesStore.getState().providerDefaults.claude
+    // Unspecified options come from the provider defaults, not from nothing.
+    expect(pinned.modelDefaults.opus).toEqual({
+      ...pinned.modelOptions,
+      reasoningEffort: "medium",
+    })
+
+    useChatPreferencesStore.getState().clearProviderModelDefault("claude", "opus")
+    expect(useChatPreferencesStore.getState().providerDefaults.claude.modelDefaults).toEqual({})
+  })
+
+  test("per-model defaults do not leak into a chat's composer state", () => {
+    useChatPreferencesStore.setState({ ...INITIAL_STATE })
+    useChatPreferencesStore.getState().setProviderModelDefault("claude", "opus", { reasoningEffort: "medium" })
+    useChatPreferencesStore.getState().resetChatComposerFromProvider("chat-a", "claude")
+
+    expect(useChatPreferencesStore.getState().getComposerState("chat-a"))
+      .not.toHaveProperty("modelDefaults")
   })
 
   test("syncProviderDefaults does not replace a changed new-chat state", () => {

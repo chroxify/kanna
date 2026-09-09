@@ -11,9 +11,11 @@ import {
   type GrokReasoningEffort,
   type LlmProviderKind,
 } from "../../../shared/types"
+import { getModelDefaults, resolveProviderModelOptions } from "../../../shared/provider-preferences"
 import { AuthCard } from "../../components/auth/AuthCard"
 import { ChatPreferenceControls } from "../../components/chat-ui/ChatPreferenceControls"
 import { DefaultModelsDialog } from "../../components/DefaultModelsDialog"
+import { ModelDefaultsDialog } from "../../components/ModelDefaultsDialog"
 import { Button } from "../../components/ui/button"
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogTitle } from "../../components/ui/dialog"
 import { Input } from "../../components/ui/input"
@@ -75,6 +77,8 @@ export function ProvidersSection({
   const setProviderDefaultModel = useChatPreferencesStore((store) => store.setProviderDefaultModel)
   const setProviderDefaultModelOptions = useChatPreferencesStore((store) => store.setProviderDefaultModelOptions)
   const setProviderDefaultMode = useChatPreferencesStore((store) => store.setProviderDefaultMode)
+  const setProviderModelDefault = useChatPreferencesStore((store) => store.setProviderModelDefault)
+  const clearProviderModelDefault = useChatPreferencesStore((store) => store.clearProviderModelDefault)
 
   const [providersError, setProvidersError] = useState<string | null>(null)
   const [llmProviderDraft, setLlmProviderDraft] = useState({
@@ -88,6 +92,7 @@ export function ProvidersSection({
   const [llmValidationError, setLlmValidationError] = useState<unknown | null>(null)
   const [llmValidationDialogOpen, setLlmValidationDialogOpen] = useState(false)
   const [defaultModelsDialogOpen, setDefaultModelsDialogOpen] = useState(false)
+  const [modelDefaultsDialogOpen, setModelDefaultsDialogOpen] = useState(false)
 
   // The section only mounts while its tab is selected and the socket is
   // connected, so a plain mount effect matches the old page-gated read.
@@ -128,8 +133,39 @@ export function ProvidersSection({
     provider: AgentProvider,
     modelOptions: Partial<typeof providerDefaults[typeof provider]["modelOptions"]>
   ) {
+    const preference = providerDefaults[provider]
+    // These rows show the options the default model actually starts with, so
+    // when that model has per-model defaults pinned the edit belongs to them —
+    // writing the provider-wide fallback instead would look like a no-op.
+    if (getModelDefaults(preference)[preference.model]) {
+      handleProviderModelDefaultChange(provider, preference.model, modelOptions)
+      return
+    }
+
     setProviderDefaultModelOptions(provider, modelOptions)
     void handleWriteAppSettings({ providerDefaults: { [provider]: { modelOptions } } }).catch((error) => {
+      setProvidersError(error instanceof Error ? error.message : "Unable to save provider settings.")
+    })
+  }
+
+  function handleProviderModelDefaultChange(
+    provider: AgentProvider,
+    model: string,
+    modelOptions: Partial<typeof providerDefaults[typeof provider]["modelOptions"]>
+  ) {
+    setProviderModelDefault(provider, model, modelOptions)
+    void handleWriteAppSettings({
+      providerDefaults: { [provider]: { modelDefaults: { [model]: modelOptions } } },
+    }).catch((error) => {
+      setProvidersError(error instanceof Error ? error.message : "Unable to save provider settings.")
+    })
+  }
+
+  function handleProviderModelDefaultClear(provider: AgentProvider, model: string) {
+    clearProviderModelDefault(provider, model)
+    void handleWriteAppSettings({
+      providerDefaults: { [provider]: { modelDefaults: { [model]: null } } },
+    }).catch((error) => {
       setProvidersError(error instanceof Error ? error.message : "Unable to save provider settings.")
     })
   }
@@ -175,6 +211,10 @@ export function ProvidersSection({
   }
 
   const selectedDefaultModelCount = (llmProvider?.faveModels ?? []).length
+  // Tolerant read: a settings snapshot from a server that predates per-model
+  // defaults has no map at all, and this renders before the first ack.
+  const pinnedModelDefaultsCount = Object.values(providerDefaults)
+    .reduce((total, preference) => total + Object.keys(getModelDefaults(preference)).length, 0)
   const llmValidationErrorText = llmValidationError ? JSON.stringify(llmValidationError, null, 2) : ""
   const llmValidationDescription = (
     <>
@@ -271,7 +311,7 @@ export function ProvidersSection({
               showProviderPicker={false}
               providerLocked
               model={providerDefaults.claude.model}
-              modelOptions={providerDefaults.claude.modelOptions}
+              modelOptions={resolveProviderModelOptions("claude", providerDefaults.claude, providerDefaults.claude.model)}
               onModelChange={(_, model) => {
                 handleProviderDefaultModelChange("claude", model)
               }}
@@ -298,7 +338,7 @@ export function ProvidersSection({
               showProviderPicker={false}
               providerLocked
               model={providerDefaults.codex.model}
-              modelOptions={providerDefaults.codex.modelOptions}
+              modelOptions={resolveProviderModelOptions("codex", providerDefaults.codex, providerDefaults.codex.model)}
               onModelChange={(_, model) => {
                 handleProviderDefaultModelChange("codex", model)
               }}
@@ -323,7 +363,7 @@ export function ProvidersSection({
               showProviderPicker={false}
               providerLocked
               model={providerDefaults.cursor.model}
-              modelOptions={providerDefaults.cursor.modelOptions}
+              modelOptions={resolveProviderModelOptions("cursor", providerDefaults.cursor, providerDefaults.cursor.model)}
               onModelChange={(_, model) => {
                 handleProviderDefaultModelChange("cursor", model)
               }}
@@ -371,7 +411,7 @@ export function ProvidersSection({
               showProviderPicker={false}
               providerLocked
               model={providerDefaults.pi.model}
-              modelOptions={providerDefaults.pi.modelOptions}
+              modelOptions={resolveProviderModelOptions("pi", providerDefaults.pi, providerDefaults.pi.model)}
               onModelChange={(_, model) => {
                 handleProviderDefaultModelChange("pi", model)
               }}
@@ -454,6 +494,15 @@ export function ProvidersSection({
               Edit models
             </SettingsHeaderButton>
           </SettingsRow>
+
+          <SettingsRow
+            def={SETTINGS_ROWS.perModelDefaults}
+            description={`${SETTINGS_ROWS.perModelDefaults.description} ${pinnedModelDefaultsCount === 0 ? "None" : pinnedModelDefaultsCount} set.`}
+          >
+            <SettingsHeaderButton onClick={() => setModelDefaultsDialogOpen(true)}>
+              Edit defaults
+            </SettingsHeaderButton>
+          </SettingsRow>
         </SettingsGroup>
       </SettingsGroups>
       <Dialog open={llmValidationDialogOpen} onOpenChange={setLlmValidationDialogOpen}>
@@ -471,6 +520,14 @@ export function ProvidersSection({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ModelDefaultsDialog
+        open={modelDefaultsDialogOpen}
+        onOpenChange={setModelDefaultsDialogOpen}
+        availableProviders={state.availableProviders}
+        providerDefaults={providerDefaults}
+        onSetModelDefault={handleProviderModelDefaultChange}
+        onClearModelDefault={handleProviderModelDefaultClear}
+      />
       <DefaultModelsDialog
         open={defaultModelsDialogOpen}
         onOpenChange={setDefaultModelsDialogOpen}
