@@ -34,6 +34,28 @@ interface ClaudeExtraUsageRaw {
   decimal_places?: number | null
 }
 
+/**
+ * One entry of the `limits` array. This is the only place the response names
+ * the model a window belongs to: the keyed `rate_limits` entries for scoped
+ * windows are either null (`seven_day_opus`) or rotating codenames
+ * (`nimbus_quill`, `juniper_tide`) with no model attached, so a "Weekly ·
+ * Fable" bar cannot be built from the keyed windows at all.
+ */
+interface ClaudeUsageLimitEntryRaw {
+  /** "session" | "weekly_all" | "weekly_scoped" | future kinds. */
+  kind?: string | null
+  /** "session" | "weekly" — the family the kind belongs to. */
+  group?: string | null
+  percent?: number | null
+  severity?: string | null
+  resets_at?: string | null
+  scope?: {
+    model?: { id?: string | null; display_name?: string | null } | null
+    surface?: string | null
+  } | null
+  is_active?: boolean
+}
+
 export interface ClaudeUsageRaw {
   subscription_type?: string | null
   rate_limits_available?: boolean
@@ -94,6 +116,54 @@ function prettifyKey(key: string): string {
 
 function claudeWindowLabel(key: string): string {
   return CLAUDE_WINDOW_LABELS[key] ?? prettifyKey(key)
+}
+
+/** `limits` kinds that restate a keyed window, mapped to that window's id. */
+const CLAUDE_LIMIT_KIND_WINDOW_IDS: Record<string, string> = {
+  session: "five_hour",
+  weekly_all: "seven_day",
+}
+
+/** What a scoped window is scoped *to*: a model ("Fable") or a surface. */
+function claudeScopeLabel(scope: ClaudeUsageLimitEntryRaw["scope"]): string | null {
+  const model = typeof scope?.model?.display_name === "string" ? scope.model.display_name.trim() : ""
+  if (model) return model
+  const surface = typeof scope?.surface === "string" ? scope.surface.trim() : ""
+  return surface ? prettifyKey(surface) : null
+}
+
+function slugify(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
+}
+
+/**
+ * Turn one `limits` entry into a window. Entries that restate a keyed window
+ * reuse its id so the two can be de-duplicated; scoped entries get an id built
+ * from what they are scoped to, which stays stable across the codename
+ * rotation in the keyed entries.
+ */
+function claudeLimitWindow(
+  entry: ClaudeUsageLimitEntryRaw,
+  now: string,
+  source: UsageLimitSource,
+): UsageLimitWindow | null {
+  const kind = typeof entry.kind === "string" ? entry.kind.trim() : ""
+  if (!kind) return null
+  // A scoped entry with nothing to scope it to can't be told apart from its
+  // siblings, so drop it rather than render an unexplained bar.
+  const scopeLabel = claudeScopeLabel(entry.scope)
+  const keyedId = CLAUDE_LIMIT_KIND_WINDOW_IDS[kind]
+  if (!keyedId && !scopeLabel) return null
+
+  const groupLabel = entry.group === "weekly" ? "Weekly" : prettifyKey(entry.group ?? kind)
+  return {
+    id: keyedId ?? `${kind}:${slugify(scopeLabel!)}`,
+    label: keyedId ? claudeWindowLabel(keyedId) : `${groupLabel} · ${scopeLabel}`,
+    usedPercent: clampPercent(entry.percent),
+    resetsAt: entry.resets_at ?? null,
+    recordedAt: now,
+    source,
+  }
 }
 
 function codexWindowLabel(windowDurationMins: number | null | undefined, suffix: string): string {
@@ -163,7 +233,7 @@ export function normalizeClaudeUsage(
     }
   }
 
-  const windows: UsageLimitWindow[] = []
+  const keyedWindows: UsageLimitWindow[] = []
   let credits: UsageLimitCredits | null = null
 
   for (const [key, value] of Object.entries(raw.rate_limits)) {
@@ -192,7 +262,7 @@ export function normalizeClaudeUsage(
     if (!value || typeof value !== "object" || Array.isArray(value)) continue
     if (!("utilization" in value) && !("resets_at" in value)) continue
     const window = value as ClaudeUsageWindowRaw
-    windows.push({
+    keyedWindows.push({
       id: key,
       label: claudeWindowLabel(key),
       usedPercent: clampPercent(window.utilization),
@@ -200,6 +270,29 @@ export function normalizeClaudeUsage(
       recordedAt: now,
       source,
     })
+  }
+
+  // The `limits` array, when present, is the authoritative view: it is ordered
+  // for display and is the only source that names model-scoped windows. Keyed
+  // windows it already covers are dropped as duplicates, and unrecognized keyed
+  // leftovers are dropped as codename noise (`nimbus_quill`) — a keyed window we
+  // have a real label for is still kept, so a populated seven_day_opus survives.
+  const limitsRaw = (raw.rate_limits as { limits?: unknown }).limits
+  const limitWindows = Array.isArray(limitsRaw)
+    ? limitsRaw
+      .map((entry) => claudeLimitWindow((entry ?? {}) as ClaudeUsageLimitEntryRaw, now, source))
+      .filter((window): window is UsageLimitWindow => window !== null)
+    : []
+
+  let windows: UsageLimitWindow[]
+  if (limitWindows.length > 0) {
+    const seen = new Set(limitWindows.map((window) => window.id))
+    windows = [
+      ...limitWindows,
+      ...keyedWindows.filter((window) => !seen.has(window.id) && window.id in CLAUDE_WINDOW_LABELS),
+    ]
+  } else {
+    windows = keyedWindows
   }
 
   const snapshot: ProviderUsageSnapshot = {
@@ -247,6 +340,14 @@ export function mergeClaudeRateLimitPush(
     return base
   }
   const id = CLAUDE_PUSH_WINDOW_IDS[type] ?? type
+  // A push naming a window we can't label — the rotating codenames the API now
+  // uses for scoped windows — would add a bar the full read deliberately drops,
+  // so the display would flip between a turn and the next refresh. Ignoring it
+  // only costs freshness: the refresh reports that window properly, by model,
+  // from the `limits` array.
+  if (!(id in CLAUDE_WINDOW_LABELS) && !base.windows.some((window) => window.id === id)) {
+    return base
+  }
   const usedPercent = info.utilization != null && Number.isFinite(info.utilization)
     ? clampPercent(info.utilization * 100)
     : null
