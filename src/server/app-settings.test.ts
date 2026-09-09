@@ -53,6 +53,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
           contextWindow: "1m",
           fastMode: false,
         },
+        modelDefaults: {},
         planMode: false,
         autoPlan: false,
       },
@@ -62,6 +63,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
           reasoningEffort: "medium",
           fastMode: false,
         },
+        modelDefaults: {},
         planMode: false,
         autoPlan: false,
       },
@@ -70,6 +72,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
         modelOptions: {
           fastMode: false,
         },
+        modelDefaults: {},
         planMode: false,
         autoPlan: false,
       },
@@ -78,6 +81,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
         modelOptions: {
           reasoningEffort: "high",
         },
+        modelDefaults: {},
         planMode: false,
         autoPlan: false,
       },
@@ -86,6 +90,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
         modelOptions: {
           reasoningEffort: "medium",
         },
+        modelDefaults: {},
         planMode: false,
         autoPlan: false,
       },
@@ -288,6 +293,41 @@ describe("AppSettingsManager", () => {
     expect(nextPayload.analyticsUserId).toBe(initialPayload.analyticsUserId)
     expect(nextPayload.theme).toBe("dark")
     expect(nextPayload.chatSoundId).toBe("glass")
+
+    manager.dispose()
+  })
+
+  test("per-model defaults survive a writePatch round-trip and reload", async () => {
+    const filePath = await createTempFilePath()
+    const manager = new AppSettingsManager(filePath)
+    await manager.initialize()
+
+    const pinned = await manager.writePatch({
+      providerDefaults: {
+        claude: { modelDefaults: { opus: { reasoningEffort: "medium" } } },
+      },
+    })
+    // Options the patch left out come from the provider-wide defaults.
+    expect(pinned.providerDefaults.claude.modelDefaults.opus).toEqual({
+      ...pinned.providerDefaults.claude.modelOptions,
+      reasoningEffort: "medium",
+    })
+
+    const payload = JSON.parse(await readFile(filePath, "utf8")) as {
+      providerDefaults: { claude: { modelDefaults: Record<string, { reasoningEffort: string }> } }
+    }
+    expect(payload.providerDefaults.claude.modelDefaults.opus?.reasoningEffort).toBe("medium")
+
+    // A second manager reads the same file back.
+    const reopened = new AppSettingsManager(filePath)
+    await reopened.initialize()
+    expect(reopened.getSnapshot().providerDefaults.claude.modelDefaults.opus?.reasoningEffort).toBe("medium")
+    reopened.dispose()
+
+    const cleared = await manager.writePatch({
+      providerDefaults: { claude: { modelDefaults: { opus: null } } },
+    })
+    expect(cleared.providerDefaults.claude.modelDefaults).toEqual({})
 
     manager.dispose()
   })

@@ -176,6 +176,12 @@ export const SETTINGS_ROWS = defineRows({
     description: "Saved defaults when using Pi (connects through the Model Registry).",
     keywords: ["model"],
   },
+  perModelDefaults: {
+    sectionId: "providers",
+    title: "Per-Model Defaults",
+    description: "Options a model always starts with — Opus at medium, Fable at high. Models left untouched follow their harness defaults above.",
+    keywords: ["model", "reasoning", "effort", "thinking", "context window", "fast mode", "per model"],
+  },
   modelRegistry: {
     sectionId: "providers",
     title: "Model Registry",

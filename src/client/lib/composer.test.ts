@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { PROVIDERS, supportsClaudeMaxReasoningEffort } from "../../shared/types"
 import { createDefaultProviderDefaults, type ComposerState } from "../stores/chatPreferencesStore"
 import {
+  applyModelSelection,
   applyModelToComposerState,
   deriveComposerOptionControls,
   deriveComposerView,
@@ -149,6 +150,60 @@ describe("applyModelToComposerState", () => {
     expect(next.model).toBe("gpt-5.6-luna")
     // Effort is clamped/normalized for the selected model rather than kept blindly.
     expect(typeof (next.modelOptions as { reasoningEffort: string }).reasoningEffort).toBe("string")
+  })
+})
+
+describe("applyModelSelection", () => {
+  function defaultsWithClaudeModelDefaults(modelDefaults: Record<string, unknown>) {
+    return {
+      ...providerDefaults,
+      claude: { ...providerDefaults.claude, modelDefaults },
+    } as typeof providerDefaults
+  }
+
+  test("a model with saved defaults switches to them", () => {
+    const state = claudeState({ model: "sonnet", modelOptions: { reasoningEffort: "low", contextWindow: "200k", fastMode: false } })
+    const defaults = defaultsWithClaudeModelDefaults({
+      opus: { reasoningEffort: "medium", contextWindow: "1m", fastMode: false },
+    })
+
+    const next = applyModelSelection(state, "opus", defaults)
+
+    expect(next.model).toBe("opus")
+    expect(next.modelOptions).toMatchObject({ reasoningEffort: "medium", contextWindow: "1m" })
+  })
+
+  test("a model without saved defaults keeps the current options", () => {
+    const state = claudeState({ model: "sonnet", modelOptions: { reasoningEffort: "low", contextWindow: "200k", fastMode: false } })
+    const defaults = defaultsWithClaudeModelDefaults({
+      opus: { reasoningEffort: "medium", contextWindow: "1m", fastMode: false },
+    })
+
+    const next = applyModelSelection(state, "haiku", defaults)
+
+    expect(next.model).toBe("haiku")
+    expect(next.modelOptions).toMatchObject({ reasoningEffort: "low" })
+  })
+
+  test("saved defaults are still normalized for the model they land on", () => {
+    const state = claudeState({ model: "opus", modelOptions: { reasoningEffort: "max", contextWindow: "1m", fastMode: true } })
+    // Sonnet has no fast mode; a stale saved value must not survive the switch.
+    const defaults = defaultsWithClaudeModelDefaults({
+      sonnet: { reasoningEffort: "high", contextWindow: "200k", fastMode: true },
+    })
+
+    const next = applyModelSelection(state, "sonnet", defaults)
+
+    expect(next.modelOptions).toMatchObject({ reasoningEffort: "high", contextWindow: "200k", fastMode: false })
+  })
+
+  test("leaves the input state untouched", () => {
+    const state = claudeState({ model: "sonnet" })
+    const defaults = defaultsWithClaudeModelDefaults({ opus: { reasoningEffort: "medium", contextWindow: "1m", fastMode: false } })
+
+    applyModelSelection(state, "opus", defaults)
+
+    expect(state.model).toBe("sonnet")
   })
 })
 

@@ -125,6 +125,27 @@ export type ModelOptionChange =
   | { type: "fastMode"; fastMode: boolean }
 
 /**
+ * The model-options patch a control change represents. The effort variants
+ * differ only in which provider's effort type they carry, so callers that
+ * store options generically (the per-model defaults editor) can skip the
+ * per-provider switch.
+ */
+export function modelOptionChangePatch(change: ModelOptionChange): {
+  reasoningEffort?: string
+  contextWindow?: ClaudeContextWindow
+  fastMode?: boolean
+} {
+  switch (change.type) {
+    case "contextWindow":
+      return { contextWindow: change.contextWindow }
+    case "fastMode":
+      return { fastMode: change.fastMode }
+    default:
+      return { reasoningEffort: change.effort }
+  }
+}
+
+/**
  * Model picker body with an optional filter box. The box is shown only for long
  * lists (e.g. the runtime-discovered Cursor catalog) so short provider lists
  * stay a plain menu. Rendered inside InputPopover's flush `divide-y` list.
@@ -194,6 +215,11 @@ interface ChatPreferenceControlsProps {
   availableProviders: ProviderCatalogEntry[]
   selectedProvider: AgentProvider
   showProviderPicker?: boolean
+  /**
+   * Hides the model picker, leaving only the option controls. Used by the
+   * per-model defaults editor, where the model is the row itself.
+   */
+  showModelPicker?: boolean
   providerLocked?: boolean
   /** A harness switch is staged for this chat and applies on the next send. */
   providerSwitchPending?: boolean
@@ -220,6 +246,7 @@ export function ChatPreferenceControls({
   availableProviders,
   selectedProvider,
   showProviderPicker = true,
+  showModelPicker = true,
   providerLocked = false,
   providerSwitchPending = false,
   model,
@@ -311,6 +338,7 @@ export function ChatPreferenceControls({
         </InputPopover>
       ) : null}
 
+      {showModelPicker ? (
       <InputPopover
         trigger={(
           <>
@@ -351,6 +379,7 @@ export function ChatPreferenceControls({
           />
         )}
       </InputPopover>
+      ) : null}
 
       {controls.reasoning ? (
         <InputPopover
