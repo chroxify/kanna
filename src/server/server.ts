@@ -34,6 +34,7 @@ import { applyPiFaveModels } from "./provider-catalog"
 import { createProcessAuthDeps, ProviderAuthManager } from "./provider-auth"
 import { fetchLatestPackageVersion } from "./cli-runtime"
 import { getMachineDisplayName } from "./machine-name"
+import { PortTunnelManager } from "./port-tunnels"
 import { TerminalManager } from "./terminal-manager"
 import { UpdateManager } from "./update-manager"
 import type { UpdateInstallAttemptResult } from "./cli-runtime"
@@ -203,6 +204,9 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     void turnFiles.endTurn(chatId).finally(() => worktreeProbe.refreshForChat(chatId))
   }
   const terminals = new TerminalManager()
+  const portTunnels = new PortTunnelManager({
+    log: (message) => console.log(`${LOG_PREFIX} ${message}`),
+  })
   const keybindings = new KeybindingsManager()
   // Dev-box UI flag: the real thing is `kanna --cloud`; KANNA_DEVBOX_UI=1 is
   // the dev-mode override (`bun run dev:cloud`) so the UI is developable
@@ -281,6 +285,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     worktreeProbe,
     agent,
     terminals,
+    portTunnels,
     keybindings,
     appSettings,
     analytics,
@@ -674,6 +679,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     appSettings.dispose()
     keybindings.dispose()
     terminals.closeAll()
+    portTunnels.stopAll()
     await store.compact()
     server.stop(true)
   }

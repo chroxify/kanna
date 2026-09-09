@@ -13,6 +13,7 @@ import { EventStore } from "./event-store"
 import { openExternal } from "./external-open"
 import { KeybindingsManager } from "./keybindings"
 import { killLocalHttpServer, listLocalHttpServers } from "./local-http-servers"
+import type { PortTunnelManager } from "./port-tunnels"
 import { cloneRepository, createDirectory, ensureProjectDirectory, initializeProjectDirectory, listDirectory, resolveClonePath, resolveLocalPath } from "./paths"
 import { listRecentGitHubRepos } from "./github"
 import { SERVER_PROVIDERS, applyPiFaveModels } from "./provider-catalog"
@@ -80,6 +81,7 @@ interface CreateWsRouterArgs {
   worktreeProbe: Pick<WorktreeProbe, "getStates" | "getRepoLabels" | "getProjectsWithoutRepo">
   agent: AgentCoordinator
   terminals: TerminalManager
+  portTunnels?: Pick<PortTunnelManager, "expose" | "unexpose" | "getPublicUrl">
   keybindings: KeybindingsManager
   appSettings: Pick<AppSettingsManager, "getSnapshot" | "write" | "writePatch" | "onChange">
   analytics?: AnalyticsReporter
@@ -192,6 +194,7 @@ export function createWsRouter({
   worktreeProbe,
   agent,
   terminals,
+  portTunnels,
   keybindings,
   appSettings,
   analytics,
@@ -1044,15 +1047,34 @@ export function createWsRouter({
         }
         case "browser.listLocalHttpServers": {
           const project = command.projectId ? store.getProject(command.projectId) : null
-          const result = await listLocalHttpServers({
+          const servers = await listLocalHttpServers({
             projectPath: project?.localPath,
             projectTerminalRootPids: project ? terminals.getRootPidsByCwd(project.localPath) : [],
+          })
+          // The scan result is cached for 30 s; the tunnel URL is stamped on
+          // afterwards so an expose shows up on the next poll, not the next scan.
+          const result = servers.map((server) => {
+            const publicUrl = portTunnels?.getPublicUrl(server.port)
+            return publicUrl ? { ...server, publicUrl } : server
           })
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
           return
         }
         case "browser.killLocalHttpServer": {
           const result = await killLocalHttpServer(command.port)
+          portTunnels?.unexpose(command.port)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "browser.exposeLocalHttpServer": {
+          if (!portTunnels) throw new Error("Port tunnels are not available.")
+          const result = await portTunnels.expose(command.port)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "browser.unexposeLocalHttpServer": {
+          if (!portTunnels) throw new Error("Port tunnels are not available.")
+          const result = portTunnels.unexpose(command.port)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
           return
         }
