@@ -1863,6 +1863,84 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("enqueue on an idle chat starts the turn instead of queueing into the void", async () => {
+    // The client enqueues whenever it believes a turn is in flight, which
+    // includes the window between a turn ending and that snapshot arriving.
+    // Nothing drains the queue except the end of a turn, so without this the
+    // message would sit there and the send would look like it did nothing.
+    const events = new AsyncEventQueue<any>()
+    const prompts: string[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          prompts.push(content)
+        },
+      }),
+    })
+
+    await coordinator.enqueue({
+      type: "message.enqueue",
+      chatId: "chat-1",
+      content: "start me",
+    })
+
+    expect(prompts).toEqual(["start me"])
+    expect(store.getQueuedMessages()).toEqual([])
+
+    events.close()
+  })
+
+  test("enqueue while a turn is running still queues", async () => {
+    const events = new AsyncEventQueue<any>()
+    const prompts: string[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          prompts.push(content)
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "first prompt",
+      model: "claude-opus-4-1",
+    })
+    await coordinator.enqueue({
+      type: "message.enqueue",
+      chatId: "chat-1",
+      content: "later",
+    })
+
+    // Still one prompt in flight; the second waits its turn.
+    expect(prompts).toEqual(["first prompt"])
+    expect(store.getQueuedMessages()).toHaveLength(1)
+
+    events.close()
+  })
+
   test("enqueue with steer is not an error when the queue drained first", async () => {
     // The race the flag exists for: the turn ends while the message is being
     // queued, the drain starts it, and steer() finds nothing to steer. The

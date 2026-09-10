@@ -1814,6 +1814,14 @@ export class AgentCoordinator {
           && this.activeTurns.has(command.chatId)
         if (!drained) throw error
       }
+    } else {
+      // The queue is drained at the end of a turn, so a message queued while
+      // nothing is running would sit there untouched — the send looks like it
+      // did nothing until a later send starts a turn and sweeps it up. Clients
+      // enqueue whenever they believe a turn is in flight, which includes the
+      // window between a turn ending and that snapshot reaching them, so the
+      // decision can't be theirs alone. No-ops when a turn really is running.
+      await this.maybeStartNextQueuedMessage(command.chatId)
     }
     return { queuedMessageId: queuedMessage.id }
   }
