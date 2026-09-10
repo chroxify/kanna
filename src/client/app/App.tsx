@@ -15,7 +15,8 @@ import { getSetupLaunchAction, useProviderAuthStore } from "../stores/providerAu
 import { SetupWizard } from "../components/auth/SetupWizard"
 import type { ChatPreview, ChatTouchedFilesResult, ProviderAuthSnapshot } from "../../shared/types"
 import { playChatNotificationSound, shouldPlayChatSound } from "../lib/chatSounds"
-import { getBrowserWindowTitle, getChatSoundBurstCount } from "./chatNotifications"
+import { getBrowserPageStatus, getBrowserWindowTitle, getChatSoundBurstCount } from "./chatNotifications"
+
 import { KannaSidebar } from "./KannaSidebar"
 import { ChatPage } from "./ChatPage"
 import { LocalProjectsPage } from "./LocalProjectsPage"
@@ -24,7 +25,19 @@ import { SettingsPage } from "./SettingsPage"
 import { TerminalPage } from "./TerminalPage"
 import { useKannaState } from "./useKannaState"
 import { useSidebarStore } from "../stores/sidebarStore"
+import { useShallow } from "zustand/react/shallow"
 import type { AppSettingsSnapshot } from "../../shared/types"
+
+/** Upserts `<meta name=… content=…>` in the document head. */
+function setMetaTag(name: string, content: string) {
+  let tag = document.head.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)
+  if (!tag) {
+    tag = document.createElement("meta")
+    tag.name = name
+    document.head.appendChild(tag)
+  }
+  if (tag.content !== content) tag.content = content
+}
 
 const AUTH_STATUS_RETRY_DELAY_MS = 500
 
@@ -352,6 +365,20 @@ function KannaLayout() {
   useLayoutEffect(() => {
     document.title = browserTitle
   }, [browserTitle, location.key])
+
+  // Published next to the title for hosts that can show more than a title —
+  // Floaty draws a dot on the tab from these. Meta tags rather than anything
+  // host-specific, so any wrapper can read them without knowing Kanna.
+  // useShallow: the selector builds a fresh object each call, and zustand v5
+  // treats a new reference as a change — without it React loops (error #185).
+  const pageStatus = useSidebarStore(useShallow((store) => getBrowserPageStatus({
+    sidebarData: store.data,
+    activeChatId: state.activeChatId,
+  })))
+  useLayoutEffect(() => {
+    setMetaTag("floaty:status", pageStatus.status)
+    setMetaTag("floaty:badge", String(pageStatus.badge))
+  }, [pageStatus.status, pageStatus.badge])
 
   useEffect(() => {
     function handlePageShow() {
