@@ -27,6 +27,9 @@ import {
   type ProviderModelOptionsInput,
   type ProviderPreferenceInput,
 } from "../../shared/provider-preferences"
+import { resolveAvailableComposerTarget } from "../../shared/usage-availability"
+import { useComposerAvailabilityStore } from "./composerAvailabilityStore"
+import { getUnauthenticatedHarnesses, useProviderAuthStore } from "./providerAuthStore"
 import { findSidebarChat } from "./sidebarStore"
 
 export type { ChatProviderPreferences, DefaultProviderPreference, ProviderPreference }
@@ -191,25 +194,78 @@ function normalizeChatStates(
   )
 }
 
+/**
+ * Steer a new chat away from a harness or model whose rate limit is spent.
+ *
+ * Defaults say what you want; limits say what will actually run. A spent
+ * model-scoped window (Claude's "Weekly · Fable") moves to the next model on
+ * the same harness, keeping the mode you'd have started in; a spent
+ * harness-wide window (the 5-hour) moves to the next harness, which starts
+ * from that harness's own defaults. Applied only where a new chat is
+ * materialized, so it never disturbs a chat that has already run and never
+ * rewrites the saved defaults.
+ */
+function withUsageFallback(
+  state: ComposerState,
+  providerDefaults: ChatProviderPreferences
+): ComposerState {
+  const { usage, providers } = useComposerAvailabilityStore.getState()
+  // No catalog synced yet (cold start) means no basis to redirect on.
+  if (providers.length === 0) return state
+
+  const target = resolveAvailableComposerTarget({
+    provider: state.provider,
+    model: state.model,
+    providers,
+    usage,
+    unavailableProviders: getUnauthenticatedHarnesses(useProviderAuthStore.getState().snapshot),
+  })
+  if (target.redirectedBy === null) return state
+
+  logChatPreferences("usage fallback", {
+    from: target.requested,
+    to: { provider: target.provider, model: target.model },
+    reason: target.redirectedBy,
+  })
+
+  if (target.provider === state.provider) {
+    return composerStateForProvider(state.provider, {
+      ...state,
+      model: target.model,
+      modelOptions: resolveProviderModelOptions(
+        state.provider,
+        providerDefaults[state.provider],
+        target.model
+      ) as ProviderModelOptionsInput,
+    })
+  }
+
+  return composerFromProviderDefaults(target.provider, providerDefaults, target.model)
+}
+
 function createComposerStateForNewChat(args: {
   defaultProvider: DefaultProviderPreference
   providerDefaults: ChatProviderPreferences
   sourceState?: ComposerState | null
   legacyComposerState?: ComposerState | null
 }): ComposerState {
-  if (args.defaultProvider === "last_used") {
-    if (args.sourceState) {
-      return cloneComposerState(args.sourceState)
+  const intended = ((): ComposerState => {
+    if (args.defaultProvider === "last_used") {
+      if (args.sourceState) {
+        return cloneComposerState(args.sourceState)
+      }
+
+      if (args.legacyComposerState) {
+        return cloneComposerState(args.legacyComposerState)
+      }
+
+      return composerFromProviderDefaults("claude", args.providerDefaults)
     }
 
-    if (args.legacyComposerState) {
-      return cloneComposerState(args.legacyComposerState)
-    }
+    return composerFromProviderDefaults(args.defaultProvider, args.providerDefaults)
+  })()
 
-    return composerFromProviderDefaults("claude", args.providerDefaults)
-  }
-
-  return composerFromProviderDefaults(args.defaultProvider, args.providerDefaults)
+  return withUsageFallback(intended, args.providerDefaults)
 }
 
 /**

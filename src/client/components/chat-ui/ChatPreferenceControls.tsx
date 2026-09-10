@@ -15,9 +15,11 @@ import {
   type ProviderCatalogEntry,
   type ProviderModelOption,
 } from "../../../shared/types"
+import { deriveProviderAvailability } from "../../../shared/usage-availability"
 import { CHAT_MODE_LABELS, deriveComposerOptionControls } from "../../lib/composer"
 import { cn } from "../../lib/utils"
 import type { ComposerState } from "../../stores/chatPreferencesStore"
+import { useComposerAvailabilityStore } from "../../stores/composerAvailabilityStore"
 import { useUnauthenticatedHarnesses } from "../../stores/providerAuthStore"
 import { PROVIDER_ICONS } from "../provider-icons"
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover"
@@ -155,6 +157,7 @@ function ModelPickerList({
   selectedModel,
   onSelect,
   renderLabel,
+  describeModel,
   footer,
   searchThreshold = 12,
 }: {
@@ -162,6 +165,8 @@ function ModelPickerList({
   selectedModel: string
   onSelect: (modelId: string) => void
   renderLabel?: (candidate: ProviderModelOption) => ReactNode
+  /** Secondary line under a model (e.g. "Limit reached"). */
+  describeModel?: (candidate: ProviderModelOption) => string | undefined
   footer?: ReactNode
   searchThreshold?: number
 }) {
@@ -203,6 +208,7 @@ function ModelPickerList({
             selected={selectedModel === candidate.id}
             icon={<Box className="h-4 w-4 text-muted-foreground" />}
             label={renderLabel ? renderLabel(candidate) : candidate.label}
+            description={describeModel?.(candidate)}
           />
         ))
       )}
@@ -262,6 +268,23 @@ export function ChatPreferenceControls({
 }: ChatPreferenceControlsProps) {
   const providerConfig = availableProviders.find((provider) => provider.id === selectedProvider) ?? availableProviders[0]
   const unauthenticatedHarnesses = useUnauthenticatedHarnesses()
+  // Rate-limited harnesses and models are still selectable — a limit read can
+  // be stale, and the user may want to try anyway — but they are labeled, so a
+  // new chat that started somewhere other than the default explains itself.
+  const usage = useComposerAvailabilityStore((store) => store.usage)
+  const exhaustedHarnesses = useMemo(() => {
+    const result = new Set<AgentProvider>()
+    for (const entry of availableProviders) {
+      if (deriveProviderAvailability(entry, usage, Date.now()).harnessExhausted) result.add(entry.id)
+    }
+    return result
+  }, [availableProviders, usage])
+  const exhaustedModels = useMemo(
+    () => (providerConfig
+      ? deriveProviderAvailability(providerConfig, usage, Date.now()).exhaustedModels
+      : new Set<string>()),
+    [providerConfig, usage]
+  )
   // Keep the catalog's order, but sink disconnected harnesses to the bottom of
   // the picker so the ready-to-use ones are always the first reach.
   const pickerProviders = useMemo(() => {
@@ -331,6 +354,10 @@ export function ChatPreferenceControls({
                   <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
                     Sign In
                   </span>
+                ) : exhaustedHarnesses.has(provider.id) ? (
+                  <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+                    Limit reached
+                  </span>
                 ) : undefined}
               />
             )
@@ -355,6 +382,7 @@ export function ChatPreferenceControls({
               onModelChange(selectedProvider, modelId)
               close()
             }}
+            describeModel={(candidate) => (exhaustedModels.has(candidate.id) ? "Limit reached" : undefined)}
             renderLabel={(candidate) =>
               candidate.id === "gpt-5.6-luna" && codexModelOptions?.reasoningEffort === "ultra" ? (
                 <>
