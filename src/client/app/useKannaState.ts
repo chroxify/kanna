@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { useShallow } from "zustand/react/shallow"
 import { PROVIDERS, withPiFaveModels, type AgentProvider, type AppSettingsPatch, type AskUserQuestionAnswerMap, type AppSettingsSnapshot, type ChatDiffSnapshot, type FaveModel, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateSnapshot } from "../../shared/types"
 import { NEW_CHAT_COMPOSER_ID, useChatPreferencesStore } from "../stores/chatPreferencesStore"
+import { useComposerAvailabilityStore } from "../stores/composerAvailabilityStore"
 import { useRightSidebarStore } from "../stores/rightSidebarStore"
 import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
 import { getEditorPresetLabel, useTerminalPreferencesStore } from "../stores/terminalPreferencesStore"
@@ -632,6 +633,12 @@ export function useKannaState(activeChatId: string | null): KannaState {
     [appSettings?.availableProviders, llmProvider?.faveModels]
   )
   const availableProviders = activeChatSnapshot?.availableProviders ?? fallbackProviders
+
+  // The out-of-chat catalog is what a new chat's composer picks from, so it is
+  // also the list the rate-limit fallback must choose a replacement model from.
+  useEffect(() => {
+    useComposerAvailabilityStore.getState().setProviders(fallbackProviders)
+  }, [fallbackProviders])
   const isProcessing = isProcessingStatus(effectiveRuntimeStatus ?? undefined)
 
   // Written after a turn settles, not during: the window changes many times a
