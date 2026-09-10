@@ -6,6 +6,7 @@ import type {
   KeybindingsSnapshot,
   LlmProviderSnapshot,
   LlmProviderValidationResult,
+  UsageLimitsSnapshot,
 } from "../../shared/types"
 import {
   LEGACY_SETUP_COMPLETED_STORAGE_KEY,
@@ -13,6 +14,7 @@ import {
   LEGACY_SETUP_SHOWN_STORAGE_KEY,
 } from "../lib/storageKeys"
 import { useAppSettingsStore } from "../stores/appSettingsStore"
+import { useComposerAvailabilityStore } from "../stores/composerAvailabilityStore"
 import { useChatPreferencesStore } from "../stores/chatPreferencesStore"
 import { useChatSoundPreferencesStore } from "../stores/chatSoundPreferencesStore"
 import { useProviderAuthStore } from "../stores/providerAuthStore"
@@ -197,6 +199,14 @@ export function useAppSettingsSync(params: {
       setCommandError(null)
     })
   }, [setCommandError, socket])
+
+  // Usage feeds the new-chat composer: a harness or model whose limit is spent
+  // is skipped when a new chat is seeded (see withUsageFallback).
+  useEffect(() => {
+    return socket.subscribe<UsageLimitsSnapshot>({ type: "usage-limits" }, (snapshot) => {
+      useComposerAvailabilityStore.getState().setUsage(snapshot)
+    })
+  }, [socket])
 
   const handleReadAppSettings = useCallback(async () => {
     try {
