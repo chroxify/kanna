@@ -2111,12 +2111,20 @@ export class AgentCoordinator {
 
         if (event.entry.kind === "result" && active && completedClaudePromptSeq === (active.claudePromptSeq ?? null)) {
           active.hasFinalResult = true
+          // Clear the turn before recording its outcome. Recording is a disk
+          // append, and the chat's liveness must not depend on it completing:
+          // when it stalled, the result was already in the transcript — the
+          // turn read as finished, "Worked for 2m 15s" and all — while the chat
+          // stayed in activeTurns forever. That is a spinner that survives a
+          // reload, with every send queueing behind a turn that was over.
+          this.activeTurns.delete(session.chatId)
+          this.emitStateChange(session.chatId)
+
           if (event.entry.isError) {
             await this.store.recordTurnFailed(session.chatId, event.entry.result || "Turn failed")
           } else if (!active.cancelRequested) {
             await this.store.recordTurnFinished(session.chatId)
           }
-          this.activeTurns.delete(session.chatId)
           if (!active.cancelRequested) {
             await this.maybeStartNextQueuedMessage(session.chatId)
           }
@@ -2212,19 +2220,28 @@ export class AgentCoordinator {
 
         if (event.entry.kind === "result") {
           active.hasFinalResult = true
+          // Remove from activeTurns as soon as the result arrives so the UI
+          // transitions to idle immediately. The stream may still be open
+          // (e.g. background tasks), but the user should be able to send
+          // new messages without having to hit stop first.
+          //
+          // This happens *before* the turn outcome is recorded, because that
+          // is a disk append and the chat's liveness must not depend on it
+          // completing. When it stalled, the result was already in the
+          // transcript — the turn read as finished — while the chat stayed in
+          // activeTurns forever: a spinner that survived a reload, with sends
+          // queueing behind a turn that was already over.
+          this.activeTurns.delete(active.chatId)
+          // Track the still-open stream so the UI can show a draining
+          // indicator and the user can stop background tasks.
+          this.drainingStreams.set(active.chatId, { turn: active.turn })
+          this.emitStateChange(active.chatId)
+
           if (event.entry.isError) {
             await this.store.recordTurnFailed(active.chatId, event.entry.result || "Turn failed")
           } else if (!active.cancelRequested) {
             await this.store.recordTurnFinished(active.chatId)
           }
-          // Remove from activeTurns as soon as the result arrives so the UI
-          // transitions to idle immediately. The stream may still be open
-          // (e.g. background tasks), but the user should be able to send
-          // new messages without having to hit stop first.
-          this.activeTurns.delete(active.chatId)
-          // Track the still-open stream so the UI can show a draining
-          // indicator and the user can stop background tasks.
-          this.drainingStreams.set(active.chatId, { turn: active.turn })
         }
 
         this.emitStateChange(active.chatId)

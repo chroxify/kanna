@@ -1863,6 +1863,51 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a result clears the turn even when recording the outcome never settles", async () => {
+    // The bug this pins: recordTurnFinished is a disk append, and it sat
+    // between persisting the result and clearing activeTurns. When it stalled,
+    // the transcript showed a finished turn ("Worked for 2m 15s") while the
+    // chat stayed active — a spinner that survived a reload, with sends
+    // queueing behind a turn that was already over.
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    store.recordTurnFinished = () => new Promise<void>(() => {})
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {},
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "hi",
+      model: "claude-opus-4-1",
+    })
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(true)
+
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 135_000, result: "done" }),
+    })
+    // Let the stream event be consumed; the outcome write stays pending.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+
+    events.close()
+  })
+
   test("enqueue on an idle chat starts the turn instead of queueing into the void", async () => {
     // The client enqueues whenever it believes a turn is in flight, which
     // includes the window between a turn ending and that snapshot arriving.
