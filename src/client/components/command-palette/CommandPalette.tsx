@@ -632,7 +632,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     list.push({
       id: "usage",
       title: "Usage…",
-      keywords: ["limits", "rate limit", "quota", "credits", "plan", "utilization", "claude", "codex"],
+      keywords: ["limits", "rate limit", "quota", "credits", "plan", "utilization", "claude", "codex", "grok"],
       icon: <Gauge className={ICON_CLASS} />,
       run: () => pushPage({ page: "usage" }),
     })
@@ -841,7 +841,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
         list.push({
           id: "change-harness",
           title: "Switch Harness…",
-          keywords: ["provider", "agent", "claude code", "codex", "cursor", "pi", "change provider"],
+          keywords: ["provider", "agent", "claude code", "codex", "cursor", "grok", "pi", "change provider"],
           icon: <Box className={ICON_CLASS} />,
           run: () => pushPage({ page: "harness" }),
         })
