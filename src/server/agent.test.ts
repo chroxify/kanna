@@ -1863,6 +1863,55 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a trailing entry after a finished turn does not re-open it", async () => {
+    // The stuck spinner: a finished turn commonly trails one more entry, and
+    // resuming on it invented a turn with no prompt seq — closable only by a
+    // later result, which is never coming. The chat then read as in progress
+    // forever, survived a reload, and queued every send behind it.
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {},
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "hi",
+      model: "claude-opus-4-1",
+    })
+
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 135_000, result: "done" }),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+
+    // The straggler that used to resurrect the turn.
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "assistant_text", text: "trailing line" }),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+
+    events.close()
+  })
+
   test("a result clears the turn even when recording the outcome never settles", async () => {
     // The bug this pins: recordTurnFinished is a disk append, and it sat
     // between persisting the result and clearing activeTurns. When it stalled,

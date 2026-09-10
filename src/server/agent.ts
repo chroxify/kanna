@@ -187,6 +187,19 @@ interface ClaudeSessionState {
    * being sent immediately after the cancel (the steer path).
    */
   cancelledPromptSeqs: Set<number>
+  /**
+   * When the last result entry landed. A finished turn often trails one more
+   * entry (a closing assistant_text, a late tool_result); without this those
+   * would re-register a background turn that nothing will ever close, leaving
+   * the chat spinning on a turn the user watched finish.
+   */
+  lastResultAt: number | null
+  /**
+   * Watchdog for a resumed background turn. Such a turn has no prompt seq, so
+   * it is only closed by a later result — and a background wakeup that goes
+   * quiet never produces one. Bounds "in progress" to activity actually seen.
+   */
+  backgroundTurnTimer: ReturnType<typeof setTimeout> | null
 }
 
 interface AgentCoordinatorArgs {
@@ -226,6 +239,14 @@ interface AgentCoordinatorArgs {
 function isClaudeSteerLoggingEnabled() {
   return process.env.KANNA_LOG_CLAUDE_STEER === "1"
 }
+
+/**
+ * How long after a result a trailing entry is still treated as part of the
+ * turn that just ended, rather than as a background wakeup.
+ */
+const BACKGROUND_RESUME_GRACE_MS = 5_000
+/** How long a resumed background turn may go without an entry before it closes. */
+const BACKGROUND_TURN_IDLE_MS = 60_000
 
 function logClaudeSteer(stage: string, details?: Record<string, unknown>) {
   if (!isClaudeSteerLoggingEnabled()) return
@@ -1712,6 +1733,8 @@ export class AgentCoordinator {
         pendingPromptSeqs: [],
         suppressResume: false,
         cancelledPromptSeqs: new Set(),
+        lastResultAt: null,
+        backgroundTurnTimer: null,
       }
       this.claudeSessions.set(args.chatId, session)
       void this.runClaudeSession(session)
@@ -1993,6 +2016,36 @@ export class AgentCoordinator {
    * the next result entry (pendingPromptSeqs empty → null === null) closes
    * it through the normal completion path in runClaudeSession.
    */
+  /**
+   * Bounds a resumed background turn to activity actually observed. Such a
+   * turn carries no prompt seq, so the normal completion path can only close
+   * it on a later result — a background wakeup that simply stops producing
+   * entries would otherwise leave the chat reading as in progress forever.
+   *
+   * Only ever closes a seq-less turn, and never one waiting on the user, so a
+   * real prompt turn and a pending tool request are both left alone.
+   */
+  private armBackgroundTurnWatchdog(session: ClaudeSessionState) {
+    const active = this.activeTurns.get(session.chatId)
+    const isBackgroundTurn = Boolean(active) && active?.claudePromptSeq == null
+    if (session.backgroundTurnTimer) {
+      clearTimeout(session.backgroundTurnTimer)
+      session.backgroundTurnTimer = null
+    }
+    if (!isBackgroundTurn) return
+
+    const timer = setTimeout(() => {
+      session.backgroundTurnTimer = null
+      const current = this.activeTurns.get(session.chatId)
+      if (!current || current.claudePromptSeq != null || current.pendingTool) return
+      this.activeTurns.delete(session.chatId)
+      this.emitStateChange(session.chatId)
+    }, BACKGROUND_TURN_IDLE_MS)
+    // Never hold the process open on a chat that has gone quiet.
+    ;(timer as { unref?: () => void }).unref?.()
+    session.backgroundTurnTimer = timer
+  }
+
   private async resumeBackgroundTurn(session: ClaudeSessionState) {
     const active: ActiveTurn = {
       chatId: session.chatId,
@@ -2060,6 +2113,12 @@ export class AgentCoordinator {
         if (
           !this.activeTurns.has(session.chatId)
           && !session.suppressResume
+          // A turn that just ended commonly trails one more entry. Resuming on
+          // those invents a turn with no prompt seq, which only a later result
+          // can close — and none is coming, so the chat spins forever on a turn
+          // the user watched finish. A real background wakeup arrives long
+          // after, well outside this window.
+          && Date.now() - (session.lastResultAt ?? 0) > BACKGROUND_RESUME_GRACE_MS
           && (
             event.entry.kind === "assistant_text"
             || event.entry.kind === "tool_call"
@@ -2069,8 +2128,15 @@ export class AgentCoordinator {
           await this.resumeBackgroundTurn(session)
         }
 
+        // Keep a resumed background turn alive only while it is actually
+        // producing entries; the watchdog closes it once it goes quiet.
+        this.armBackgroundTurnWatchdog(session)
+
         if (event.entry.kind === "result" || event.entry.kind === "interrupted") {
           session.suppressResume = false
+        }
+        if (event.entry.kind === "result") {
+          session.lastResultAt = Date.now()
         }
 
         const active = this.activeTurns.get(session.chatId)
