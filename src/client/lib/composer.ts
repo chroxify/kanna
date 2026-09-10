@@ -18,6 +18,7 @@ import {
   type ProviderModelOption,
 } from "../../shared/types"
 import { assertNever } from "../../shared/assert"
+import { getProviderModelDefault } from "../../shared/provider-preferences"
 import { NEW_CHAT_COMPOSER_ID, type ComposerState } from "../stores/chatPreferencesStore"
 
 /**
@@ -75,6 +76,26 @@ export function applyModelToComposerState(
       fastMode: normalizeClaudeFastMode(model, state.modelOptions.fastMode),
     },
   }
+}
+
+/**
+ * Selecting a model in the composer. A model with per-model defaults saved for
+ * it switches to those options; a model without keeps the current ones (only
+ * re-normalized for it). That difference is the point of per-model defaults:
+ * "Opus always medium" has to win over the effort the previous model was on,
+ * while an unconfigured model must not silently reset a chat's options.
+ */
+export function applyModelSelection(
+  state: ComposerState,
+  model: string,
+  providerDefaults: ChatProviderPreferences,
+  providerConfig?: ProviderCatalogEntry,
+): ComposerState {
+  const savedOptions = getProviderModelDefault(providerDefaults[state.provider], model)
+  const baseState = savedOptions
+    ? { ...state, modelOptions: { ...savedOptions } } as ComposerState
+    : state
+  return applyModelToComposerState(baseState, model, providerConfig)
 }
 
 /**

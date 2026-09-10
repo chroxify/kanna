@@ -329,6 +329,15 @@ export interface ProviderModelOptionsByProvider {
 export interface ProviderPreference<TModelOptions> {
   model: string
   modelOptions: TModelOptions
+  /**
+   * Per-model option overrides, keyed by model id — "Opus always medium, Fable
+   * always high". A model listed here starts from its own options instead of
+   * the provider-wide {@link modelOptions}: picking it in the composer swaps
+   * the options in rather than carrying the previous model's over, and a chat
+   * seeded on it opens with them. Models with no entry keep the old behaviour
+   * (provider defaults when seeding, carry-over when switching).
+   */
+  modelDefaults: Record<string, TModelOptions>
   planMode: boolean
   /**
    * "Auto Plan": leave the EnterPlanMode tool in the harness's toolset so the
@@ -1305,21 +1314,28 @@ export interface AppSettingsPatch {
   editor?: Partial<AppSettingsSnapshot["editor"]>
   transcript?: Partial<AppSettingsSnapshot["transcript"]>
   defaultProvider?: DefaultProviderPreference
-  providerDefaults?: {
-    claude?: Partial<Omit<ProviderPreference<ClaudeModelOptions>, "modelOptions">> & {
-      modelOptions?: Partial<ClaudeModelOptions>
-    }
-    codex?: Partial<Omit<ProviderPreference<CodexModelOptions>, "modelOptions">> & {
-      modelOptions?: Partial<CodexModelOptions>
-    }
-    cursor?: Partial<ProviderPreference<CursorModelOptions>>
-    grok?: Partial<Omit<ProviderPreference<GrokModelOptions>, "modelOptions">> & {
-      modelOptions?: Partial<GrokModelOptions>
-    }
-    pi?: Partial<Omit<ProviderPreference<PiModelOptions>, "modelOptions">> & {
-      modelOptions?: Partial<PiModelOptions>
-    }
+  providerDefaults?: ProviderDefaultsPatch
+}
+
+/**
+ * A per-model defaults patch: each entry is shallow-merged over the model's
+ * current options, and `null` clears the model's entry so it follows the
+ * provider-wide defaults again.
+ */
+export type ModelDefaultsPatch<TModelOptions> = Record<string, Partial<TModelOptions> | null>
+
+type ProviderPreferencePatch<TModelOptions> =
+  Partial<Omit<ProviderPreference<TModelOptions>, "modelOptions" | "modelDefaults">> & {
+    modelOptions?: Partial<TModelOptions>
+    modelDefaults?: ModelDefaultsPatch<TModelOptions>
   }
+
+export interface ProviderDefaultsPatch {
+  claude?: ProviderPreferencePatch<ClaudeModelOptions>
+  codex?: ProviderPreferencePatch<CodexModelOptions>
+  cursor?: ProviderPreferencePatch<CursorModelOptions>
+  grok?: ProviderPreferencePatch<GrokModelOptions>
+  pi?: ProviderPreferencePatch<PiModelOptions>
 }
 
 // ---------------------------------------------------------------------------

@@ -111,6 +111,108 @@ describe("normalizeClaudeUsage", () => {
     expect(snapshot.status).toBe("unavailable")
     expect(snapshot.windows).toHaveLength(0)
   })
+
+  // The model-scoped weekly window (e.g. Fable) exists *only* in the `limits`
+  // array: its keyed entry is either null (seven_day_opus) or a rotating
+  // codename with no model attached (nimbus_quill).
+  test("surfaces the model-scoped window from the limits array", () => {
+    const snapshot = normalizeClaudeUsage(
+      {
+        subscription_type: "max",
+        rate_limits_available: true,
+        rate_limits: {
+          five_hour: { utilization: 13, resets_at: "2026-07-22T14:00:00Z" },
+          seven_day: { utilization: 70, resets_at: "2026-07-28T08:00:00Z" },
+          seven_day_opus: null,
+          nimbus_quill: { utilization: 0, resets_at: null },
+          limits: [
+            { kind: "session", group: "session", percent: 13, resets_at: "2026-07-22T14:00:00Z" },
+            { kind: "weekly_all", group: "weekly", percent: 70, resets_at: "2026-07-28T08:00:00Z" },
+            {
+              kind: "weekly_scoped",
+              group: "weekly",
+              percent: 100,
+              severity: "critical",
+              resets_at: "2026-07-28T08:00:00Z",
+              scope: { model: { id: null, display_name: "Fable" }, surface: null },
+              is_active: true,
+            },
+          ],
+        },
+      },
+      NOW,
+    )
+
+    expect(snapshot.windows.map((w) => w.id)).toEqual(["five_hour", "seven_day", "weekly_scoped:fable"])
+    expect(snapshot.windows[2]).toMatchObject({
+      label: "Weekly · Fable",
+      usedPercent: 100,
+      resetsAt: "2026-07-28T08:00:00Z",
+      recordedAt: NOW,
+      source: "on_demand",
+    })
+    // Codename leftovers are dropped; the keyed session/weekly entries the
+    // array already covers are not duplicated.
+    expect(snapshot.windows.map((w) => w.label)).not.toContain("Nimbus Quill")
+  })
+
+  test("keeps a populated keyed window the limits array omits", () => {
+    const snapshot = normalizeClaudeUsage(
+      {
+        rate_limits_available: true,
+        rate_limits: {
+          seven_day_opus: { utilization: 30, resets_at: null },
+          nimbus_quill: { utilization: 0, resets_at: null },
+          limits: [{ kind: "weekly_all", group: "weekly", percent: 70 }],
+        },
+      },
+      NOW,
+    )
+
+    expect(snapshot.windows.map((w) => w.id)).toEqual(["seven_day", "seven_day_opus"])
+  })
+
+  test("scoped entries with nothing to scope to are dropped", () => {
+    const snapshot = normalizeClaudeUsage(
+      {
+        rate_limits_available: true,
+        rate_limits: {
+          limits: [
+            { kind: "weekly_all", group: "weekly", percent: 70 },
+            { kind: "weekly_scoped", group: "weekly", percent: 100, scope: { model: null, surface: null } },
+          ],
+        },
+      },
+      NOW,
+    )
+
+    expect(snapshot.windows.map((w) => w.id)).toEqual(["seven_day"])
+  })
+
+  test("labels a surface-scoped window when there is no model", () => {
+    const snapshot = normalizeClaudeUsage(
+      {
+        rate_limits_available: true,
+        rate_limits: {
+          limits: [
+            { kind: "weekly_scoped", group: "weekly", percent: 5, scope: { surface: "oauth_apps" } },
+          ],
+        },
+      },
+      NOW,
+    )
+
+    expect(snapshot.windows[0]).toMatchObject({ id: "weekly_scoped:oauth_apps", label: "Weekly · Oauth Apps" })
+  })
+
+  test("falls back to keyed windows when there is no limits array", () => {
+    const snapshot = normalizeClaudeUsage(
+      { rate_limits_available: true, rate_limits: { five_hour: { utilization: 42 }, seven_day_fable: { utilization: 12 } } },
+      NOW,
+    )
+
+    expect(snapshot.windows.map((w) => w.label)).toEqual(["Current session (5-hour)", "Seven Day Fable"])
+  })
 })
 
 describe("mergeClaudeRateLimitPush", () => {
@@ -152,6 +254,42 @@ describe("mergeClaudeRateLimitPush", () => {
   test("ignores overage-only pushes", () => {
     const merged = mergeClaudeRateLimitPush(null, { rateLimitType: "overage", utilization: 0.5 }, NOW)
     expect(merged.windows).toHaveLength(0)
+  })
+
+  test("ignores a push for a window the full read drops (rotating codename)", () => {
+    const prev = normalizeClaudeUsage(
+      {
+        rate_limits_available: true,
+        rate_limits: { limits: [{ kind: "weekly_all", group: "weekly", percent: 70 }] },
+      },
+      NOW,
+    )
+
+    const merged = mergeClaudeRateLimitPush(
+      prev,
+      { rateLimitType: "nimbus_quill" as never, utilization: 0.4 },
+      "2026-07-22T11:00:00.000Z",
+    )
+
+    expect(merged.windows.map((w) => w.id)).toEqual(["seven_day"])
+  })
+
+  test("still merges a push for a window already on the snapshot", () => {
+    const prev = normalizeClaudeUsage(
+      {
+        rate_limits_available: true,
+        rate_limits: { limits: [{ kind: "weekly_all", group: "weekly", percent: 70 }] },
+      },
+      NOW,
+    )
+
+    const merged = mergeClaudeRateLimitPush(
+      prev,
+      { rateLimitType: "seven_day", utilization: 0.85 },
+      "2026-07-22T11:00:00.000Z",
+    )
+
+    expect(merged.windows[0]).toMatchObject({ id: "seven_day", usedPercent: 85, source: "turn_push" })
   })
 })
 
