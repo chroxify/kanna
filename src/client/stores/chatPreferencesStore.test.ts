@@ -1,16 +1,21 @@
 import { useSidebarStore } from "./sidebarStore"
-import type { SidebarProjectGroup } from "../../shared/types"
+import { PROVIDERS, type SidebarProjectGroup } from "../../shared/types"
 import { afterEach, describe, expect, test } from "bun:test"
 import {
   migrateChatPreferencesState,
   NEW_CHAT_COMPOSER_ID,
   useChatPreferencesStore,
 } from "./chatPreferencesStore"
+import { useComposerAvailabilityStore } from "./composerAvailabilityStore"
 
 const INITIAL_STATE = useChatPreferencesStore.getInitialState()
+const INITIAL_AVAILABILITY = useComposerAvailabilityStore.getInitialState()
 
 afterEach(() => {
   useChatPreferencesStore.setState(INITIAL_STATE)
+  // Availability is global: an un-reset usage snapshot would silently redirect
+  // every later test's new-chat composer.
+  useComposerAvailabilityStore.setState(INITIAL_AVAILABILITY)
 })
 
 describe("migrateChatPreferencesState", () => {
@@ -690,6 +695,102 @@ describe("chat preference store", () => {
 
     useChatPreferencesStore.getState().clearProviderModelDefault("claude", "opus")
     expect(useChatPreferencesStore.getState().providerDefaults.claude.modelDefaults).toEqual({})
+  })
+
+  test("a new chat skips a model whose limit is spent", () => {
+    useComposerAvailabilityStore.setState({
+      providers: PROVIDERS,
+      usage: {
+        providers: [{
+          provider: "claude",
+          status: "ok",
+          plan: "max",
+          windows: [{
+            id: "weekly_scoped:fable",
+            label: "Weekly · Fable",
+            usedPercent: 100,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+            recordedAt: "2026-09-10T11:00:00.000Z",
+            source: "on_demand",
+          }],
+          credits: null,
+          detail: null,
+          updatedAt: "2026-09-10T11:00:00.000Z",
+        }],
+      },
+    })
+    useChatPreferencesStore.setState({
+      ...INITIAL_STATE,
+      defaultProvider: "claude",
+      providerDefaults: {
+        ...INITIAL_STATE.providerDefaults,
+        claude: { ...INITIAL_STATE.providerDefaults.claude, model: "fable" },
+      },
+    })
+
+    useChatPreferencesStore.getState().initializeComposerForChat("chat-new")
+
+    expect(useChatPreferencesStore.getState().getComposerState("chat-new"))
+      .toMatchObject({ provider: "claude", model: "opus" })
+  })
+
+  test("a new chat moves to the next harness when the whole harness is spent", () => {
+    useComposerAvailabilityStore.setState({
+      providers: PROVIDERS,
+      usage: {
+        providers: [{
+          provider: "claude",
+          status: "ok",
+          plan: "max",
+          windows: [{
+            id: "five_hour",
+            label: "Current session (5-hour)",
+            usedPercent: 100,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+            recordedAt: "2026-09-10T11:00:00.000Z",
+            source: "on_demand",
+          }],
+          credits: null,
+          detail: null,
+          updatedAt: "2026-09-10T11:00:00.000Z",
+        }],
+      },
+    })
+    useChatPreferencesStore.setState({ ...INITIAL_STATE, defaultProvider: "claude" })
+
+    useChatPreferencesStore.getState().initializeComposerForChat("chat-new")
+
+    expect(useChatPreferencesStore.getState().getComposerState("chat-new").provider).toBe("codex")
+  })
+
+  test("an existing chat is seeded from its own model regardless of limits", () => {
+    useComposerAvailabilityStore.setState({
+      providers: PROVIDERS,
+      usage: {
+        providers: [{
+          provider: "claude",
+          status: "ok",
+          plan: "max",
+          windows: [{
+            id: "weekly_scoped:fable",
+            label: "Weekly · Fable",
+            usedPercent: 100,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+            recordedAt: "2026-09-10T11:00:00.000Z",
+            source: "on_demand",
+          }],
+          credits: null,
+          detail: null,
+          updatedAt: "2026-09-10T11:00:00.000Z",
+        }],
+      },
+    })
+    useChatPreferencesStore.setState({ ...INITIAL_STATE })
+
+    // A chat that already ran on Fable reopens on Fable — the fallback is only
+    // about where a *new* chat starts.
+    expect(useChatPreferencesStore.getState().getComposerState("chat-a", { provider: "claude", model: "fable" }))
+      .toMatchObject({ provider: "claude", model: "fable" })
   })
 
   test("per-model defaults do not leak into a chat's composer state", () => {
