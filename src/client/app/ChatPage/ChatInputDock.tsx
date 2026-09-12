@@ -14,6 +14,8 @@ interface ChatInputDockProps {
   hasSelectedProject: boolean
   runtimeStatus: string | null
   canCancel: boolean
+  firstQueuedMessageId: string | null
+  onSteerQueuedMessage: (queuedMessageId: string) => void
   projectId: string | null
   projectPath: string | null
   projectRepoLabel: string | null
@@ -36,6 +38,8 @@ export const ChatInputDock = memo(function ChatInputDock({
   hasSelectedProject,
   runtimeStatus,
   canCancel,
+  firstQueuedMessageId,
+  onSteerQueuedMessage,
   projectId,
   projectPath,
   projectRepoLabel,
@@ -67,6 +71,8 @@ export const ChatInputDock = memo(function ChatInputDock({
             onCancel={onCancel}
             disabled={!hasSelectedProject}
             canCancel={canCancel}
+            firstQueuedMessageId={firstQueuedMessageId}
+            onSteerQueuedMessage={onSteerQueuedMessage}
             chatId={activeChatId}
             projectId={projectId}
             projectPath={projectPath}

@@ -176,6 +176,13 @@ interface Props {
   onCancel?: () => void
   disabled: boolean
   canCancel?: boolean
+  /**
+   * Head of the queue, the message that would drain next. An empty composer
+   * has nothing of its own to send, so the send keystroke sends that one now
+   * instead — the keyboard's version of the ↑ on its bubble.
+   */
+  firstQueuedMessageId?: string | null
+  onSteerQueuedMessage?: (queuedMessageId: string) => void
   chatId?: string | null
   projectId?: string | null
   /** Current project directory — the placeholder's fallback when there's no repo. */
@@ -206,6 +213,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onCancel,
   disabled,
   canCancel,
+  firstQueuedMessageId = null,
+  onSteerQueuedMessage,
   chatId,
   projectId,
   projectPath,
@@ -864,9 +873,20 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const withModifier = event.metaKey || event.ctrlKey
     // ⇧ on its own still means newline; only ⌘/Ctrl+⇧+Enter sends, and that
     // chord is the one that group-queues.
-    if (event.key === "Enter" && (!event.shiftKey || withModifier) && !isTouchDevice && !disabled && canSubmit && !hasPendingUploads) {
+    const isSendKeystroke = event.key === "Enter" && (!event.shiftKey || withModifier)
+      && !isTouchDevice && !disabled && !hasPendingUploads
+    if (isSendKeystroke && canSubmit) {
       event.preventDefault()
       void handleSubmit({ withModifier, withShift: event.shiftKey })
+      return
+    }
+
+    // Nothing typed, so queueing and steering have nothing to tell apart: the
+    // only message a send could mean is the one already at the head of the
+    // queue, and the only thing left to do with it is send it now.
+    if (isSendKeystroke && firstQueuedMessageId) {
+      event.preventDefault()
+      onSteerQueuedMessage?.(firstQueuedMessageId)
     }
   }
 
