@@ -932,6 +932,7 @@ export function createDemoAppSettings(theme: AppThemePreference): AppSettingsSna
     defaultProvider: "claude",
     submitWhileRunning: "queue",
     paneVisibility: { widgets: "chat", terminal: "chat" },
+    groupQueue: "modifier",
     providerDefaults: createDefaultProviderDefaults(),
     newSidebarEnabled: true,
     newProjectsDirectory: "~/Kanna",
