@@ -20,6 +20,7 @@ import { Button } from "../../components/ui/button"
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogTitle } from "../../components/ui/dialog"
 import { Input } from "../../components/ui/input"
 import { SettingsHeaderButton } from "../../components/ui/settings-header-button"
+import { Switch } from "../../components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -269,6 +270,7 @@ export function ProvidersSection({
                 <AuthCard
                   service={service}
                   socket={state.socket}
+                  showClaudeAccounts
                   className="rounded-none border-0 bg-transparent px-4 py-3.5"
                 />
               </div>
@@ -303,6 +305,22 @@ export function ProvidersSection({
               </SelectContent>
             </Select>
           </SettingsRow>
+
+          {(providerAuthSnapshot?.claudeAccounts?.accounts.length ?? 0) > 1 ? (
+            <SettingsRow def={SETTINGS_ROWS.claudeAccountAutoSwitch}>
+              <Switch
+                checked={providerAuthSnapshot?.claudeAccounts?.autoSwitch !== false}
+                onCheckedChange={(enabled) => {
+                  void state.socket
+                    .command({ type: "claudeAccounts.setAutoSwitch", enabled })
+                    .catch((error) => {
+                      setProvidersError(error instanceof Error ? error.message : "Unable to save Claude account settings.")
+                    })
+                }}
+                aria-label={SETTINGS_ROWS.claudeAccountAutoSwitch.title}
+              />
+            </SettingsRow>
+          ) : null}
 
           <SettingsRow def={SETTINGS_ROWS.claudeDefaults} alignStart>
             <ChatPreferenceControls

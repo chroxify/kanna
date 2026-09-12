@@ -151,7 +151,11 @@ export type ClientCommand =
   | { type: "auth.refresh"; force?: boolean }
   /** Install (or update to the latest version of) a service's CLI. */
   | { type: "auth.install"; service: AuthServiceId }
-  | { type: "auth.login.start"; service: AuthServiceId }
+  | { type: "auth.login.start"; service: AuthServiceId; accountId?: string }
+  | { type: "claudeAccounts.add" }
+  | { type: "claudeAccounts.remove"; accountId: string }
+  | { type: "claudeAccounts.setActive"; accountId: string }
+  | { type: "claudeAccounts.setAutoSwitch"; enabled: boolean }
   /** claude only: the code the user pasted back from the OAuth page. */
   | { type: "auth.login.submitCode"; service: AuthServiceId; code: string }
   | { type: "auth.login.cancel"; service: AuthServiceId }

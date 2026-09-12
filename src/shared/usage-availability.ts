@@ -1,4 +1,4 @@
-import { modelIdFamily, type AgentProvider, type ProviderCatalogEntry, type UsageLimitWindow, type UsageLimitsSnapshot } from "./types"
+import { modelIdFamily, type AgentProvider, type ProviderCatalogEntry, type ProviderUsageSnapshot, type UsageLimitWindow, type UsageLimitsSnapshot } from "./types"
 
 /**
  * Which harnesses and models a new chat can actually start on, derived from the
@@ -38,6 +38,17 @@ export function isWindowExhausted(window: UsageLimitWindow, now: number): boolea
     if (Number.isFinite(resetsAt) && resetsAt <= now) return false
   }
   return true
+}
+
+/** A good read with a spent harness-wide window: nothing on this harness (or account) will run. */
+export function isHarnessExhausted(
+  provider: AgentProvider,
+  snapshot: ProviderUsageSnapshot | null | undefined,
+  now: number,
+): boolean {
+  if (!snapshot || snapshot.status !== "ok") return false
+  const harnessWide = HARNESS_WIDE_WINDOW_IDS[provider]
+  return snapshot.windows.some((window) => harnessWide.includes(window.id) && isWindowExhausted(window, now))
 }
 
 /**

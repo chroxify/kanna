@@ -534,3 +534,61 @@ describe("UsageLimitsManager", () => {
     manager.dispose()
   })
 })
+
+describe("UsageLimitsManager Claude accounts", () => {
+  test("pushes land on the account they came from; the claude entry shows the active one", async () => {
+    const filePath = await createTempFilePath()
+    let activeAccountId = "default"
+    const manager = new UsageLimitsManager(filePath, {
+      now: () => new Date(NOW),
+      listClaudeAccountIds: () => ["default", "second"],
+      activeClaudeAccountId: () => activeAccountId,
+    })
+    await manager.initialize()
+
+    manager.recordClaudeRateLimitPush({ rateLimitType: "five_hour", status: "rejected", resetsAt: 1784736000 }, "default")
+    manager.recordClaudeRateLimitPush({ rateLimitType: "five_hour", utilization: 0.1, resetsAt: 1784736000 }, "second")
+
+    const claudeWindow = () => manager.getSnapshot().providers.find((p) => p.provider === "claude")?.windows[0]
+    // A rejected request means the window is spent even without a utilization.
+    expect(claudeWindow()).toMatchObject({ id: "five_hour", usedPercent: 100 })
+    expect(manager.getSnapshot().claudeAccounts?.map((entry) => [entry.accountId, entry.usage.windows[0]?.usedPercent]))
+      .toEqual([["default", 100], ["second", 10]])
+
+    activeAccountId = "second"
+    manager.activeClaudeAccountChanged()
+    expect(claudeWindow()).toMatchObject({ id: "five_hour", usedPercent: 10 })
+    manager.dispose()
+  })
+
+  test("refresh reads every account, and the cache keeps them apart", async () => {
+    const filePath = await createTempFilePath()
+    const reads: string[] = []
+    const deps = {
+      now: () => new Date(NOW),
+      listClaudeAccountIds: () => ["default", "second"],
+      activeClaudeAccountId: () => "second",
+      fetchClaudeUsage: async (accountId: string) => {
+        reads.push(accountId)
+        return {
+          subscription_type: accountId === "second" ? "pro" : "max",
+          rate_limits_available: true,
+          rate_limits: { five_hour: { utilization: accountId === "second" ? 55 : 5, resets_at: "2026-07-22T14:00:00Z" } },
+        }
+      },
+    }
+    const manager = new UsageLimitsManager(filePath, deps)
+    await manager.initialize()
+    await manager.refresh({ force: true })
+
+    expect(reads.sort()).toEqual(["default", "second"])
+    expect(manager.getSnapshot().providers.find((p) => p.provider === "claude")).toMatchObject({ plan: "pro" })
+
+    const reloaded = new UsageLimitsManager(filePath, { ...deps, fetchClaudeUsage: undefined })
+    await reloaded.initialize()
+    expect(reloaded.getClaudeAccountUsage("default")?.windows[0]).toMatchObject({ usedPercent: 5, source: "cache" })
+    expect(reloaded.getSnapshot().providers.find((p) => p.provider === "claude")).toMatchObject({ plan: "pro" })
+    manager.dispose()
+    reloaded.dispose()
+  })
+})

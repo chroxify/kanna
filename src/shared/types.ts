@@ -1422,6 +1422,17 @@ export interface ProviderUsageSnapshot {
 
 export interface UsageLimitsSnapshot {
   providers: ProviderUsageSnapshot[]
+  /**
+   * Claude usage for each account that has been read. The `claude` entry in
+   * `providers` is the active account's, so everything that reasons about one
+   * Claude keeps working unchanged.
+   */
+  claudeAccounts?: ClaudeAccountUsageSnapshot[]
+}
+
+export interface ClaudeAccountUsageSnapshot {
+  accountId: string
+  usage: ProviderUsageSnapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -1493,6 +1504,37 @@ export interface AuthServiceSnapshot {
 
 export interface ProviderAuthSnapshot {
   services: AuthServiceSnapshot[]
+  /** Every Claude subscription Kanna can run on; the claude service above reflects the active one. */
+  claudeAccounts?: ClaudeAccountsSnapshot
+}
+
+export interface ClaudeAccountSnapshot {
+  id: string
+  /** The account Claude Code uses on its own (`~/.claude`); it can't be removed. */
+  isDefault: boolean
+  active: boolean
+  authStatus: AuthServiceStatus
+  email: string | null
+  /** Subscription type when signed in with claude.ai ("max", "pro", "team"). */
+  plan: string | null
+}
+
+export interface ClaudeAccountSwitch {
+  fromAccountId: string
+  toAccountId: string
+  /** `limit`: the active account spent a harness-wide window and Kanna moved on. */
+  reason: "manual" | "limit"
+  at: number
+}
+
+export interface ClaudeAccountsSnapshot {
+  activeAccountId: string
+  /** Move to the next account with headroom when the active one hits its limit. */
+  autoSwitch: boolean
+  accounts: ClaudeAccountSnapshot[]
+  /** The account the running Claude sign-in flow signs into, or null. */
+  loginAccountId: string | null
+  lastSwitch: ClaudeAccountSwitch | null
 }
 
 /**

@@ -10,6 +10,7 @@ import type {
   UsageLimitWindow,
   UsageLimitsSnapshot,
 } from "../shared/types"
+import { DEFAULT_CLAUDE_ACCOUNT_ID } from "./claude-accounts"
 import { grokProductUsageWindows, moneyVal, type GrokBillingRaw, type GrokUserRaw } from "./grok-cli"
 
 // ---------------------------------------------------------------------------
@@ -348,9 +349,13 @@ export function mergeClaudeRateLimitPush(
   if (!(id in CLAUDE_WINDOW_LABELS) && !base.windows.some((window) => window.id === id)) {
     return base
   }
-  const usedPercent = info.utilization != null && Number.isFinite(info.utilization)
-    ? clampPercent(info.utilization * 100)
-    : null
+  // A rejected request is the API saying the window is spent, whatever
+  // utilization it did or didn't attach.
+  const usedPercent = info.status === "rejected"
+    ? 100
+    : info.utilization != null && Number.isFinite(info.utilization)
+      ? clampPercent(info.utilization * 100)
+      : null
   const resetsAt = unixSecondsToIso(info.resetsAt)
 
   const windows = [...base.windows]
@@ -633,17 +638,35 @@ function staticProviderSnapshot(provider: AgentProvider): ProviderUsageSnapshot 
 
 const PROVIDER_ORDER: AgentProvider[] = ["claude", "codex", "cursor", "grok", "pi"]
 
+function unknownClaudeSnapshot(): ProviderUsageSnapshot {
+  return { provider: "claude", status: "unknown", plan: null, windows: [], credits: null, detail: null, updatedAt: null }
+}
+
+/** Mark persisted windows as cache-sourced so the UI can show staleness. */
+function markCached(snapshot: ProviderUsageSnapshot): ProviderUsageSnapshot {
+  return {
+    ...snapshot,
+    windows: snapshot.windows?.map((w) => ({ ...w, source: "cache" as const })) ?? [],
+    credits: snapshot.credits ? { ...snapshot.credits, source: "cache" } : null,
+  }
+}
+
 /** Non-forced refreshes within this window reuse the last read (probes are pricey). */
 const REFRESH_TTL_MS = 60_000
 
 interface UsageLimitsFile {
   version?: number
   providers?: Partial<Record<AgentProvider, ProviderUsageSnapshot>>
+  claudeAccounts?: Record<string, ProviderUsageSnapshot>
 }
 
 export interface UsageLimitsManagerDeps {
-  /** Fetch a fresh Claude usage read, or null when unavailable. */
-  fetchClaudeUsage?: () => Promise<ClaudeUsageRaw | null>
+  /** Fetch a fresh Claude usage read for one account, or null when unavailable. */
+  fetchClaudeUsage?: (accountId: string) => Promise<ClaudeUsageRaw | null>
+  /** Every Claude account, in order; defaults to the one default account. */
+  listClaudeAccountIds?: () => string[]
+  /** The account whose usage the `claude` provider entry shows. */
+  activeClaudeAccountId?: () => string
   /** Fetch a fresh Codex rate-limit read, or null when unavailable. */
   fetchCodexRateLimits?: () => Promise<CodexRateLimitsRaw | null>
   /** Fetch Grok Build billing + subscription from cli-chat-proxy. */
@@ -655,6 +678,8 @@ export class UsageLimitsManager {
   readonly filePath: string
   private readonly deps: UsageLimitsManagerDeps
   private snapshots = new Map<AgentProvider, ProviderUsageSnapshot>()
+  /** Claude usage per account; the active account's entry is mirrored into `snapshots`. */
+  private claudeAccountSnapshots = new Map<string, ProviderUsageSnapshot>()
   private readonly listeners = new Set<(snapshot: UsageLimitsSnapshot) => void>()
   private refreshInFlight: Promise<void> | null = null
   private lastRefreshAt: number | null = null
@@ -668,9 +693,7 @@ export class UsageLimitsManager {
       this.snapshots.set(provider, staticProviderSnapshot(provider))
     }
     // claude/codex start "unknown" until first fetch.
-    this.snapshots.set("claude", {
-      provider: "claude", status: "unknown", plan: null, windows: [], credits: null, detail: null, updatedAt: null,
-    })
+    this.snapshots.set("claude", unknownClaudeSnapshot())
     this.snapshots.set("codex", {
       provider: "codex", status: "unknown", plan: null, windows: [], credits: null, detail: null, updatedAt: null,
     })
@@ -689,14 +712,20 @@ export class UsageLimitsManager {
         for (const provider of ["claude", "codex", "grok"] as const) {
           const persisted = parsed.providers?.[provider]
           if (persisted && typeof persisted === "object") {
-            // Mark persisted windows as cache-sourced so the UI can show staleness.
-            this.snapshots.set(provider, {
-              ...persisted,
-              windows: persisted.windows?.map((w) => ({ ...w, source: "cache" as const })) ?? [],
-              credits: persisted.credits ? { ...persisted.credits, source: "cache" } : null,
-            })
+            this.snapshots.set(provider, markCached(persisted))
           }
         }
+        for (const [accountId, persisted] of Object.entries(parsed.claudeAccounts ?? {})) {
+          if (persisted && typeof persisted === "object") {
+            this.claudeAccountSnapshots.set(accountId, markCached(persisted))
+          }
+        }
+        // Caches from before accounts existed hold the one account there was.
+        const activeId = this.activeClaudeAccountId()
+        if (!this.claudeAccountSnapshots.has(activeId) && parsed.providers?.claude) {
+          this.claudeAccountSnapshots.set(activeId, this.snapshots.get("claude")!)
+        }
+        this.snapshots.set("claude", this.claudeAccountSnapshots.get(activeId) ?? unknownClaudeSnapshot())
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
@@ -710,9 +739,47 @@ export class UsageLimitsManager {
   }
 
   getSnapshot(): UsageLimitsSnapshot {
+    const claudeAccounts = this.listClaudeAccountIds().flatMap((accountId) => {
+      const usage = this.claudeAccountSnapshots.get(accountId)
+      return usage ? [{ accountId, usage }] : []
+    })
     return {
       providers: PROVIDER_ORDER.map((provider) => this.snapshots.get(provider)!),
+      ...(this.deps.listClaudeAccountIds ? { claudeAccounts } : {}),
     }
+  }
+
+  /** Claude usage of one account, as of its last read or push. */
+  getClaudeAccountUsage(accountId: string): ProviderUsageSnapshot | null {
+    return this.claudeAccountSnapshots.get(accountId) ?? null
+  }
+
+  private listClaudeAccountIds() {
+    return this.deps.listClaudeAccountIds?.() ?? [DEFAULT_CLAUDE_ACCOUNT_ID]
+  }
+
+  private activeClaudeAccountId() {
+    return this.deps.activeClaudeAccountId?.() ?? DEFAULT_CLAUDE_ACCOUNT_ID
+  }
+
+  private setClaudeAccount(accountId: string, snapshot: ProviderUsageSnapshot) {
+    this.claudeAccountSnapshots.set(accountId, snapshot)
+    if (accountId === this.activeClaudeAccountId()) {
+      this.setProvider("claude", snapshot)
+      return
+    }
+    this.persistChain = this.persistChain.then(() => this.persist())
+    this.emit()
+  }
+
+  /** The active account changed: show its usage, then read it fresh. */
+  activeClaudeAccountChanged() {
+    const activeId = this.activeClaudeAccountId()
+    for (const accountId of [...this.claudeAccountSnapshots.keys()]) {
+      if (!this.listClaudeAccountIds().includes(accountId)) this.claudeAccountSnapshots.delete(accountId)
+    }
+    this.setProvider("claude", this.claudeAccountSnapshots.get(activeId) ?? unknownClaudeSnapshot())
+    void this.refreshClaudeAccount(activeId).catch(() => undefined)
   }
 
   onChange(listener: (snapshot: UsageLimitsSnapshot) => void) {
@@ -733,10 +800,10 @@ export class UsageLimitsManager {
     this.emit()
   }
 
-  /** Record a pushed Claude rate-limit event (single binding window). */
-  recordClaudeRateLimitPush(info: ClaudeRateLimitInfoRaw) {
-    const prev = this.snapshots.get("claude") ?? null
-    this.setProvider("claude", mergeClaudeRateLimitPush(prev, info, this.nowIso()))
+  /** Record a pushed Claude rate-limit event (single binding window) for the account it came from. */
+  recordClaudeRateLimitPush(info: ClaudeRateLimitInfoRaw, accountId: string = this.activeClaudeAccountId()) {
+    const prev = this.claudeAccountSnapshots.get(accountId) ?? null
+    this.setClaudeAccount(accountId, mergeClaudeRateLimitPush(prev, info, this.nowIso()))
   }
 
   /** Record a pushed Codex rate-limit snapshot (sparse). */
@@ -786,17 +853,29 @@ export class UsageLimitsManager {
   }
 
   private async refreshClaude() {
+    await Promise.all(this.listClaudeAccountIds().map((accountId) => this.refreshClaudeAccount(accountId)))
+  }
+
+  private async refreshClaudeAccount(accountId: string) {
     if (!this.deps.fetchClaudeUsage) return
+    let fresh: ProviderUsageSnapshot
     try {
-      const raw = await this.deps.fetchClaudeUsage()
-      this.applyRefreshed("claude", normalizeClaudeUsage(raw, this.nowIso()))
+      const raw = await this.deps.fetchClaudeUsage(accountId)
+      fresh = normalizeClaudeUsage(raw, this.nowIso())
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      this.applyRefreshed("claude", {
+      fresh = {
         provider: "claude", status: "unavailable", plan: null, windows: [], credits: null,
         detail: `Failed to read Claude usage: ${detail}`, updatedAt: null,
-      })
+      }
     }
+    // Same rule as applyRefreshed: a failed read never wipes last-known windows.
+    const prev = this.claudeAccountSnapshots.get(accountId)
+    if (fresh.status !== "ok" && prev && prev.windows.length > 0) {
+      this.setClaudeAccount(accountId, { ...prev, detail: fresh.detail })
+      return
+    }
+    this.setClaudeAccount(accountId, fresh)
   }
 
   private async refreshCodex() {
@@ -843,6 +922,7 @@ export class UsageLimitsManager {
         codex: this.snapshots.get("codex"),
         grok: this.snapshots.get("grok"),
       },
+      claudeAccounts: Object.fromEntries(this.claudeAccountSnapshots),
     }
     try {
       await writeFile(this.filePath, `${JSON.stringify(file, null, 2)}\n`, "utf8")

@@ -158,6 +158,12 @@ export const SETTINGS_ROWS = defineRows({
     description: "The harness new chats start with. A chat keeps its provider once a session exists.",
     keywords: ["harness", "agent"],
   },
+  claudeAccountAutoSwitch: {
+    sectionId: "providers",
+    title: "Switch Claude Accounts on Limits",
+    description: "When the active Claude account hits its session or weekly limit, new turns move to the next signed-in account that has usage left",
+    keywords: ["claude", "account", "accounts", "limit", "rate limit", "usage", "switch", "fallback", "subscription"],
+  },
   claudeDefaults: {
     sectionId: "providers",
     title: "Claude Code Defaults",
