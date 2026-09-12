@@ -1093,6 +1093,8 @@ export function ChatPage() {
         hasSelectedProject={state.hasSelectedProject}
         runtimeStatus={state.runtimeStatus}
         canCancel={state.canCancel}
+        firstQueuedMessageId={state.queuedMessages[0]?.id ?? null}
+        onSteerQueuedMessage={state.handleSteerQueuedMessage}
         projectId={projectId}
         projectPath={state.navbarLocalPath ?? null}
         projectRepoLabel={state.navbarRepoLabel}
