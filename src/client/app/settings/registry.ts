@@ -110,6 +110,12 @@ export const SETTINGS_ROWS = defineRows({
     description: "What Enter does while an agent is working. ⌘Enter always does the other one",
     keywords: ["queue", "steer", "interrupt", "enter", "send", "composer"],
   },
+  groupQueue: {
+    sectionId: "general",
+    title: "Group Queue",
+    description: "Which keystroke merges a message into the last queued one, so both are sent together as one",
+    keywords: ["queue", "group", "merge", "batch", "shift", "enter", "send", "composer"],
+  },
   defaultEditor: {
     sectionId: "general",
     title: "Default Editor",

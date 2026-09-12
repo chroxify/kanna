@@ -28,7 +28,7 @@ import { copyTextToClipboard } from "../../lib/clipboard"
 import { buildUploadErrorReport, simpleUploadError, type UploadErrorReport } from "../../lib/uploadError"
 import { useUnauthenticatedHarnesses } from "../../stores/providerAuthStore"
 import { useAppSettingsStore } from "../../stores/appSettingsStore"
-import { shouldSteerSubmit } from "../../../shared/submit-mode"
+import { resolveSubmitIntent, type SubmitIntent } from "../../../shared/submit-mode"
 import { SignInDialog } from "../auth/SignInDialog"
 import { ChatPreferenceControls } from "./ChatPreferenceControls"
 import { ContextWindowMeter } from "./ContextWindowMeter"
@@ -170,7 +170,7 @@ interface ComposerAttachment extends ChatAttachment {
 interface Props {
   onSubmit: (
     value: string,
-    options?: { provider?: AgentProvider; model?: string; modelOptions?: ModelOptions; planMode?: boolean; autoPlan?: boolean; attachments?: ChatAttachment[]; steer?: boolean }
+    options?: { provider?: AgentProvider; model?: string; modelOptions?: ModelOptions; planMode?: boolean; autoPlan?: boolean; attachments?: ChatAttachment[]; steer?: boolean; group?: boolean }
   ) => Promise<void>
   onLayoutChange?: () => void
   onCancel?: () => void
@@ -248,6 +248,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const showModePicker = composer.supportsPlanMode
   // What Enter does while a turn is running; ⌘/Ctrl+Enter does the other.
   const submitWhileRunning = useAppSettingsStore((store) => store.settings?.submitWhileRunning) ?? "queue"
+  // Which of those two keystrokes group-queues, and which opens a new slot.
+  const groupQueue = useAppSettingsStore((store) => store.settings?.groupQueue) ?? "modifier"
   // Switching to a harness that isn't signed in is blocked: the pick is
   // stashed here, a sign-in dialog opens, and the switch applies
   // automatically once the auth store reports the service signed in.
@@ -692,8 +694,23 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return () => window.removeEventListener(REQUEST_ATTACH_FILES_EVENT, handleAttachRequest)
   }, [])
 
+  /**
+   * What a send means while a turn is running, for the modifiers it was made
+   * with. Off an empty queue a group send is just a queue — the server has
+   * nothing to merge into and says so — so this needs no idea of what is
+   * queued.
+   */
+  function submitIntentFor(modifiers: { withModifier?: boolean; withShift?: boolean }): SubmitIntent {
+    return resolveSubmitIntent({
+      mode: submitWhileRunning,
+      groupQueue,
+      withModifier: modifiers.withModifier === true,
+      withShift: modifiers.withShift === true,
+    })
+  }
+
   /** The composer's current prefs, the way a send carries them. */
-  function buildSubmitOptions(attachmentsForSubmit: ChatAttachment[], steer = shouldSteerSubmit(submitWhileRunning, false)) {
+  function buildSubmitOptions(attachmentsForSubmit: ChatAttachment[], intent: SubmitIntent = submitIntentFor({})) {
     let modelOptions: ModelOptions
     if (providerPrefs.provider === "claude") {
       modelOptions = { claude: { ...providerPrefs.modelOptions } }
@@ -707,7 +724,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       modelOptions = { codex: { ...providerPrefs.modelOptions } }
     }
     return {
-      steer,
+      steer: intent === "steer",
+      group: intent === "group",
       provider: selectedProvider,
       model: providerPrefs.model,
       modelOptions,
@@ -717,7 +735,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
   }
 
-  async function handleSubmit(options?: { withModifier?: boolean }) {
+  async function handleSubmit(options?: { withModifier?: boolean; withShift?: boolean }) {
     if (!canSubmit || hasPendingUploads) return
 
     const nextValue = value
@@ -725,10 +743,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const previousSelectedAttachmentId = selectedAttachmentId
     const previousUploadError = uploadError
     const attachmentsForSubmit = uploadedAttachments.map(({ previewUrl: _previewUrl, status: _status, ...attachment }) => attachment)
-    const submitOptions = buildSubmitOptions(
-      attachmentsForSubmit,
-      shouldSteerSubmit(submitWhileRunning, options?.withModifier === true)
-    )
+    const submitOptions = buildSubmitOptions(attachmentsForSubmit, submitIntentFor(options ?? {}))
     setValue("")
     if (chatId) clearDraft(chatId)
     if (textareaRef.current) textareaRef.current.style.height = "auto"
@@ -846,9 +861,12 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
 
     const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0
-    if (event.key === "Enter" && !event.shiftKey && !isTouchDevice && !disabled && canSubmit && !hasPendingUploads) {
+    const withModifier = event.metaKey || event.ctrlKey
+    // ⇧ on its own still means newline; only ⌘/Ctrl+⇧+Enter sends, and that
+    // chord is the one that group-queues.
+    if (event.key === "Enter" && (!event.shiftKey || withModifier) && !isTouchDevice && !disabled && canSubmit && !hasPendingUploads) {
       event.preventDefault()
-      void handleSubmit({ withModifier: event.metaKey || event.ctrlKey })
+      void handleSubmit({ withModifier, withShift: event.shiftKey })
     }
   }
 
@@ -1076,7 +1094,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 // cancel, so a file-only message queues instead of stopping
                 // the running turn.
                 if (!disabled && canSubmit && !hasPendingUploads) {
-                  void handleSubmit({ withModifier: event.metaKey || event.ctrlKey })
+                  void handleSubmit({ withModifier: event.metaKey || event.ctrlKey, withShift: event.shiftKey })
                 } else if (canCancel) {
                   onCancel?.()
                 }

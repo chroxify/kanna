@@ -312,6 +312,13 @@ export type ClientCommand =
        * between (in which case the message has already started).
        */
       steer?: boolean
+      /**
+       * Fold this message into the last queued one instead of adding a slot of
+       * its own, so both reach the agent as a single prompt. Ignored when
+       * nothing is queued (there is nothing to merge into) or when no turn is
+       * running, both of which queue normally. Ignored under `steer`.
+       */
+      group?: boolean
     }
   | {
       type: "message.steer"

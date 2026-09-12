@@ -88,6 +88,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
   chatSoundPreference: "always",
   chatSoundId: "funk",
   submitWhileRunning: "queue",
+  groupQueue: "modifier",
   terminal: {
     scrollbackLines: 1_000,
     minColumnWidth: 450,

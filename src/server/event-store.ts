@@ -6,7 +6,7 @@ import { getDataDir, LOG_PREFIX } from "../shared/branding"
 import { toMessagePreview } from "../shared/message-preview"
 import { buildTranscriptOutline, findTranscriptWindowStart } from "../shared/transcript-window"
 import type { TranscriptOutlineEntry } from "../shared/types"
-import type { AgentProvider, QueuedChatMessage, ResolvedChatReadAnchor, TranscriptEntry } from "../shared/types"
+import type { AgentProvider, ChatAttachment, QueuedChatMessage, ResolvedChatReadAnchor, TranscriptEntry } from "../shared/types"
 import { STORE_VERSION } from "../shared/types"
 import {
   type ChatEvent,
@@ -201,6 +201,7 @@ function getReplayEventPriority(event: StoreEvent) {
     case "message_appended":
       return 3
     case "queued_message_enqueued":
+    case "queued_message_updated":
     case "queued_message_removed":
       return 4
     case "turn_started":
@@ -802,6 +803,19 @@ export class EventStore {
           attachments: [...event.message.attachments],
         })
         this.state.queuedMessagesByChatId.set(event.chatId, existing)
+        const chat = this.state.chatsById.get(event.chatId)
+        if (chat) {
+          chat.updatedAt = event.timestamp
+        }
+        break
+      }
+      case "queued_message_updated": {
+        const existing = this.state.queuedMessagesByChatId.get(event.chatId)
+        const target = existing?.find((entry) => entry.id === event.queuedMessageId)
+        if (target) {
+          target.content = event.content
+          target.attachments = [...event.attachments]
+        }
         const chat = this.state.chatsById.get(event.chatId)
         if (chat) {
           chat.updatedAt = event.timestamp
@@ -1702,6 +1716,34 @@ export class EventStore {
     }
     await this.append(this.queuedMessagesLogPath, event)
     return queuedMessage
+  }
+
+  /**
+   * Rewrites a queued message in place, keeping its id, its createdAt and its
+   * place in the queue — what group-queueing needs, and what a remove/re-add
+   * would lose by sending the merged message to the back of the line.
+   */
+  async updateQueuedMessage(
+    chatId: string,
+    queuedMessageId: string,
+    update: { content: string; attachments: ChatAttachment[] }
+  ) {
+    this.requireChat(chatId)
+    const existing = this.getQueuedMessages(chatId).find((entry) => entry.id === queuedMessageId)
+    if (!existing) {
+      throw new Error("Queued message not found")
+    }
+    const event: QueuedMessageEvent = {
+      v: STORE_VERSION,
+      type: "queued_message_updated",
+      timestamp: Date.now(),
+      chatId,
+      queuedMessageId,
+      content: update.content,
+      attachments: [...update.attachments],
+    }
+    await this.append(this.queuedMessagesLogPath, event)
+    return { ...existing, content: update.content, attachments: [...update.attachments] }
   }
 
   async removeQueuedMessage(chatId: string, queuedMessageId: string) {

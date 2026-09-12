@@ -187,6 +187,27 @@ describe("EventStore", () => {
     expect(reloaded.getQueuedMessages(chat.id).map((message) => message.id)).toEqual([second.id])
   })
 
+  test("group-queue merges rewrite a queued message in place, across a restart", async () => {
+    const dataDir = await createTempDataDir()
+    const store = new EventStore(dataDir)
+    await store.initialize()
+
+    const project = await store.openProject("/tmp/project")
+    const chat = await store.createChat(project.id)
+
+    const first = await store.enqueueMessage(chat.id, { content: "abc", attachments: [] })
+    const second = await store.enqueueMessage(chat.id, { content: "second", attachments: [] })
+    await store.updateQueuedMessage(chat.id, second.id, { content: "second\n\nxyz", attachments: [] })
+
+    const reloaded = new EventStore(dataDir)
+    await reloaded.initialize()
+    // Same ids, same order: the merged message keeps the slot it already had.
+    expect(reloaded.getQueuedMessages(chat.id).map((message) => [message.id, message.content])).toEqual([
+      [first.id, "abc"],
+      [second.id, "second\n\nxyz"],
+    ])
+  })
+
   test("marks chats unread on completed turns and clears unread when marked read", async () => {
     const dataDir = await createTempDataDir()
     const store = new EventStore(dataDir)

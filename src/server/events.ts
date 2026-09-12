@@ -1,4 +1,4 @@
-import type { AgentProvider, ProjectSummary, QueuedChatMessage, TranscriptEntry } from "../shared/types"
+import type { AgentProvider, ChatAttachment, ProjectSummary, QueuedChatMessage, TranscriptEntry } from "../shared/types"
 
 export interface ProjectRecord extends ProjectSummary {
   sidebarTitle?: string
@@ -326,6 +326,20 @@ export type QueuedMessageEvent =
       timestamp: number
       chatId: string
       queuedMessageId: string
+    }
+  /**
+   * A group-queued message merged into this slot. Rewriting the entry in place
+   * (rather than removing and re-adding it) keeps its id and its position in
+   * the queue, which is the point: the merged message stays where it was.
+   */
+  | {
+      v: 2
+      type: "queued_message_updated"
+      timestamp: number
+      chatId: string
+      queuedMessageId: string
+      content: string
+      attachments: ChatAttachment[]
     }
 
 export type TurnEvent =

@@ -2035,6 +2035,119 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("group enqueue merges into the last queued message and sends it as one prompt", async () => {
+    const events = new AsyncEventQueue<any>()
+    const prompts: string[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          prompts.push(content)
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "first prompt",
+      model: "claude-opus-4-1",
+    })
+    const queued = await coordinator.enqueue({ type: "message.enqueue", chatId: "chat-1", content: "abc" })
+    const grouped = await coordinator.enqueue({
+      type: "message.enqueue",
+      chatId: "chat-1",
+      content: "xyz",
+      group: true,
+    })
+
+    // One slot, not two — and the same slot, so it keeps its place in the queue.
+    expect(grouped.queuedMessageId).toBe(queued.queuedMessageId)
+    expect(store.getQueuedMessages()).toHaveLength(1)
+    expect(store.getQueuedMessages()[0].content).toBe("abc\n\nxyz")
+
+    events.close()
+  })
+
+  test("group enqueue with nothing queued just queues", async () => {
+    // Grouping and queueing are the same act with an empty queue, and the
+    // message must not be dropped for asking to be merged.
+    const events = new AsyncEventQueue<any>()
+    const prompts: string[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          prompts.push(content)
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "first prompt",
+      model: "claude-opus-4-1",
+    })
+    await coordinator.enqueue({ type: "message.enqueue", chatId: "chat-1", content: "alone", group: true })
+
+    expect(store.getQueuedMessages()).toHaveLength(1)
+    expect(store.getQueuedMessages()[0].content).toBe("alone")
+
+    events.close()
+  })
+
+  test("group enqueue on an idle chat starts the turn rather than merging", async () => {
+    // Nothing is running, so there is no slot waiting behind it to join: the
+    // message has to start now, the same as any other enqueue off an idle chat.
+    const events = new AsyncEventQueue<any>()
+    const prompts: string[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          prompts.push(content)
+        },
+      }),
+    })
+
+    await coordinator.enqueue({ type: "message.enqueue", chatId: "chat-1", content: "start me", group: true })
+
+    expect(prompts).toEqual(["start me"])
+    expect(store.getQueuedMessages()).toEqual([])
+
+    events.close()
+  })
+
   test("enqueue with steer is not an error when the queue drained first", async () => {
     // The race the flag exists for: the turn ends while the message is being
     // queued, the drain starts it, and steer() finds nothing to steer. The
@@ -2784,6 +2897,13 @@ function createFakeStore(options?: {
     },
     async removeQueuedMessage(_chatId: string, queuedMessageId: string) {
       this.queuedMessages = this.queuedMessages.filter((entry) => entry.id !== queuedMessageId)
+    },
+    async updateQueuedMessage(_chatId: string, queuedMessageId: string, update: { content: string; attachments: any[] }) {
+      const target = this.queuedMessages.find((entry) => entry.id === queuedMessageId)
+      if (!target) throw new Error("Queued message not found")
+      target.content = update.content
+      target.attachments = [...update.attachments]
+      return target
     },
   }
 }

@@ -25,6 +25,7 @@ import {
   type ChatSoundPreference,
   type DefaultProviderPreference,
   type EditorPreset,
+  type GroupQueueBinding,
   type SubmitWhileRunning,
   type TerminalPreset,
 } from "../shared/types"
@@ -37,6 +38,7 @@ interface AppSettingsFile {
   chatSoundPreference?: unknown
   chatSoundId?: unknown
   submitWhileRunning?: unknown
+  groupQueue?: unknown
   terminal?: {
     scrollbackLines?: unknown
     minColumnWidth?: unknown
@@ -93,6 +95,9 @@ const DEFAULT_CHAT_SOUND_ID: ChatSoundId = "funk"
 // Queue by default: interrupting a running turn is the rarer, more disruptive
 // intent, so it is the one you reach for deliberately.
 const DEFAULT_SUBMIT_WHILE_RUNNING: SubmitWhileRunning = "queue"
+// Group-queue on the chord: the plain keystroke keeps doing what it always
+// did, and grouping is the one you reach for deliberately.
+const DEFAULT_GROUP_QUEUE: GroupQueueBinding = "modifier"
 
 function createAnalyticsUserId() {
   return `anon_${randomUUID()}`
@@ -133,6 +138,10 @@ function normalizeSubmitWhileRunning(value: unknown): SubmitWhileRunning {
   return value === "steer" ? "steer" : DEFAULT_SUBMIT_WHILE_RUNNING
 }
 
+function normalizeGroupQueue(value: unknown): GroupQueueBinding {
+  return value === "primary" ? "primary" : DEFAULT_GROUP_QUEUE
+}
+
 function normalizeDefaultProvider(value: unknown): DefaultProviderPreference {
   return value === "claude" || value === "codex" || value === "cursor" || value === "grok" || value === "pi" || value === "last_used"
     ? value
@@ -157,6 +166,7 @@ function toFilePayload(state: AppSettingsState) {
     chatSoundPreference: state.chatSoundPreference,
     chatSoundId: state.chatSoundId,
     submitWhileRunning: state.submitWhileRunning,
+    groupQueue: state.groupQueue,
     terminal: state.terminal,
     editor: state.editor,
     transcript: state.transcript,
@@ -184,6 +194,7 @@ function toSnapshot(
     chatSoundPreference: state.chatSoundPreference,
     chatSoundId: state.chatSoundId,
     submitWhileRunning: state.submitWhileRunning,
+    groupQueue: state.groupQueue,
     terminal: state.terminal,
     editor: state.editor,
     transcript: state.transcript,
@@ -251,6 +262,7 @@ function normalizeAppSettings(
     chatSoundPreference: normalizeChatSoundPreference(source?.chatSoundPreference),
     chatSoundId: normalizeChatSoundId(source?.chatSoundId),
     submitWhileRunning: normalizeSubmitWhileRunning(source?.submitWhileRunning),
+    groupQueue: normalizeGroupQueue(source?.groupQueue),
     terminal: {
       scrollbackLines: clampNumber(source?.terminal?.scrollbackLines, DEFAULT_TERMINAL_SCROLLBACK, MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK),
       minColumnWidth: clampNumber(source?.terminal?.minColumnWidth, DEFAULT_TERMINAL_MIN_COLUMN_WIDTH, MIN_TERMINAL_MIN_COLUMN_WIDTH, MAX_TERMINAL_MIN_COLUMN_WIDTH),
@@ -302,6 +314,7 @@ function toComparablePayload(source: AppSettingsFile) {
     chatSoundPreference: source.chatSoundPreference,
     chatSoundId: source.chatSoundId,
     submitWhileRunning: source.submitWhileRunning,
+    groupQueue: source.groupQueue,
     terminal: source.terminal,
     editor: source.editor,
     transcript: source.transcript,

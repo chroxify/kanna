@@ -1816,8 +1816,37 @@ export class AgentCoordinator {
     return { chatId }
   }
 
+  /**
+   * Group-queue: merge into the last queued message so both go to the agent as
+   * one prompt, in that message's slot. The slot keeps its own provider, model
+   * and plan-mode settings — it is the turn that was already scheduled, and
+   * this only adds to what it says.
+   *
+   * Returns null when there is nothing to merge into — no queue, or no running
+   * turn, in which case the caller queues normally rather than grouping into a
+   * slot that is about to drain.
+   */
+  private async mergeIntoLastQueuedMessage(command: Extract<ClientCommand, { type: "message.enqueue" }>) {
+    if (!this.activeTurns.has(command.chatId)) return null
+    if (typeof this.store.getQueuedMessages !== "function") return null
+    const queue = this.store.getQueuedMessages(command.chatId)
+    const last = queue[queue.length - 1]
+    if (!last) return null
+    const content = [last.content, command.content].filter((part) => part.trim().length > 0).join("\n\n")
+    const merged = await this.store.updateQueuedMessage(command.chatId, last.id, {
+      content,
+      attachments: [...last.attachments, ...(command.attachments ?? [])],
+    })
+    this.emitStateChange(command.chatId)
+    return merged
+  }
+
   async enqueue(command: Extract<ClientCommand, { type: "message.enqueue" }>) {
     this.analytics.track("message_sent")
+    if (command.group && !command.steer) {
+      const merged = await this.mergeIntoLastQueuedMessage(command)
+      if (merged) return { queuedMessageId: merged.id }
+    }
     const queuedMessage = await this.enqueueMessage(command.chatId, command.content, command.attachments ?? [], {
       provider: command.provider,
       model: command.model,
