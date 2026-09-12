@@ -94,9 +94,9 @@ describe("parsers", () => {
 
   test("parseClaudeAuthStatus parses the JSON payload", () => {
     expect(parseClaudeAuthStatus('{\n  "loggedIn": false,\n  "authMethod": "none",\n  "apiProvider": "firstParty"\n}'))
-      .toEqual({ loggedIn: false, account: null })
-    expect(parseClaudeAuthStatus('{"loggedIn": true, "email": "jake@example.com"}'))
-      .toEqual({ loggedIn: true, account: "jake@example.com" })
+      .toEqual({ loggedIn: false, account: null, plan: null })
+    expect(parseClaudeAuthStatus('{"loggedIn": true, "email": "jake@example.com", "subscriptionType": "max"}'))
+      .toEqual({ loggedIn: true, account: "jake@example.com", plan: "max" })
     expect(parseClaudeAuthStatus("garbage")).toBeNull()
   })
 
@@ -199,9 +199,10 @@ function llmSnapshot(overrides: Partial<LlmProviderSnapshot> = {}): LlmProviderS
 
 interface HarnessOptions {
   paths?: Record<string, string | null>
-  exec?: (argv: string[], opts?: { stdin?: string }) => ExecResult | Promise<ExecResult>
+  exec?: (argv: string[], opts?: { stdin?: string; env?: Record<string, string> }) => ExecResult | Promise<ExecResult>
   spawnStreaming?: (argv: string[], opts?: { env?: Record<string, string> }) => StreamingChild
-  spawnPty?: (argv: string[]) => StreamingChild
+  spawnPty?: (argv: string[], opts?: { env?: Record<string, string> }) => StreamingChild
+  claudeAccounts?: ProviderAuthManagerDeps["claudeAccounts"]
   fetchFn?: typeof fetch
   llmProvider?: LlmProviderSnapshot
   fetchLatestNpmVersion?: (pkg: string) => Promise<string>
@@ -249,6 +250,7 @@ function createHarness(options: HarnessOptions = {}) {
     },
     fetchFn: options.fetchFn ?? ((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch),
     fetchLatestNpmVersion: options.fetchLatestNpmVersion,
+    claudeAccounts: options.claudeAccounts,
     resolveCommandPath: (command) => paths[command] ?? null,
     onSignedIn: (service) => signedIn.push(service),
     trackEvent: (name) => events.push(name),
@@ -789,6 +791,116 @@ describe("claude login flow", () => {
     const harness = createHarness({ exec: signedOutExec })
     await harness.manager.refresh({ force: true })
     expect(() => harness.manager.submitLoginCode("claude", "code")).toThrow()
+  })
+})
+
+describe("claude accounts", () => {
+  function createAccounts() {
+    const listeners = new Set<() => void>()
+    const records = [
+      { id: "default", configDir: null, createdAt: 0 },
+      { id: "second", configDir: "/data/claude-accounts/second", createdAt: 1 },
+    ]
+    let activeId = "default"
+    const accounts: NonNullable<ProviderAuthManagerDeps["claudeAccounts"]> = {
+      list: () => records,
+      getActive: () => records.find((record) => record.id === activeId)!,
+      getAutoSwitch: () => true,
+      getLastSwitch: () => null,
+      envFor: (accountId): Record<string, string> => {
+        const configDir = records.find((record) => record.id === accountId)?.configDir
+        return configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}
+      },
+      linkSharedEntries: async () => {},
+      onChange: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    }
+    return {
+      accounts,
+      setActive: (accountId: string) => {
+        activeId = accountId
+        for (const listener of listeners) listener()
+      },
+    }
+  }
+
+  test("probes every account and mirrors the active one onto the claude service", async () => {
+    const { accounts, setActive } = createAccounts()
+    const harness = createHarness({
+      claudeAccounts: accounts,
+      exec: (argv, opts) => {
+        if (argv.join(" ").includes("auth status --json")) {
+          return opts?.env?.CLAUDE_CONFIG_DIR
+            ? { code: 0, stdout: '{"loggedIn": true, "email": "second@example.com", "subscriptionType": "pro"}', stderr: "" }
+            : { code: 0, stdout: '{"loggedIn": true, "email": "first@example.com", "subscriptionType": "max"}', stderr: "" }
+        }
+        return signedOutExec(argv)
+      },
+    })
+    await harness.manager.refresh({ force: true })
+
+    const snapshot = harness.manager.getSnapshot()
+    expect(snapshot.services.find((s) => s.service === "claude")).toMatchObject({ authStatus: "signed_in", account: "first@example.com" })
+    expect(snapshot.claudeAccounts?.accounts).toEqual([
+      { id: "default", isDefault: true, active: true, authStatus: "signed_in", email: "first@example.com", plan: "max" },
+      { id: "second", isDefault: false, active: false, authStatus: "signed_in", email: "second@example.com", plan: "pro" },
+    ])
+
+    setActive("second")
+    expect(harness.manager.getSnapshot().services.find((s) => s.service === "claude")!.account).toBe("second@example.com")
+  })
+
+  test("signs into the account the flow was started for", async () => {
+    const children = [new FakeChild(), new FakeChild()]
+    const { accounts } = createAccounts()
+    let secondSignedIn = false
+    let ptyEnv: Record<string, string> | undefined
+    const harness = createHarness({
+      claudeAccounts: accounts,
+      exec: (argv, opts) => {
+        if (argv.join(" ").includes("auth status --json")) {
+          // The default account is signed in the whole time, so only a probe
+          // of the right account can finish this flow.
+          const signedIn = opts?.env?.CLAUDE_CONFIG_DIR ? secondSignedIn : true
+          return { code: 0, stdout: JSON.stringify({ loggedIn: signedIn, email: signedIn ? "x@example.com" : undefined }), stderr: "" }
+        }
+        return signedOutExec(argv)
+      },
+      spawnPty: (_argv, opts) => {
+        ptyEnv = opts?.env
+        return children.shift()!
+      },
+    })
+    await harness.manager.refresh({ force: true })
+    const [first, retry] = children
+    harness.manager.startLogin("claude", { accountId: "second" })
+    await tick()
+    expect(ptyEnv).toEqual({ CLAUDE_CONFIG_DIR: "/data/claude-accounts/second" })
+    expect(harness.manager.getSnapshot().claudeAccounts?.loginAccountId).toBe("second")
+
+    first!.emit(CLAUDE_LOGIN_FIXTURE)
+    await tick()
+    harness.manager.submitLoginCode("claude", "code")
+    first!.exit(0)
+    await tick(20)
+    expect(harness.manager.getSnapshot().services.find((s) => s.service === "claude")!.login).toMatchObject({ phase: "error" })
+    // Still pointed at the account, so Try Again signs into it rather than the active one.
+    expect(harness.manager.getSnapshot().claudeAccounts?.loginAccountId).toBe("second")
+
+    harness.manager.startLogin("claude", { accountId: "second" })
+    await tick()
+    retry!.emit(CLAUDE_LOGIN_FIXTURE)
+    await tick()
+    harness.manager.submitLoginCode("claude", "code")
+    secondSignedIn = true
+    retry!.exit(0)
+    await tick(20)
+    const accountsSnapshot = harness.manager.getSnapshot().claudeAccounts!
+    expect(accountsSnapshot.accounts.find((account) => account.id === "second")!.authStatus).toBe("signed_in")
+    expect(accountsSnapshot.loginAccountId).toBeNull()
+    expect(harness.signedIn).toContain("claude")
   })
 })
 

@@ -3,9 +3,11 @@ import { ChevronRight } from "lucide-react"
 import type { ProviderUsageSnapshot, UsageLimitWindow, UsageLimitsSnapshot } from "../../../shared/types"
 import { PROVIDERS } from "../../../shared/types"
 import { PROVIDER_ICONS } from "../../components/chat-ui/ChatPreferenceControls"
+import { claudeAccountName } from "../../components/auth/ClaudeAccountsList"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip"
 import { formatRelativeTime } from "../../lib/formatters"
 import { cn } from "../../lib/utils"
+import { useProviderAuthStore } from "../../stores/providerAuthStore"
 import type { KannaState } from "../useKannaState"
 
 const MINUTE_MS = 60_000
@@ -150,11 +152,14 @@ function WindowRow({ window }: { window: UsageLimitWindow }) {
 
 export function ProviderCard({
   snapshot,
+  accountLabel,
   collapsible = false,
   refreshing = false,
   onRefresh,
 }: {
   snapshot: ProviderUsageSnapshot
+  /** Which of several accounts on the harness this card is (the Claude account's email). */
+  accountLabel?: string
   /** When true, the card starts collapsed and the header toggles it open/closed. */
   collapsible?: boolean
   /** Show "Refreshing…" in the header's timestamp slot while a read is in flight. */
@@ -226,6 +231,9 @@ export function ProviderCard({
       <span className="min-w-0 truncate text-sm font-semibold text-foreground">
         {providerLabel(snapshot.provider)}
       </span>
+      {accountLabel ? (
+        <span className="min-w-0 truncate text-xs text-muted-foreground">{accountLabel}</span>
+      ) : null}
       {planBadgeText ? (
         <span className="min-w-0 shrink truncate rounded-full border border-border px-2 py-0.5 text-[11px] capitalize text-muted-foreground">
           {planBadgeText}
@@ -332,6 +340,7 @@ export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
   const socket = state.socket
   const [snapshot, setSnapshot] = useState<UsageLimitsSnapshot | null>(null)
   const [refreshing, setRefreshing] = useState(true)
+  const claudeAccounts = useProviderAuthStore((store) => store.snapshot?.claudeAccounts ?? null)
 
   // Live subscription: the immediate push shows cached/stale data right away,
   // and turn-pushed updates land here while the view is open.
@@ -372,16 +381,40 @@ export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
       {snapshot ? (
         // Always render whatever we have (cached/stale) — the poll swaps in
         // fresh numbers when they land; the header "Updated …" is the control.
-        snapshot.providers.map((provider) => (
-          <ProviderCard
-            key={provider.provider}
-            snapshot={provider}
-            refreshing={refreshing}
-            onRefresh={() => {
-              if (!refreshing) void runRefresh(true)
-            }}
-          />
-        ))
+        snapshot.providers.flatMap((provider) => {
+          const onRefresh = () => {
+            if (!refreshing) void runRefresh(true)
+          }
+          // Several Claude accounts: a card each, in the order Settings lists
+          // them, instead of the one card for whichever is active.
+          if (provider.provider === "claude" && claudeAccounts && claudeAccounts.accounts.length > 1) {
+            return claudeAccounts.accounts.map((account) => (
+              <ProviderCard
+                key={`claude:${account.id}`}
+                snapshot={snapshot.claudeAccounts?.find((entry) => entry.accountId === account.id)?.usage ?? {
+                  ...provider,
+                  status: "unknown",
+                  plan: account.plan,
+                  windows: [],
+                  credits: null,
+                  detail: null,
+                  updatedAt: null,
+                }}
+                accountLabel={`${claudeAccountName(account)}${account.active ? " · Active" : ""}`}
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+              />
+            ))
+          }
+          return [
+            <ProviderCard
+              key={provider.provider}
+              snapshot={provider}
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+            />,
+          ]
+        })
       ) : (
         <div className="rounded-2xl border border-border bg-card/40 px-5 py-6 text-sm text-muted-foreground">
           Loading usage…

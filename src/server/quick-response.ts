@@ -93,6 +93,13 @@ function structuredOutputFromSdkMessage(message: unknown): unknown | null {
   return null
 }
 
+let resolveClaudeAccountEnv: () => Record<string, string> = () => ({})
+
+/** Quick responses (titles, commit messages) run on the active Claude account too. */
+export function setClaudeQuickResponseAccountEnv(resolve: () => Record<string, string>) {
+  resolveClaudeAccountEnv = resolve
+}
+
 export async function runClaudeStructured(args: Omit<StructuredQuickResponseArgs<unknown>, "parse">): Promise<unknown | null> {
   const q = query({
     prompt: args.prompt,
@@ -108,7 +115,7 @@ export async function runClaudeStructured(args: Omit<StructuredQuickResponseArgs
         type: "json_schema",
         schema: args.schema,
       },
-      env: { ...process.env },
+      env: { ...process.env, ...resolveClaudeAccountEnv() },
     },
   })
 

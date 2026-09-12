@@ -1619,6 +1619,83 @@ describe("AgentCoordinator claude integration", () => {
     queues.forEach((queue) => queue.close())
   })
 
+  test("runs Claude sessions on the active account and restarts a chat's session when it changes", async () => {
+    const queues: AsyncEventQueue<any>[] = []
+    const startSessionCalls: Array<{ env?: Record<string, string>; sessionToken: string | null }> = []
+    const rateLimitPushes: Array<[number | undefined, string]> = []
+    const linked: string[] = []
+    const accounts = [
+      { id: "default", configDir: null, createdAt: 0 },
+      { id: "second", configDir: "/data/claude-accounts/second", createdAt: 1 },
+    ]
+    let activeAccountId = "default"
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      claudeAccounts: {
+        list: () => accounts,
+        getActive: () => accounts.find((account) => account.id === activeAccountId)!,
+        envFor: (accountId): Record<string, string> => {
+          const configDir = accounts.find((account) => account.id === accountId)?.configDir
+          return configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}
+        },
+        linkSharedEntries: async (record) => {
+          if (record.configDir) linked.push(record.id)
+        },
+      },
+      startClaudeSession: async (args) => {
+        startSessionCalls.push({ env: args.env, sessionToken: args.sessionToken })
+        const events = new AsyncEventQueue<any>()
+        queues.push(events)
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => events.close(),
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async () => {
+            args.onRateLimitEvent?.({ rateLimitType: "five_hour", utilization: startSessionCalls.length })
+            events.push({ type: "session_token" as const, sessionToken: "session-1" })
+            events.push({
+              type: "transcript" as const,
+              entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+            })
+          },
+        }
+      },
+    })
+    coordinator.setClaudeRateLimitListener((info, accountId) => {
+      rateLimitPushes.push([info.utilization, accountId])
+    })
+
+    const send = async () => {
+      await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "go", model: "claude-opus-4-1" })
+    }
+
+    await send()
+    await waitFor(() => store.turnFinishedCount === 1)
+    await send()
+    await waitFor(() => store.turnFinishedCount === 2)
+
+    activeAccountId = "second"
+    await send()
+    await waitFor(() => store.turnFinishedCount === 3)
+
+    expect(startSessionCalls).toEqual([
+      { env: {}, sessionToken: null },
+      // The new account resumes the chat's session rather than starting over.
+      { env: { CLAUDE_CONFIG_DIR: "/data/claude-accounts/second" }, sessionToken: "session-1" },
+    ])
+    expect(linked).toEqual(["second"])
+    expect(rateLimitPushes).toEqual([[1, "default"], [1, "default"], [2, "second"]])
+
+    queues.forEach((queue) => queue.close())
+  })
+
   test("claudeToolset only offers EnterPlanMode in auto plan", () => {
     expect(claudeToolset(false)).not.toContain("EnterPlanMode")
     // ExitPlanMode stays available so a mid-session switch into plan mode

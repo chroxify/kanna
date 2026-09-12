@@ -27,6 +27,7 @@ import { fetchGrokAccountUsage, GrokCliManager } from "./grok-cli"
 import { PiAgentManager, resolvePiConnection } from "./pi-agent"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import type { ClaudeRateLimitInfoRaw, ClaudeUsageRaw } from "./usage-limits"
+import { DEFAULT_CLAUDE_ACCOUNT_ID, type ClaudeAccountStore } from "./claude-accounts"
 import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-types"
 import {
   appendSystemMessageBlock,
@@ -194,6 +195,8 @@ interface ClaudeSessionState {
   planMode: boolean
   autoPlan: boolean
   sessionToken: string | null
+  /** The Claude account the session was started on; a switch restarts it. */
+  accountId: string
   accountInfoLoaded: boolean
   nextPromptSeq: number
   pendingPromptSeqs: number[]
@@ -236,7 +239,10 @@ interface AgentCoordinatorArgs {
     forkSession: boolean
     onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
     onRateLimitEvent?: (info: ClaudeRateLimitInfoRaw) => void
+    env?: Record<string, string>
   }) => Promise<ClaudeSessionHandle>
+  /** Which Claude account sessions run on. Without it, always Claude Code's own. */
+  claudeAccounts?: Pick<ClaudeAccountStore, "list" | "getActive" | "envFor" | "linkSharedEntries">
   /**
    * Probe whether a provider's native session artifact still exists on disk.
    * Injectable so tests can force a "missing" session without touching the
@@ -744,6 +750,8 @@ async function startClaudeSession(args: {
   forkSession: boolean
   onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
   onRateLimitEvent?: (info: ClaudeRateLimitInfoRaw) => void
+  /** Puts the session on a Claude account (`CLAUDE_CONFIG_DIR`); empty for the default one. */
+  env?: Record<string, string>
 }): Promise<ClaudeSessionHandle> {
   const canUseTool: CanUseTool = async (toolName, input, options) => {
     if (toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode") {
@@ -833,7 +841,7 @@ async function startClaudeSession(args: {
       // enabling it while the UI shows "Standard".
       settings: { enableWorkflows: true, fastMode: args.serviceTier === "fast" },
       pathToClaudeCodeExecutable: process.env.CLAUDE_EXECUTABLE?.replace(/^~(?=\/|$)/, homedir()) || undefined,
-      env: (() => { const { CLAUDECODE: _, ...env } = process.env; return env })(),
+      env: (() => { const { CLAUDECODE: _, ...env } = process.env; return { ...env, ...args.env } })(),
     },
   })
 
@@ -921,7 +929,8 @@ export class AgentCoordinator {
   private readonly startClaudeSessionFn: NonNullable<AgentCoordinatorArgs["startClaudeSession"]>
   private readonly checkSessionArtifactFn: NonNullable<AgentCoordinatorArgs["checkSessionArtifact"]>
   private reportBackgroundError: ((message: string) => void) | null = null
-  private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
+  private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw, accountId: string) => void) | null = null
+  private readonly claudeAccounts: AgentCoordinatorArgs["claudeAccounts"] | null
   private cursorModelCatalogApplied = false
   private grokModelCatalogApplied = false
   private codexModelCatalogRefresh: Promise<void> | null = null
@@ -941,6 +950,7 @@ export class AgentCoordinator {
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
     this.startClaudeSessionFn = args.startClaudeSession ?? startClaudeSession
     this.checkSessionArtifactFn = args.checkSessionArtifact ?? checkSessionArtifact
+    this.claudeAccounts = args.claudeAccounts ?? null
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
@@ -948,17 +958,19 @@ export class AgentCoordinator {
   }
 
   /** Register a sink for pushed Claude rate-limit events (usage page). */
-  setClaudeRateLimitListener(listener: ((info: ClaudeRateLimitInfoRaw) => void) | null) {
+  setClaudeRateLimitListener(listener: ((info: ClaudeRateLimitInfoRaw, accountId: string) => void) | null) {
     this.onClaudeRateLimit = listener
   }
 
   /**
-   * Read Claude subscription usage on demand. Reuses a live session's query
-   * when one exists; otherwise spawns a short-lived probe. Returns null when
-   * unavailable (no method / timeout / not a subscription session).
+   * Read Claude subscription usage on demand, for one account (the active one
+   * by default). Reuses a live session on that account when one exists;
+   * otherwise spawns a short-lived probe. Returns null when unavailable (no
+   * method / timeout / not a subscription session).
    */
-  async fetchClaudeUsage(): Promise<ClaudeUsageRaw | null> {
+  async fetchClaudeUsage(accountId: string = this.activeClaudeAccountId()): Promise<ClaudeUsageRaw | null> {
     for (const state of this.claudeSessions.values()) {
+      if (state.accountId !== accountId) continue
       if (state.session.getUsage) {
         const usage = await state.session.getUsage()
         if (usage) return usage
@@ -975,6 +987,7 @@ export class AgentCoordinator {
         sessionToken: null,
         forkSession: false,
         onToolRequest: async () => ({}),
+        env: await this.prepareClaudeAccountEnv(accountId),
       })
       return (await probe.getUsage?.()) ?? null
     } catch {
@@ -982,6 +995,18 @@ export class AgentCoordinator {
     } finally {
       probe?.close()
     }
+  }
+
+  private activeClaudeAccountId() {
+    return this.claudeAccounts?.getActive().id ?? DEFAULT_CLAUDE_ACCOUNT_ID
+  }
+
+  /** The env that puts a Claude process on this account, links refreshed first. */
+  private async prepareClaudeAccountEnv(accountId: string): Promise<Record<string, string>> {
+    const record = this.claudeAccounts?.list().find((account) => account.id === accountId)
+    if (!record || !this.claudeAccounts) return {}
+    await this.claudeAccounts.linkSharedEntries(record)
+    return this.claudeAccounts.envFor(accountId)
   }
 
   /** Read Codex account rate limits on demand (reuses a live app-server or probes). */
@@ -1735,6 +1760,7 @@ export class AgentCoordinator {
     onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
   }): Promise<HarnessTurn> {
     let session = this.claudeSessions.get(args.chatId)
+    const accountId = this.activeClaudeAccountId()
 
     // autoPlan changes the SDK's `tools` allowlist, which is fixed at query()
     // time — unlike planMode (setPermissionMode) it can only be applied by
@@ -1745,6 +1771,10 @@ export class AgentCoordinator {
       || session.localPath !== args.localPath
       || session.effort !== args.effort
       || session.autoPlan !== args.autoPlan
+      // The account is fixed by the process env, so moving a chat to another
+      // account is a restart too; the resume carries the conversation over
+      // because every account shares the same `projects/`.
+      || session.accountId !== accountId
       || args.forkSession
     ) {
       if (session) {
@@ -1762,7 +1792,8 @@ export class AgentCoordinator {
         sessionToken: args.sessionToken,
         forkSession: args.forkSession,
         onToolRequest: args.onToolRequest,
-        onRateLimitEvent: (info) => this.onClaudeRateLimit?.(info),
+        onRateLimitEvent: (info) => this.onClaudeRateLimit?.(info, accountId),
+        env: await this.prepareClaudeAccountEnv(accountId),
       })
       this.refreshClaudeModelCatalog(started)
 
@@ -1778,6 +1809,7 @@ export class AgentCoordinator {
         planMode: args.planMode,
         autoPlan: args.autoPlan,
         sessionToken: args.sessionToken,
+        accountId,
         accountInfoLoaded: false,
         nextPromptSeq: 0,
         pendingPromptSeqs: [],

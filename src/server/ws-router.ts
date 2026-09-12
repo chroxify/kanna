@@ -24,6 +24,7 @@ import { writeStandaloneTranscriptExport } from "./standalone-export"
 import { TerminalManager } from "./terminal-manager"
 import type { WorktreeProbe } from "./worktree-probe"
 import type { ProviderAuthManager } from "./provider-auth"
+import type { ClaudeAccountStore } from "./claude-accounts"
 import type { UpdateManager } from "./update-manager"
 import type { UsageLimitsManager } from "./usage-limits"
 import { deriveChatSnapshot, deriveChatTouchedFiles, deriveLocalProjectsSnapshot, deriveSidebarData } from "./read-models"
@@ -112,8 +113,10 @@ interface CreateWsRouterArgs {
     | "cancelLogin"
     | "startOpenRouterAuth"
     | "exchangeOpenRouterCode"
+    | "logoutClaudeAccount"
     | "onChange"
   > | null
+  claudeAccounts?: Pick<ClaudeAccountStore, "add" | "remove" | "setActive" | "setAutoSwitch"> | null
 }
 
 interface SnapshotBroadcastFilter {
@@ -213,6 +216,7 @@ export function createWsRouter({
   updateManager,
   usageLimits,
   providerAuth,
+  claudeAccounts,
 }: CreateWsRouterArgs) {
   const sockets = new Set<ServerWebSocket<ClientState>>()
   let pendingBroadcastTimer: ReturnType<typeof setTimeout> | null = null
@@ -1231,7 +1235,35 @@ export function createWsRouter({
         }
         case "auth.login.start": {
           if (!providerAuth) throw new Error("Provider auth unavailable.")
-          providerAuth.startLogin(command.service)
+          providerAuth.startLogin(command.service, { accountId: command.accountId })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          return
+        }
+        case "claudeAccounts.add": {
+          if (!providerAuth || !claudeAccounts) throw new Error("Claude accounts unavailable.")
+          // Adding is signing in: the new account is useless until it has a
+          // login, so its sign-in flow starts right away on the claude card.
+          const account = await claudeAccounts.add()
+          providerAuth.startLogin("claude", { accountId: account.id })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { accountId: account.id } })
+          return
+        }
+        case "claudeAccounts.remove": {
+          if (!providerAuth || !claudeAccounts) throw new Error("Claude accounts unavailable.")
+          await providerAuth.logoutClaudeAccount(command.accountId).catch(() => undefined)
+          await claudeAccounts.remove(command.accountId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          return
+        }
+        case "claudeAccounts.setActive": {
+          if (!claudeAccounts) throw new Error("Claude accounts unavailable.")
+          claudeAccounts.setActive(command.accountId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          return
+        }
+        case "claudeAccounts.setAutoSwitch": {
+          if (!claudeAccounts) throw new Error("Claude accounts unavailable.")
+          claudeAccounts.setAutoSwitch(command.enabled)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           return
         }

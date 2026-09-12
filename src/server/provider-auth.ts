@@ -7,9 +7,12 @@ import {
   type AuthLoginFlowState,
   type AuthServiceId,
   type AuthServiceSnapshot,
+  type AuthServiceStatus,
+  type ClaudeAccountsSnapshot,
   type LlmProviderSnapshot,
   type ProviderAuthSnapshot,
 } from "../shared/types"
+import type { ClaudeAccountStore } from "./claude-accounts"
 import { compareVersions } from "./cli-runtime"
 import { parseGrokAuthStatus, parseGrokDeviceLogin, parseGrokVersion } from "./grok-cli"
 
@@ -118,6 +121,7 @@ export function parseGhVersion(output: string): string | null {
 export interface ClaudeAuthStatusParsed {
   loggedIn: boolean
   account: string | null
+  plan: string | null
 }
 
 /** `claude auth status --json` → { loggedIn, authMethod, ... } (exit 0 either way). */
@@ -133,7 +137,8 @@ export function parseClaudeAuthStatus(stdout: string): ClaudeAuthStatusParsed | 
       : typeof (parsed.oauthAccount as Record<string, unknown> | undefined)?.emailAddress === "string"
         ? (parsed.oauthAccount as Record<string, string>).emailAddress
         : null
-    return { loggedIn: parsed.loggedIn === true, account }
+    const plan = typeof parsed.subscriptionType === "string" ? parsed.subscriptionType : null
+    return { loggedIn: parsed.loggedIn === true, account, plan }
   } catch {
     return null
   }
@@ -225,7 +230,7 @@ export interface ProviderAuthManagerDeps {
     opts?: { stdin?: string; env?: Record<string, string>; timeoutMs?: number }
   ) => Promise<ExecResult>
   spawnStreaming: (argv: string[], opts?: { env?: Record<string, string> }) => StreamingChild
-  spawnPty: (argv: string[]) => StreamingChild
+  spawnPty: (argv: string[], opts?: { env?: Record<string, string> }) => StreamingChild
   readLlmProvider: () => Promise<LlmProviderSnapshot>
   writeLlmProvider: (
     value: Pick<LlmProviderSnapshot, "provider" | "apiKey" | "model" | "baseUrl"> &
@@ -235,6 +240,11 @@ export interface ProviderAuthManagerDeps {
   fetchLatestNpmVersion?: (packageName: string) => Promise<string>
   resolveCommandPath?: (command: string) => string | null
   onSignedIn?: (service: AuthServiceId) => void
+  /** Claude accounts; without it Claude is the one account Claude Code uses on its own. */
+  claudeAccounts?: Pick<
+    ClaudeAccountStore,
+    "list" | "getActive" | "getAutoSwitch" | "getLastSwitch" | "envFor" | "linkSharedEntries" | "onChange"
+  >
   trackEvent?: (eventName: string, properties?: Record<string, unknown>) => void
   sleep?: (ms: number) => Promise<void>
   platform?: NodeJS.Platform
@@ -247,12 +257,20 @@ export interface ProviderAuthManagerDeps {
 
 interface LoginFlowRuntime {
   service: AuthServiceId
+  /** The Claude account being signed into; null for every other service. */
+  accountId: string | null
   child: StreamingChild | null
   cancelled: boolean
   codeSubmitted: boolean
   /** Raw output tail kept for a debuggable failure detail (never in snapshots). */
   transcript: string
   timers: ReturnType<typeof setTimeout>[]
+}
+
+interface ClaudeAccountStatus {
+  authStatus: AuthServiceStatus
+  email: string | null
+  plan: string | null
 }
 
 function initialServiceSnapshot(service: AuthServiceId): AuthServiceSnapshot {
@@ -284,12 +302,21 @@ export class ProviderAuthManager {
   private lastVersionCheckAt: number | null = null
   private openRouterVerifier: string | null = null
   private disposed = false
+  private readonly claudeAccountStatuses = new Map<string, ClaudeAccountStatus>()
+  /** Outlives the flow itself, so an errored sign-in retries into the same account. */
+  private claudeLoginAccountId: string | null = null
+  private readonly disposeClaudeAccounts: (() => void) | null
 
   constructor(deps: ProviderAuthManagerDeps) {
     this.deps = deps
     for (const service of AUTH_SERVICE_ORDER) {
       this.services.set(service, initialServiceSnapshot(service))
     }
+    // Switching or adding an account changes what the claude card shows
+    // before any probe runs: the active account's last read, or "unknown".
+    this.disposeClaudeAccounts = deps.claudeAccounts?.onChange(() => {
+      this.applyActiveClaudeAccount()
+    }) ?? null
   }
 
   private now() {
@@ -305,9 +332,68 @@ export class ProviderAuthManager {
   }
 
   getSnapshot(): ProviderAuthSnapshot {
+    const claudeAccounts = this.getClaudeAccountsSnapshot()
     return {
       services: AUTH_SERVICE_ORDER.map((service) => this.services.get(service)!),
+      ...(claudeAccounts ? { claudeAccounts } : {}),
     }
+  }
+
+  private getClaudeAccountsSnapshot(): ClaudeAccountsSnapshot | undefined {
+    const store = this.deps.claudeAccounts
+    if (!store) return undefined
+    const active = store.getActive()
+    return {
+      activeAccountId: active.id,
+      autoSwitch: store.getAutoSwitch(),
+      accounts: store.list().map((account) => {
+        const status = this.claudeAccountStatuses.get(account.id)
+        return {
+          id: account.id,
+          isDefault: account.configDir === null,
+          active: account.id === active.id,
+          authStatus: status?.authStatus ?? "unknown",
+          email: status?.email ?? null,
+          plan: status?.plan ?? null,
+        }
+      }),
+      loginAccountId: this.claudeLoginAccountId,
+      lastSwitch: store.getLastSwitch(),
+    }
+  }
+
+  /**
+   * Sign a Claude account out of Claude Code before it is removed, so its
+   * Keychain entry (or credentials file) doesn't outlive it.
+   */
+  async logoutClaudeAccount(accountId: string) {
+    const store = this.deps.claudeAccounts
+    const claudePath = this.resolvePath(CLI_BINARIES.claude)
+    if (store && claudePath && store.list().some((record) => record.id === accountId)) {
+      await this.deps.exec([claudePath, "auth", "logout"], { env: store.envFor(accountId), timeoutMs: 20_000 })
+    }
+    this.claudeAccountStatuses.delete(accountId)
+  }
+
+  /** Signed-in state of one Claude account, as of its last probe. */
+  getClaudeAccountStatus(accountId: string): AuthServiceStatus {
+    return this.claudeAccountStatuses.get(accountId)?.authStatus ?? "unknown"
+  }
+
+  /** Mirror the active account onto the claude service, which the rest of the app reads. */
+  private applyActiveClaudeAccount() {
+    const store = this.deps.claudeAccounts
+    if (!store) return
+    const current = this.services.get("claude")!
+    const status = this.claudeAccountStatuses.get(store.getActive().id)
+    if (!current.installed || current.authStatus === "not_installed" || current.authStatus === "outdated") {
+      this.emit()
+      return
+    }
+    this.patchService("claude", {
+      authStatus: status?.authStatus ?? "unknown",
+      account: status?.email ?? null,
+    })
   }
 
   onChange(listener: (snapshot: ProviderAuthSnapshot) => void) {
@@ -319,6 +405,7 @@ export class ProviderAuthManager {
 
   dispose() {
     this.disposed = true
+    this.disposeClaudeAccounts?.()
     for (const service of [...this.flows.keys()]) {
       this.teardownFlow(service)
     }
@@ -345,6 +432,7 @@ export class ProviderAuthManager {
   }
 
   private setLogin(service: AuthServiceId, login: AuthLoginFlowState) {
+    if (service === "claude" && login.phase === "idle") this.claudeLoginAccountId = null
     this.patchService(service, { login })
   }
 
@@ -434,8 +522,24 @@ export class ProviderAuthManager {
     let statusDetail: string | null = null
 
     if (service === "claude") {
-      const result = await this.deps.exec([binaryPath, "auth", "status", "--json"], { timeoutMs: 20_000 })
-      const parsed = parseClaudeAuthStatus(result.stdout)
+      const store = this.deps.claudeAccounts
+      const activeId = store?.getActive().id ?? null
+      const probes = await Promise.all((store?.list() ?? [null]).map(async (record) => {
+        const result = await this.deps.exec([binaryPath, "auth", "status", "--json"], {
+          timeoutMs: 20_000,
+          ...(record ? { env: store!.envFor(record.id) } : {}),
+        })
+        const parsed = parseClaudeAuthStatus(result.stdout)
+        if (record) {
+          this.claudeAccountStatuses.set(record.id, {
+            authStatus: parsed ? (parsed.loggedIn ? "signed_in" : "signed_out") : result.code === 0 ? "signed_out" : "error",
+            email: parsed?.account ?? null,
+            plan: parsed?.plan ?? null,
+          })
+        }
+        return { id: record?.id ?? null, result, parsed }
+      }))
+      const { result, parsed } = probes.find((probe) => probe.id === activeId) ?? probes[0]!
       if (parsed) {
         authStatus = parsed.loggedIn ? "signed_in" : "signed_out"
         account = parsed.account
@@ -636,7 +740,7 @@ export class ProviderAuthManager {
   // Login flows
   // -------------------------------------------------------------------------
 
-  startLogin(service: AuthServiceId): void {
+  startLogin(service: AuthServiceId, options: { accountId?: string } = {}): void {
     if (service === "openrouter") {
       throw new Error("Use the OpenRouter OAuth flow (auth.openrouter.start).")
     }
@@ -650,8 +754,13 @@ export class ProviderAuthManager {
       throw new Error(`${current.label} is too old for Kanna — update it first.`)
     }
 
+    const accountId = service === "claude" && this.deps.claudeAccounts
+      ? (options.accountId ?? this.deps.claudeAccounts.getActive().id)
+      : null
+    if (service === "claude") this.claudeLoginAccountId = accountId
     const flow: LoginFlowRuntime = {
       service,
+      accountId,
       child: null,
       cancelled: false,
       codeSubmitted: false,
@@ -701,7 +810,7 @@ export class ProviderAuthManager {
         if (flow.cancelled || this.flows.get(service) !== flow) return
         await this.probeService(service)
         if (flow.cancelled || this.flows.get(service) !== flow) return
-        if (this.services.get(service)!.authStatus === "signed_in") {
+        if (this.isFlowSignedIn(flow)) {
           this.teardownFlow(service)
           this.setLogin(service, { phase: "idle" })
           this.deps.trackEvent?.("auth_login_succeeded", { service })
@@ -754,8 +863,7 @@ export class ProviderAuthManager {
       this.flows.delete(service)
     }
     await this.probeService(service)
-    const snapshot = this.services.get(service)!
-    if (snapshot.authStatus === "signed_in") {
+    if (this.isFlowSignedIn(flow)) {
       this.setLogin(service, { phase: "idle" })
       this.deps.trackEvent?.("auth_login_succeeded", { service })
       this.deps.onSignedIn?.(service)
@@ -767,6 +875,11 @@ export class ProviderAuthManager {
       })
       this.deps.trackEvent?.("auth_login_failed", { service })
     }
+  }
+
+  private isFlowSignedIn(flow: LoginFlowRuntime) {
+    if (flow.accountId !== null) return this.getClaudeAccountStatus(flow.accountId) === "signed_in"
+    return this.services.get(flow.service)!.authStatus === "signed_in"
   }
 
   private async runGhLogin(flow: LoginFlowRuntime) {
@@ -1037,7 +1150,14 @@ export class ProviderAuthManager {
     const claudePath = this.resolvePath(CLI_BINARIES.claude)
     if (!claudePath) throw new Error("Claude Code is not installed.")
 
-    const child = this.deps.spawnPty([claudePath, "auth", "login"])
+    const store = this.deps.claudeAccounts
+    const account = flow.accountId !== null ? store?.list().find((record) => record.id === flow.accountId) : undefined
+    if (account && store) await store.linkSharedEntries(account)
+    if (flow.cancelled) return
+    const child = this.deps.spawnPty(
+      [claudePath, "auth", "login"],
+      flow.accountId !== null && store ? { env: store.envFor(flow.accountId) } : undefined,
+    )
     flow.child = child
     child.onOutput((chunk) => {
       flow.transcript = (flow.transcript + chunk).slice(-16_384)
@@ -1234,7 +1354,7 @@ export function createProcessAuthDeps(): Pick<ProviderAuthManagerDeps, "exec" | 
       }
     },
 
-    spawnPty(argv) {
+    spawnPty(argv, opts) {
       if (typeof Bun.Terminal !== "function") {
         throw new Error("This sign-in flow requires Bun 1.3.5+ (PTY support).")
       }
@@ -1252,7 +1372,7 @@ export function createProcessAuthDeps(): Pick<ProviderAuthManagerDeps, "exec" | 
       try {
         proc = Bun.spawn(argv, {
           terminal,
-          env: { ...process.env, TERM: "xterm-256color" },
+          env: { ...process.env, ...opts?.env, TERM: "xterm-256color" },
         })
       } catch (error) {
         terminal.close()

@@ -37,6 +37,8 @@ import { handleTranscribe } from "./transcribe"
 import { handleChatWindow } from "./chat-window-route"
 import { applyPiFaveModels } from "./provider-catalog"
 import { createProcessAuthDeps, ProviderAuthManager } from "./provider-auth"
+import { ClaudeAccountStore, pickClaudeFailoverAccount } from "./claude-accounts"
+import { setClaudeQuickResponseAccountEnv } from "./quick-response"
 import { fetchLatestPackageVersion } from "./cli-runtime"
 import { getMachineDisplayName } from "./machine-name"
 import { PortTunnelManager } from "./port-tunnels"
@@ -242,10 +244,17 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     })
     : null
   const codexManager = new CodexAppServerManager()
+  const claudeAccounts = new ClaudeAccountStore({
+    filePath: path.join(store.dataDir, "claude-accounts.json"),
+    accountsDir: path.join(store.dataDir, "claude-accounts"),
+  })
+  await claudeAccounts.initialize()
+  setClaudeQuickResponseAccountEnv(() => claudeAccounts.envFor(claudeAccounts.getActive().id))
   const agent = new AgentCoordinator({
     store,
     analytics,
     codexManager,
+    claudeAccounts,
     onStateChange: (chatId?: string, options?: { immediate?: boolean }) => {
       if (chatId) {
         if (options?.immediate) {
@@ -259,12 +268,14 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     },
   })
   const usageLimits = new UsageLimitsManager(path.join(store.dataDir, "usage-limits.json"), {
-    fetchClaudeUsage: () => agent.fetchClaudeUsage(),
+    fetchClaudeUsage: (accountId) => agent.fetchClaudeUsage(accountId),
+    listClaudeAccountIds: () => claudeAccounts.list().map((account) => account.id),
+    activeClaudeAccountId: () => claudeAccounts.getActive().id,
     fetchCodexRateLimits: () => agent.fetchCodexRateLimits(),
     fetchGrokUsage: () => agent.fetchGrokUsage(),
   })
   await usageLimits.initialize()
-  agent.setClaudeRateLimitListener((info) => usageLimits.recordClaudeRateLimitPush(info))
+  agent.setClaudeRateLimitListener((info, accountId) => usageLimits.recordClaudeRateLimitPush(info, accountId))
   codexManager.setRateLimitsListener((snapshot) => usageLimits.recordCodexRateLimitPush(snapshot))
 
   const providerAuth = new ProviderAuthManager({
@@ -273,6 +284,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     writeLlmProvider: writeLlmProviderSnapshot,
     fetchLatestNpmVersion: fetchLatestPackageVersion,
     trackEvent: analytics.track.bind(analytics),
+    claudeAccounts,
     onSignedIn: (service) => {
       // A fresh sign-in unlocks usage limits (claude/codex empty-state cards
       // flip from auth → usage) and the live Cursor/Codex model catalogs.
@@ -293,6 +305,34 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
       }
     },
   })
+
+  // Limit fall-over: whenever usage moves, a spent active account hands over
+  // to the next signed-in one with headroom. The switch itself changes usage
+  // (the claude entry now shows the new account), which re-runs this once and
+  // settles, since the new account is not spent.
+  const failOverClaudeAccount = () => {
+    if (!claudeAccounts.getAutoSwitch()) return
+    const next = pickClaudeFailoverAccount({
+      accountIds: claudeAccounts.list().map((account) => account.id),
+      activeAccountId: claudeAccounts.getActive().id,
+      authStatus: (accountId) => providerAuth.getClaudeAccountStatus(accountId),
+      usage: (accountId) => usageLimits.getClaudeAccountUsage(accountId),
+      now: Date.now(),
+    })
+    if (next) claudeAccounts.setActive(next, "limit")
+  }
+  let lastActiveClaudeAccountId = claudeAccounts.getActive().id
+  claudeAccounts.onChange(() => {
+    const activeId = claudeAccounts.getActive().id
+    if (activeId !== lastActiveClaudeAccountId) {
+      lastActiveClaudeAccountId = activeId
+      usageLimits.activeClaudeAccountChanged()
+    }
+    failOverClaudeAccount()
+  })
+  usageLimits.onChange(failOverClaudeAccount)
+  // An account signing in can be the headroom a spent active account was waiting for.
+  providerAuth.onChange(failOverClaudeAccount)
 
   router = createWsRouter({
     diagnostics,
@@ -320,6 +360,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     machineDisplayName,
     updateManager,
     providerAuth,
+    claudeAccounts,
   })
   // Overlay the account's live Cursor and Codex model lists on the static
   // catalog (no-op when the CLI is missing or logged out); broadcasts on change.

@@ -26,3 +26,15 @@ export function AccountInfoMessage({ message }: Props) {
     </MetaRow>
   )
 }
+
+/** A chat's session moved to another Claude account; unlike the first account row, this one shows. */
+export function AccountSwitchMessage({ message }: Props) {
+  return (
+    <MetaRow>
+      <div className="size-5 flex justify-center items-center ">
+        <UserRound className="h-4 w-4 text-muted-foreground" />
+      </div>
+      <MetaLabel>Switched to {message.accountInfo.email}</MetaLabel>
+    </MetaRow>
+  )
+}

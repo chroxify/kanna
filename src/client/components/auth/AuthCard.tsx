@@ -3,6 +3,8 @@ import { ArrowUpRight, Check, Loader2 } from "lucide-react"
 import type { AuthServiceSnapshot } from "../../../shared/types"
 import type { KannaSocket } from "../../app/socket"
 import { cn } from "../../lib/utils"
+import { useProviderAuthStore } from "../../stores/providerAuthStore"
+import { ClaudeAccountsList } from "./ClaudeAccountsList"
 import { AUTH_SERVICE_ICONS } from "../provider-icons"
 import { Button } from "../ui/button"
 import { CopyButton } from "../ui/copy-button"
@@ -86,11 +88,17 @@ export function LoginFlowPanel({
   const login = service.login
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  // A Claude sign-in belongs to one account; retrying must not land on another.
+  const loginAccountId = useProviderAuthStore((store) => store.snapshot?.claudeAccounts?.loginAccountId ?? null)
 
   if (login.phase === "idle") return null
 
   const retry = () => {
-    void socket.command({ type: "auth.login.start", service: service.service }).catch(() => undefined)
+    void socket.command({
+      type: "auth.login.start",
+      service: service.service,
+      ...(service.service === "claude" && loginAccountId ? { accountId: loginAccountId } : {}),
+    }).catch(() => undefined)
   }
   const submitCode = async () => {
     const cleaned = code.trim()
@@ -223,11 +231,15 @@ export function AuthCard({
   service,
   socket,
   className,
+  showClaudeAccounts = false,
 }: {
   service: AuthServiceSnapshot
   socket: KannaSocket
   className?: string
+  /** List Claude accounts under the card (Settings only; onboarding keeps one). */
+  showClaudeAccounts?: boolean
 }) {
+  const claudeAccounts = useProviderAuthStore((store) => store.snapshot?.claudeAccounts ?? null)
   const Icon = AUTH_SERVICE_ICONS[service.service]
   const version = displayVersion(service.version)
   const installing = service.installState === "installing"
@@ -313,6 +325,9 @@ export function AuthCard({
         <div className="mt-2 text-xs text-muted-foreground">{service.statusDetail}</div>
       ) : null}
       <LoginFlowPanel service={service} socket={socket} />
+      {showClaudeAccounts && service.service === "claude" && claudeAccounts && service.installed ? (
+        <ClaudeAccountsList accounts={claudeAccounts} loginActive={loginActive} socket={socket} />
+      ) : null}
     </div>
   )
 }

@@ -17,6 +17,7 @@ import { ModelDefaultsDialog } from "../../components/ModelDefaultsDialog"
 import { Button } from "../../components/ui/button"
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogTitle } from "../../components/ui/dialog"
 import { Input } from "../../components/ui/input"
+import { SegmentedControl } from "../../components/ui/segmented-control"
 import {
   Select,
   SelectContent,
@@ -29,7 +30,7 @@ import { cn } from "../../lib/utils"
 import { useChatPreferencesStore } from "../../stores/chatPreferencesStore"
 import { useProviderAuthStore } from "../../stores/providerAuthStore"
 import type { KannaState } from "../useKannaState"
-import { handleSettingsInputKeyDown, SettingsErrorBanner, SettingsRow } from "./shared"
+import { ENABLED_DISABLED_OPTIONS, handleSettingsInputKeyDown, SettingsErrorBanner, SettingsRow } from "./shared"
 import { SETTINGS_ROWS } from "./registry"
 
 const QUICK_RESPONSE_PROVIDER_OPTIONS: Array<{ value: LlmProviderKind; label: string }> = [
@@ -249,7 +250,7 @@ export function ProvidersSection({
       <div className="space-y-3 pb-6">
         {providerAuthSnapshot ? (
           providerAuthSnapshot.services.map((service) => (
-            <AuthCard key={service.service} service={service} socket={state.socket} />
+            <AuthCard key={service.service} service={service} socket={state.socket} showClaudeAccounts />
           ))
         ) : (
           <div className="rounded-2xl border border-border bg-card/40 px-5 py-6 text-sm text-muted-foreground">
@@ -280,6 +281,23 @@ export function ProvidersSection({
             </SelectContent>
           </Select>
         </SettingsRow>
+
+        {(providerAuthSnapshot?.claudeAccounts?.accounts.length ?? 0) > 1 ? (
+          <SettingsRow def={SETTINGS_ROWS.claudeAccountAutoSwitch}>
+            <SegmentedControl
+              value={providerAuthSnapshot?.claudeAccounts?.autoSwitch === false ? "disabled" : "enabled"}
+              onValueChange={(value) => {
+                void state.socket
+                  .command({ type: "claudeAccounts.setAutoSwitch", enabled: value === "enabled" })
+                  .catch((error) => {
+                    setProvidersError(error instanceof Error ? error.message : "Unable to save Claude account settings.")
+                  })
+              }}
+              options={ENABLED_DISABLED_OPTIONS}
+              size="sm"
+            />
+          </SettingsRow>
+        ) : null}
 
         <SettingsRow def={SETTINGS_ROWS.claudeDefaults} alignStart>
           <div className="">
