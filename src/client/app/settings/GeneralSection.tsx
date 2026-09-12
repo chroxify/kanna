@@ -3,7 +3,12 @@ import { DownloadCloud, Monitor, Moon, Sun } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { ANALYTICS_STATIC_EVENT_NAMES, ANALYTICS_STATIC_PROPERTY_NAMES } from "../../../shared/analytics"
 import type { EditorPreset } from "../../../shared/protocol"
-import { DEFAULT_NEW_PROJECTS_DIRECTORY, isNightlyVersion, type SubmitWhileRunning } from "../../../shared/types"
+import {
+  DEFAULT_NEW_PROJECTS_DIRECTORY,
+  isNightlyVersion,
+  type GroupQueueBinding,
+  type SubmitWhileRunning,
+} from "../../../shared/types"
 import { EDITOR_OPTIONS, EditorIcon } from "../../components/editor-icons"
 import { useInstalledEditors } from "../../components/open-external-menu"
 import { Button } from "../../components/ui/button"
@@ -118,6 +123,8 @@ export function GeneralSection({
   const newProjectsDirectory = appSettings?.newProjectsDirectory ?? DEFAULT_NEW_PROJECTS_DIRECTORY
   const [newProjectsDirectoryDraft, setNewProjectsDirectoryDraft] = useState(newProjectsDirectory)
   const submitWhileRunning = appSettings?.submitWhileRunning ?? "queue"
+  const groupQueue = appSettings?.groupQueue ?? "modifier"
+  const queueKeystroke = submitWhileRunning === "steer" ? "⌘Enter" : "Enter"
   const transcriptWindow = appSettings?.transcript?.windowAssistantMessages ?? DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES
   const [transcriptWindowDraft, setTranscriptWindowDraft] = useState(String(transcriptWindow))
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null)
@@ -442,6 +449,30 @@ export function GeneralSection({
                 <SelectGroup>
                   <SelectItem value="queue">Queue message</SelectItem>
                   <SelectItem value="steer">Steer now</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </SettingsRow>
+
+          <SettingsRow def={SETTINGS_ROWS.groupQueue}>
+            <Select
+              value={groupQueue}
+              onValueChange={(value) => {
+                void handleWriteAppSettings({ groupQueue: value as GroupQueueBinding }).catch((error) => {
+                  setAppSettingsError(error instanceof Error ? error.message : "Unable to save composer settings.")
+                })
+              }}
+            >
+              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {/* ⌘⇧Enter is the same chord in both modes; the other option
+                      is whichever keystroke queues, which the setting above
+                      decides: Enter normally, ⌘Enter once Enter steers. */}
+                  <SelectItem value="modifier">⌘⇧Enter</SelectItem>
+                  <SelectItem value="primary">{queueKeystroke}</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>
