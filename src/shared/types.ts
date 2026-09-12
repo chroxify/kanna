@@ -23,6 +23,13 @@ export type SubmitWhileRunning = "queue" | "steer"
  * own, or every chat in a project shares one.
  */
 export type PaneVisibilityScope = "chat" | "project"
+/**
+ * Which keystroke group-queues — folds the message into the last queued one so
+ * the two go to the agent together, in one slot, instead of as two turns.
+ * "modifier": the ⌘/Ctrl+⇧+Enter chord. "primary": whichever keystroke queues
+ * groups instead, and the chord opens a new slot.
+ */
+export type GroupQueueBinding = "modifier" | "primary"
 export type EditorPreset = "cursor" | "vscode" | "zed" | "xcode" | "windsurf" | "custom"
 export const DEFAULT_OPENAI_SDK_MODEL = "gpt-5.4-mini"
 export const DEFAULT_OPENROUTER_SDK_MODEL = "moonshotai/kimi-k2.5:nitro"
@@ -1263,6 +1270,8 @@ export interface AppSettingsSnapshot {
     widgets: PaneVisibilityScope
     terminal: PaneVisibilityScope
   }
+  /** Which keystroke merges into the last queued message rather than adding one. */
+  groupQueue: GroupQueueBinding
   providerDefaults: ChatProviderPreferences
   /** Labs: the tabbed Chats/Projects "New Sidebar". On by default; false opts back into the legacy sidebar. */
   newSidebarEnabled: boolean
@@ -1316,6 +1325,7 @@ export interface AppSettingsPatch {
   chatSoundId?: ChatSoundId
   chatBrowserNotificationPreference?: ChatBrowserNotificationPreference
   submitWhileRunning?: SubmitWhileRunning
+  groupQueue?: GroupQueueBinding
   newSidebarEnabled?: boolean
   newProjectsDirectory?: string
   setupShown?: boolean

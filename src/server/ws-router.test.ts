@@ -93,6 +93,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
   chatBrowserNotificationPreference: "never",
   submitWhileRunning: "queue",
   paneVisibility: { widgets: "chat", terminal: "chat" },
+  groupQueue: "modifier",
   terminal: {
     scrollbackLines: 1_000,
     minColumnWidth: 450,

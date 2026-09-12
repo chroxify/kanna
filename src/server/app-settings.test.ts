@@ -34,6 +34,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
     chatBrowserNotificationPreference: "never",
     submitWhileRunning: "queue",
     paneVisibility: { widgets: "chat", terminal: "chat" },
+    groupQueue: "modifier",
     terminal: {
       scrollbackLines: 1_000,
       minColumnWidth: 450,
@@ -330,6 +331,26 @@ describe("AppSettingsManager", () => {
     await writeFile(filePath, JSON.stringify({ paneVisibility: { widgets: "tab", terminal: "project" } }), "utf8")
     await manager.reload()
     expect(manager.getSnapshot().paneVisibility).toEqual({ widgets: "chat", terminal: "project" })
+
+    manager.dispose()
+  })
+
+  test("persists which keystroke group-queues, and ignores junk", async () => {
+    const filePath = await createTempFilePath()
+    const manager = new AppSettingsManager(filePath)
+    await manager.initialize()
+
+    expect(manager.getSnapshot().groupQueue).toBe("modifier")
+    expect((await manager.writePatch({ groupQueue: "primary" })).groupQueue).toBe("primary")
+
+    const payload = JSON.parse(await readFile(filePath, "utf8")) as { groupQueue: string }
+    expect(payload.groupQueue).toBe("primary")
+
+    // Unrecognised values land on the modifier, which is the binding that
+    // leaves the plain keystroke doing what it always did.
+    await writeFile(filePath, JSON.stringify({ groupQueue: "yolo" }), "utf8")
+    await manager.reload()
+    expect(manager.getSnapshot().groupQueue).toBe("modifier")
 
     manager.dispose()
   })
