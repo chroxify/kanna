@@ -1617,6 +1617,8 @@ export interface TodoItem {
   content: string
   status: "pending" | "in_progress" | "completed"
   activeForm: string
+  /** The harness's own row id, when it sends one; Grok's merge patches address rows by it. */
+  id?: string
 }
 
 interface TranscriptEntryBase {

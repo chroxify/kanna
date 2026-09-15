@@ -336,7 +336,7 @@ export function normalizeGrokTodoItems(value: unknown): TodoItem[] {
       status: grokTodoStatus(item.status),
       activeForm,
       ...(id ? { id } : {}),
-    } as TodoItem)
+    })
   }
   return todos
 }
@@ -377,7 +377,7 @@ export class GrokTodoTracker {
   apply(payload: { todos: TodoItem[]; merge: boolean }): TodoItem[] | null {
     if (!payload.merge) this.todos.clear()
     for (const [index, todo] of payload.todos.entries()) {
-      const id = asString((todo as TodoItem & { id?: string }).id) || String(index + 1)
+      const id = asString(todo.id) || String(index + 1)
       const previous = this.todos.get(id)
       const content = todo.content.trim() || previous?.content || ""
       const activeForm = todo.activeForm.trim() || content || previous?.activeForm || ""
