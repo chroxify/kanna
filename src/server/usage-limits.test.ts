@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
+  claudeResetGrants,
   UsageLimitsManager,
   mergeClaudeRateLimitPush,
   mergeCodexRateLimitPush,
@@ -394,5 +395,76 @@ describe("UsageLimitsManager", () => {
     expect(claude?.windows[0]).toMatchObject({ id: "five_hour", usedPercent: 42, source: "turn_push" })
     expect(codex?.windows[0]).toMatchObject({ id: "codex:primary", usedPercent: 12, source: "turn_push" })
     manager.dispose()
+  })
+})
+
+describe("claude reset grants", () => {
+  const NOW = "2026-09-22T22:00:00.000Z"
+  const grant = (over: Record<string, unknown> = {}) => ({
+    id: "opus55-launch-promax-20260921",
+    label: "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+    resets_total: 1,
+    resets_left: 1,
+    clears: ["five_hour", "seven_day", "seven_day_overage_included"],
+    paused: false,
+    usable_now: true,
+    ends_at: "2026-10-22T16:00:00+00:00",
+    ...over,
+  })
+
+  test("reads a cedar_ember grant", () => {
+    expect(claudeResetGrants({ cedar_ember: { grants: [grant()] } }, NOW, "on_demand")).toEqual([
+      {
+        id: "opus55-launch-promax-20260921",
+        label: "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+        resetsLeft: 1,
+        resetsTotal: 1,
+        clears: ["five_hour", "seven_day", "seven_day_overage_included"],
+        usableNow: true,
+        endsAt: "2026-10-22T16:00:00+00:00",
+        recordedAt: NOW,
+        source: "on_demand",
+      },
+    ])
+  })
+
+  test("a build that reports no grants yields none", () => {
+    // Every shape an older or changed payload can take. None may throw: the
+    // usage page has to keep rendering its windows regardless.
+    expect(claudeResetGrants(undefined, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants(null, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({}, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({ cedar_ember: null }, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({ cedar_ember: { grants: null } }, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({ cedar_ember: { grants: [] } }, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({ cedar_ember: "nonsense" }, NOW, "on_demand")).toEqual([])
+    expect(claudeResetGrants({ cedar_ember: { grants: [null, 7, "x"] } }, NOW, "on_demand")).toEqual([])
+  })
+
+  test("still reads the older juniper_tide key, without double-counting", () => {
+    const both = { cedar_ember: { grants: [grant()] }, juniper_tide: { grants: [grant()] } }
+    expect(claudeResetGrants(both, NOW, "on_demand")).toHaveLength(1)
+  })
+
+  test("drops a grant with nothing left to claim", () => {
+    expect(claudeResetGrants({ cedar_ember: { grants: [grant({ resets_left: 0 })] } }, NOW, "on_demand")).toEqual([])
+  })
+
+  test("paused vetoes usable_now", () => {
+    const paused = claudeResetGrants({ cedar_ember: { grants: [grant({ paused: true })] } }, NOW, "on_demand")
+    expect(paused[0]?.usableNow).toBe(false)
+  })
+
+  test("survives a grant missing every optional field", () => {
+    const sparse = claudeResetGrants({ cedar_ember: { grants: [{ id: "x", resets_left: 2 }] } }, NOW, "on_demand")
+    expect(sparse[0]).toMatchObject({
+      id: "x",
+      label: "Usage limit reset",
+      resetsLeft: 2,
+      resetsTotal: 2,
+      clears: [],
+      usableNow: false,
+      endsAt: null,
+    })
   })
 })

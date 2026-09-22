@@ -9,6 +9,7 @@ import type {
   UsageLimitSource,
   UsageLimitWindow,
   UsageLimitsSnapshot,
+  UsageResetGrant,
 } from "../shared/types"
 import { grokProductUsageWindows, moneyVal, type GrokBillingRaw, type GrokUserRaw } from "./grok-cli"
 
@@ -22,6 +23,33 @@ interface ClaudeUsageWindowRaw {
   utilization?: number | null
   resets_at?: string | null
 }
+
+/**
+ * The reset-grant block, when the payload carries one.
+ *
+ * Present only on builds new enough to report it, and the key has already
+ * changed once: an earlier program shipped as `juniper_tide` and now returns
+ * null in favour of `cedar_ember`. Both keys are read, and anything that
+ * doesn't parse degrades to no grants rather than throwing — so an older
+ * Claude Code simply shows nothing here.
+ */
+interface ClaudeResetGrantRaw {
+  id?: string | null
+  label?: string | null
+  resets_total?: number | null
+  resets_left?: number | null
+  clears?: unknown
+  paused?: boolean
+  usable_now?: boolean
+  ends_at?: string | null
+}
+
+interface ClaudeResetProgramRaw {
+  grants?: ClaudeResetGrantRaw[] | null
+}
+
+/** Keys a reset program has shipped under, newest first. */
+const CLAUDE_RESET_PROGRAM_KEYS = ["cedar_ember", "juniper_tide"] as const
 
 interface ClaudeExtraUsageRaw {
   is_enabled?: boolean
@@ -94,6 +122,54 @@ function prettifyKey(key: string): string {
 
 function claudeWindowLabel(key: string): string {
   return CLAUDE_WINDOW_LABELS[key] ?? prettifyKey(key)
+}
+
+/**
+ * Reset grants out of the usage payload, or [] when the build doesn't report
+ * any.
+ *
+ * Every field is treated as optional and anything malformed is dropped, so a
+ * renamed key or a reshaped grant costs the row rather than the whole usage
+ * page. A grant with no id or no resets left is not worth a row.
+ */
+export function claudeResetGrants(
+  rateLimits: Record<string, unknown> | null | undefined,
+  now: string,
+  source: UsageLimitSource,
+): UsageResetGrant[] {
+  if (!rateLimits) return []
+  const grants: UsageResetGrant[] = []
+  const seen = new Set<string>()
+
+  for (const key of CLAUDE_RESET_PROGRAM_KEYS) {
+    const program = rateLimits[key] as ClaudeResetProgramRaw | null | undefined
+    if (!program || typeof program !== "object" || !Array.isArray(program.grants)) continue
+
+    for (const raw of program.grants) {
+      if (!raw || typeof raw !== "object") continue
+      const id = typeof raw.id === "string" ? raw.id : null
+      const resetsLeft = typeof raw.resets_left === "number" ? raw.resets_left : 0
+      // A spent or id-less grant is not a row: nothing to act on, and the
+      // label would claim an allowance that isn't there.
+      if (!id || seen.has(id) || resetsLeft <= 0) continue
+      seen.add(id)
+
+      grants.push({
+        id,
+        label: typeof raw.label === "string" && raw.label ? raw.label : "Usage limit reset",
+        resetsLeft,
+        resetsTotal: typeof raw.resets_total === "number" ? raw.resets_total : resetsLeft,
+        clears: Array.isArray(raw.clears) ? raw.clears.filter((c): c is string => typeof c === "string") : [],
+        // `paused` vetoes `usable_now`; the payload can set both.
+        usableNow: raw.usable_now === true && raw.paused !== true,
+        endsAt: typeof raw.ends_at === "string" ? raw.ends_at : null,
+        recordedAt: now,
+        source,
+      })
+    }
+  }
+
+  return grants
 }
 
 function codexWindowLabel(windowDurationMins: number | null | undefined, suffix: string): string {
@@ -202,11 +278,16 @@ export function normalizeClaudeUsage(
     })
   }
 
+  const resetGrants = claudeResetGrants(raw.rate_limits, now, source)
+
   const snapshot: ProviderUsageSnapshot = {
     ...base,
     status: windows.length > 0 || credits ? "ok" : "unavailable",
     windows,
     credits,
+    // Omitted rather than empty, so a build that reports none costs nothing on
+    // the wire and renders nothing.
+    ...(resetGrants.length > 0 ? { resetGrants } : {}),
     detail: windows.length > 0 || credits ? null : "No plan limit windows reported.",
   }
   snapshot.updatedAt = latestRecordedAt(snapshot)

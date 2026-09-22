@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { ChevronRight } from "lucide-react"
-import type { ProviderUsageSnapshot, UsageLimitWindow, UsageLimitsSnapshot } from "../../../shared/types"
+import type { ProviderUsageSnapshot, UsageLimitWindow, UsageLimitsSnapshot, UsageResetGrant } from "../../../shared/types"
 import { PROVIDERS } from "../../../shared/types"
 import { PROVIDER_ICONS } from "../../components/chat-ui/ChatPreferenceControls"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip"
@@ -172,6 +172,52 @@ function WindowRow({ window, compact = false }: { window: UsageLimitWindow; comp
   )
 }
 
+/**
+ * Window ids as a grant names them, in the words the rows above already use.
+ * Unknown ids pass through rather than being dropped — a new window is still
+ * worth naming, even unprettified.
+ */
+const CLEARED_WINDOW_LABELS: Record<string, string> = {
+  five_hour: "session",
+  seven_day: "weekly",
+  seven_day_opus: "weekly Opus",
+  seven_day_sonnet: "weekly Sonnet",
+  seven_day_overage_included: "weekly overage",
+}
+
+function clearedWindowLabel(id: string): string {
+  return CLEARED_WINDOW_LABELS[id] ?? id.replace(/_/g, " ")
+}
+
+/**
+ * A reset the account has been granted but hasn't spent.
+ *
+ * Deliberately not a button. Claiming runs off a first-party client identity
+ * Kanna doesn't have, so the honest thing is to report the allowance and say
+ * where to spend it rather than offer an action that would fail — or work only
+ * by pretending to be something else.
+ */
+function ResetGrantRow({ grant }: { grant: UsageResetGrant }) {
+  const expires = grant.endsAt ? formatUntil(grant.endsAt) : null
+  const clears = grant.clears.map(clearedWindowLabel).join(", ")
+
+  return (
+    <div className="border-t border-border pt-3">
+      <div className="flex items-baseline justify-between gap-3 text-sm">
+        <span className="min-w-0 text-foreground">{grant.label}</span>
+        <span className="shrink-0 tabular-nums text-muted-foreground">
+          {grant.resetsLeft} of {grant.resetsTotal} left
+        </span>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        {grant.usableNow ? "Available now — use it in the Claude app" : "Not available yet"}
+        {clears ? ` · clears ${clears}` : ""}
+        {expires ? ` · expires ${expires}` : ""}
+      </div>
+    </div>
+  )
+}
+
 /** Scope and plan as one label ("Personal max"), or "" when neither is known. */
 export function planLabel(snapshot: ProviderUsageSnapshot): string {
   return [accountScopeLabel(snapshot.plan), snapshot.plan].filter(Boolean).join(" ")
@@ -197,6 +243,9 @@ export function UsageWindowRows({ snapshot, compact = false, className }: {
           <span className="text-muted-foreground">{creditsSummary(snapshot.credits)}</span>
         </div>
       ) : null}
+      {(snapshot.resetGrants ?? []).map((grant) => (
+        <ResetGrantRow key={grant.id} grant={grant} />
+      ))}
       {snapshot.detail ? (
         <div className="text-xs text-muted-foreground">{snapshot.detail}</div>
       ) : null}
@@ -223,7 +272,8 @@ export function ProviderCard({
   onRefresh?: () => void
 }) {
   const Icon = PROVIDER_ICONS[snapshot.provider]
-  const hasContent = snapshot.windows.length > 0 || snapshot.credits
+  const resetGrants = snapshot.resetGrants ?? []
+  const hasContent = snapshot.windows.length > 0 || snapshot.credits || resetGrants.length > 0
   const [expanded, setExpanded] = useState(false)
   const showBody = !collapsible || expanded
 

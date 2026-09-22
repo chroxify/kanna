@@ -1378,6 +1378,32 @@ export interface UsageLimitCredits {
   source: UsageLimitSource
 }
 
+/**
+ * A usage-limit reset the account has been granted — e.g. the one-off Pro/Max
+ * grant that ships alongside a model launch.
+ *
+ * Read-only. Claiming one is a first-party action: it is gated on a client
+ * identity Kanna does not have, and it spends a scarce one-time allowance. So
+ * Kanna reports what is available and sends you to the Claude app to use it.
+ */
+export interface UsageResetGrant {
+  /** The provider's grant id, e.g. "opus55-launch-promax-20260921". */
+  id: string
+  /** The grant's own description, shown verbatim rather than reworded. */
+  label: string
+  /** Resets remaining, and how many the grant started with. */
+  resetsLeft: number
+  resetsTotal: number
+  /** Window ids a reset would clear, e.g. ["five_hour", "seven_day"]. */
+  clears: string[]
+  /** Claimable right now: inside its dates, not paused, nothing blocking. */
+  usableNow: boolean
+  /** When the grant expires, ISO 8601, or null when open-ended. */
+  endsAt: string | null
+  recordedAt: string
+  source: UsageLimitSource
+}
+
 export type UsageLimitStatus =
   // Windows present and meaningful.
   | "ok"
@@ -1398,6 +1424,12 @@ export interface ProviderUsageSnapshot {
   windows: UsageLimitWindow[]
   /** Optional credit balance row. */
   credits: UsageLimitCredits | null
+  /**
+   * Reset grants on the account. Omitted entirely when the provider doesn't
+   * report any — which includes every Claude Code build whose usage payload
+   * predates them, so an older CLI simply shows nothing.
+   */
+  resetGrants?: UsageResetGrant[]
   /** Human explanation shown when status !== "ok" (e.g. "Sign in to Codex to see limits"). */
   detail: string | null
   /** Latest recordedAt across all windows/credits, ISO 8601, or null when never fetched. */
