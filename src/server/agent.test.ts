@@ -1570,6 +1570,72 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a background turn that goes quiet is recorded as finished, not just dropped", async () => {
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      // Shrink both timers so the test doesn't wait out the real minute.
+      backgroundResumeGraceMs: 0,
+      backgroundTurnIdleMs: 150,
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 0,
+              result: "done",
+            }),
+          })
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "kick off a monitor",
+      model: "claude-opus-4-1",
+    })
+    await waitFor(() => store.turnFinishedCount === 1)
+    const startsAfterPrompt = store.turnStartedCount
+
+    // A background wakeup (Monitor/Cron) speaks up after the turn ended. That
+    // re-registers an active turn — and records a turn start. It has to land a
+    // tick later than the result, or the grace window reads it as the finished
+    // turn's own trailing output.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "assistant_text", text: "monitor fired" }),
+    })
+    await waitFor(() => coordinator.getActiveStatuses().has("chat-1"))
+    expect(store.turnStartedCount).toBe(startsAfterPrompt + 1)
+
+    // It then goes quiet. The watchdog must close it on both sides: the chat
+    // stops reading as running *and* the store stops holding an open turn.
+    // Dropping it from activeTurns alone left `lastTurnEndedAt` behind
+    // `lastTurnStartedAt` forever, so a long-finished chat kept coming back as
+    // outstanding work and a shutdown re-prompted it on the next boot.
+    await waitFor(() => !coordinator.getActiveStatuses().has("chat-1"))
+    await waitFor(() => store.turnFinishedCount === 2)
+    expect(store.turnStartedCount).toBe(store.turnFinishedCount)
+
+    events.close()
+  })
+
   test("auto plan controls the EnterPlanMode tool and restarts the session when it changes", async () => {
     const queues: AsyncEventQueue<any>[] = []
     const startSessionCalls: Array<{ planMode: boolean; autoPlan: boolean }> = []
@@ -2930,6 +2996,7 @@ function createFakeStore(options?: {
   }
   return {
     chat,
+    turnStartedCount: 0,
     turnFinishedCount: 0,
     messages: [] as TranscriptEntry[],
     queuedMessages: [] as any[],
@@ -2961,7 +3028,9 @@ function createFakeStore(options?: {
     async appendMessage(_chatId: string, entry: TranscriptEntry) {
       this.messages.push(entry)
     },
-    async recordTurnStarted() {},
+    async recordTurnStarted() {
+      this.turnStartedCount += 1
+    },
     async recordTurnFinished() {
       this.turnFinishedCount += 1
     },

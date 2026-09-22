@@ -280,6 +280,19 @@ interface AgentCoordinatorArgs {
     provider: AgentProvider,
     query: { cwd: string; sessionToken: string | null | undefined }
   ) => SessionArtifactStatus
+  /**
+   * How long a resumed background turn may go without an entry before the
+   * watchdog closes it. Injectable so tests don't have to wait out the real
+   * minute. Defaults to {@link BACKGROUND_TURN_IDLE_MS}.
+   */
+  backgroundTurnIdleMs?: number
+  /**
+   * How long after a result an entry stops counting as that turn's trailing
+   * output and starts counting as a background wakeup. Injectable for the same
+   * reason as {@link backgroundTurnIdleMs}. Defaults to
+   * {@link BACKGROUND_RESUME_GRACE_MS}.
+   */
+  backgroundResumeGraceMs?: number
 }
 
 
@@ -1047,6 +1060,8 @@ export class AgentCoordinator {
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
   private readonly startClaudeSessionFn: NonNullable<AgentCoordinatorArgs["startClaudeSession"]>
   private readonly checkSessionArtifactFn: NonNullable<AgentCoordinatorArgs["checkSessionArtifact"]>
+  private readonly backgroundTurnIdleMs: number
+  private readonly backgroundResumeGraceMs: number
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
   private cursorModelCatalogApplied = false
@@ -1074,6 +1089,8 @@ export class AgentCoordinator {
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
     this.startClaudeSessionFn = args.startClaudeSession ?? startClaudeSession
     this.checkSessionArtifactFn = args.checkSessionArtifact ?? checkSessionArtifact
+    this.backgroundTurnIdleMs = args.backgroundTurnIdleMs ?? BACKGROUND_TURN_IDLE_MS
+    this.backgroundResumeGraceMs = args.backgroundResumeGraceMs ?? BACKGROUND_RESUME_GRACE_MS
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
@@ -2416,6 +2433,16 @@ export class AgentCoordinator {
    *
    * Only ever closes a seq-less turn, and never one waiting on the user, so a
    * real prompt turn and a pending tool request are both left alone.
+   *
+   * Closing it records the turn as finished, because `resumeBackgroundTurn`
+   * recorded it as started. Dropping it from `activeTurns` alone cleared the
+   * spinner but left the store holding a turn that never ended, and the store
+   * is what survives a reload: `lastTurnStartedAt` stayed ahead of
+   * `lastTurnEndedAt`, `turnCount` kept climbing, and every background wakeup
+   * cleared `doneAt` — so a chat that was long finished kept coming back as
+   * outstanding work. Worse, a shutdown while that turn was open marked the
+   * chat `resumePending`, and the next boot re-prompted a turn that had been
+   * over for hours.
    */
   private armBackgroundTurnWatchdog(session: ClaudeSessionState) {
     const active = this.activeTurns.get(session.chatId)
@@ -2432,7 +2459,14 @@ export class AgentCoordinator {
       if (!current || current.claudePromptSeq != null || current.pendingTool) return
       this.activeTurns.delete(session.chatId)
       this.emitStateChange(session.chatId)
-    }, BACKGROUND_TURN_IDLE_MS)
+      // Appending is a disk write, so it happens after the chat already reads
+      // as idle — liveness must not wait on it, the same ordering the prompt
+      // path uses.
+      void this.store.recordTurnFinished(session.chatId).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        this.reportBackgroundError?.(`[claude] failed to close a quiet background turn: ${message}`)
+      })
+    }, this.backgroundTurnIdleMs)
     // Never hold the process open on a chat that has gone quiet.
     ;(timer as { unref?: () => void }).unref?.()
     session.backgroundTurnTimer = timer
@@ -2511,7 +2545,7 @@ export class AgentCoordinator {
           // can close — and none is coming, so the chat spins forever on a turn
           // the user watched finish. A real background wakeup arrives long
           // after, well outside this window.
-          && Date.now() - (session.lastResultAt ?? 0) > BACKGROUND_RESUME_GRACE_MS
+          && Date.now() - (session.lastResultAt ?? 0) > this.backgroundResumeGraceMs
           && (
             event.entry.kind === "assistant_text"
             || event.entry.kind === "tool_call"
