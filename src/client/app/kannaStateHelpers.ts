@@ -30,6 +30,30 @@ export interface OptimisticProcessingState {
   ackedAt: number | null
 }
 
+/**
+ * Whether an acked send should stop holding the composer in "starting".
+ *
+ * The optimistic spinner covers the gap between hitting send and the server
+ * reporting the turn. It has to be retired eventually, or a send that started
+ * no turn — one that queued behind a running turn, say — would spin forever.
+ *
+ * Retirement waits for the server to actually say "idle". A missing snapshot
+ * is not that statement: on a chat whose subscription hasn't delivered yet — a
+ * brand new chat above all — `runtimeStatus` is null simply because nothing
+ * has arrived. Reading that as idle is what made a chat go quiet mid-send: no
+ * spinner and no rows, until the reply appeared all at once.
+ */
+export function shouldRetireOptimisticProcessing(
+  processing: OptimisticProcessingState | null,
+  scopeId: string,
+  /** The chat's reported status, or null when no snapshot has arrived yet. */
+  runtimeStatus: string | null,
+): boolean {
+  if (!processing?.ackedAt || processing.scopeId !== scopeId) return false
+  if (runtimeStatus === null) return false
+  return runtimeStatus === "idle"
+}
+
 function serializeAttachmentSignature(attachment: ChatAttachment) {
   return JSON.stringify({
     id: attachment.id,

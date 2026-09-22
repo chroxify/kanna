@@ -15,6 +15,7 @@ import {
   resolveComposeIntent,
   shouldHandleUiUpdateReloadRequest,
   shouldMarkActiveChatRead,
+  shouldRetireOptimisticProcessing,
   shouldAutoFollowTranscript,
 } from "./useKannaState"
 import type { ChatAttachment, ChatSnapshot, SidebarData, UserPromptEntry } from "../../shared/types"
@@ -465,5 +466,34 @@ describe("optimistic user prompts", () => {
       "chat-1",
       [createUserPrompt("server-1", "same")],
     )).toEqual([optimisticPrompt])
+  })
+})
+
+describe("shouldRetireOptimisticProcessing", () => {
+  const acked = { scopeId: "chat-1", ackedAt: 1000 }
+
+  test("keeps the spinner while no snapshot has arrived", () => {
+    // The bug this pins: between the ack and a new chat's first snapshot there
+    // is no runtime at all. Retiring there left the chat with no spinner and
+    // no rows until the reply landed in one go.
+    expect(shouldRetireOptimisticProcessing(acked, "chat-1", null)).toBe(false)
+  })
+
+  test("retires once the server actually reports idle", () => {
+    // A send that started no turn — queued behind a running one — must not
+    // spin forever.
+    expect(shouldRetireOptimisticProcessing(acked, "chat-1", "idle")).toBe(true)
+  })
+
+  test("keeps the spinner while the turn is live", () => {
+    for (const status of ["starting", "running", "waiting_for_user"]) {
+      expect(shouldRetireOptimisticProcessing(acked, "chat-1", status)).toBe(false)
+    }
+  })
+
+  test("ignores a send that has not been acked, or belongs to another chat", () => {
+    expect(shouldRetireOptimisticProcessing(null, "chat-1", "idle")).toBe(false)
+    expect(shouldRetireOptimisticProcessing({ scopeId: "chat-1", ackedAt: null }, "chat-1", "idle")).toBe(false)
+    expect(shouldRetireOptimisticProcessing(acked, "chat-2", "idle")).toBe(false)
   })
 })

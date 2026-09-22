@@ -34,6 +34,7 @@ import {
   NEW_CHAT_OPTIMISTIC_SCOPE,
   reconcileOptimisticUserPrompts,
   resolveComposeIntent,
+  shouldRetireOptimisticProcessing,
   type OptimisticProcessingState,
   type OptimisticUserPrompt,
   type ProjectRequest,
@@ -82,6 +83,7 @@ export {
   resolveComposeIntent,
   shouldAutoFollowTranscript,
   shouldMarkActiveChatRead,
+  shouldRetireOptimisticProcessing,
   TRANSCRIPT_PADDING_BOTTOM_OFFSET,
   type OptimisticUserPrompt,
   type ProjectRequest,
@@ -703,13 +705,15 @@ export function useKannaState(activeChatId: string | null): KannaState {
   // and back. The fallback only covers a push that never comes.
   const ackedSnapshotRef = useRef<{ ackedAt: number; snapshot: ChatSnapshot | null } | null>(null)
   useEffect(() => {
-    if (!optimisticProcessing?.ackedAt || optimisticProcessing.scopeId !== optimisticScopeId) {
+    if (!shouldRetireOptimisticProcessing(optimisticProcessing, optimisticScopeId, runtime?.status ?? null)) {
       return
     }
-    if (runtime?.status && runtime.status !== "idle") {
+    // Captured, so the closure identifies the exact send it was armed for
+    // rather than reaching back into state that may have moved on.
+    const ackedAt = optimisticProcessing?.ackedAt
+    if (!ackedAt) {
       return
     }
-    const { ackedAt } = optimisticProcessing
     if (ackedSnapshotRef.current?.ackedAt !== ackedAt) {
       ackedSnapshotRef.current = { ackedAt, snapshot: activeChatSnapshot }
     }
