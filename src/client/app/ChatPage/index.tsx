@@ -26,6 +26,10 @@ import {
 } from "../../stores/rightSidebarStore"
 import { ViewerLayer, useViewerOpen } from "../../components/viewer/ViewerLayer"
 import { useViewerUrlSync } from "../../components/viewer/viewerUrl"
+import { opensInViewer, projectRelativePath } from "../../components/viewer/localLinks"
+import type { OpenLocalLinkTarget } from "../../components/messages/shared"
+import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
+import { openViewer } from "../../stores/viewerStore"
 import type { DiffViewerContext } from "../../components/chat-ui/git/DiffViewer"
 import { useProjectRepoUrl } from "../../stores/sidebarStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
@@ -65,15 +69,28 @@ export {
 const EMPTY_TRANSCRIPT_ENTRIES: TranscriptEntry[] = []
 const EMPTY_SUBAGENTS: readonly SubagentActivity[] = []
 
-function useEmptyStateTyping(showEmptyState: boolean, activeChatId: string | null) {
+/**
+ * Types the empty-state line once each time the empty state appears. Not per
+ * chat: going from one new chat to another (switching project from the path
+ * button) keeps the empty state up, and retyping it read as the page reloading.
+ */
+function useEmptyStateTyping(showEmptyState: boolean) {
   const [typedEmptyStateText, setTypedEmptyStateText] = useState("")
   const [isEmptyStateTypingComplete, setIsEmptyStateTypingComplete] = useState(false)
+  // Reset in the render the empty state appears, not in the effect after it:
+  // the viewport decides on its entrance animation from the first frame, and
+  // a stale "typing complete" there would skip it.
+  const [wasShowingEmptyState, setWasShowingEmptyState] = useState(showEmptyState)
+  if (wasShowingEmptyState !== showEmptyState) {
+    setWasShowingEmptyState(showEmptyState)
+    if (showEmptyState) {
+      setTypedEmptyStateText("")
+      setIsEmptyStateTypingComplete(false)
+    }
+  }
 
   useEffect(() => {
     if (!showEmptyState) return
-
-    setTypedEmptyStateText("")
-    setIsEmptyStateTypingComplete(false)
 
     let characterIndex = 0
     const interval = window.setInterval(() => {
@@ -87,7 +104,7 @@ function useEmptyStateTyping(showEmptyState: boolean, activeChatId: string | nul
     }, EMPTY_STATE_TYPING_INTERVAL_MS)
 
     return () => window.clearInterval(interval)
-  }, [showEmptyState, activeChatId])
+  }, [showEmptyState])
 
   return { typedEmptyStateText, isEmptyStateTypingComplete }
 }
@@ -522,7 +539,15 @@ export function ChatPage() {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, string>>({})
   const [defaultModelsDialogOpen, setDefaultModelsDialogOpen] = useState(false)
-  const showEmptyState = state.messages.length === 0 && state.runtime?.title === "New Chat"
+  // While the next chat's snapshot loads there's no runtime to judge by, so the
+  // empty state holds whatever it last was. Dropping it for that gap is what
+  // made one new chat to another fade out and back in.
+  const settledShowEmptyStateRef = useRef(false)
+  const isChatLoading = Boolean(state.activeChatId && !state.runtime)
+  const showEmptyState = isChatLoading
+    ? settledShowEmptyStateRef.current
+    : state.messages.length === 0 && state.runtime?.title === "New Chat"
+  settledShowEmptyStateRef.current = showEmptyState
   const projectId = state.activeProjectId
   const projectTerminalLayout = useTerminalLayoutStore((store) => (projectId ? store.projects[projectId] : undefined))
   const storedTerminalLayout = projectTerminalLayout ?? DEFAULT_PROJECT_TERMINAL_LAYOUT
@@ -540,6 +565,28 @@ export function ChatPage() {
   const viewerOpen = useViewerOpen()
   // What's open survives a refresh: it's written to, and read from, the address.
   useViewerUrlSync(projectId)
+  const projectLocalPath = state.runtime?.localPath ?? state.navbarLocalPath ?? null
+  // A file link that would open in the editor (or a CSV that would open in
+  // Numbers) opens in the viewer instead, when it's a file in this project
+  // (the only files the viewer can read); the editor is a button away there.
+  // Anything else, and an explicit choice from a link's context menu, goes
+  // where it always did.
+  const handleOpenLocalLink = useCallback<KannaState["handleOpenLocalLink"]>((target, action = "open_editor", editor) => {
+    if (projectId && opensInViewer(target.path, action) && !editor && target.trigger !== "contextmenu") {
+      const path = projectRelativePath(projectLocalPath, target.path)
+      if (path) {
+        openViewer({ kind: "file", projectId, path, ...(target.line ? { line: target.line } : {}) })
+        return Promise.resolve()
+      }
+    }
+    return state.handleOpenLocalLink(target, action, editor)
+  }, [projectId, projectLocalPath, state.handleOpenLocalLink])
+  // A file link inside the viewer (a markdown preview's) follows the same
+  // rule as one in the transcript.
+  const handleViewerLocalLink = useCallback((target: OpenLocalLinkTarget) => {
+    if (target.trigger === "contextmenu") return
+    void handleOpenLocalLink(target, shouldOpenLocalFileLinkInEditor(target.path) ? "open_editor" : "open_default")
+  }, [handleOpenLocalLink])
   const setRightSidebarSize = useRightSidebarStore((store) => store.setSize)
   const scrollback = useTerminalPreferencesStore((store) => store.scrollbackLines)
   const minColumnWidth = useTerminalPreferencesStore((store) => store.minColumnWidth)
@@ -567,6 +614,8 @@ export function ChatPage() {
   const showTerminalPane = Boolean(projectId && terminalLayout.isVisible && hasTerminals)
   const shouldRenderTerminalLayout = Boolean(projectId && hasTerminals)
   const showRightSidebar = Boolean(projectId && widgetsOpen)
+  // Set by the new-chat auto-open below; the toggle animation consumes it.
+  const skipNextOpenAnimationRef = useRef(false)
   const shouldRenderRightSidebarLayout = Boolean(projectId)
   const shouldRenderDesktopRightSidebarLayout = shouldRenderRightSidebarLayout && !isMobileViewport
   const layoutWidth = useLayoutWidth(layoutRootRef)
@@ -603,6 +652,7 @@ export function ChatPage() {
     shouldRenderRightSidebarLayout: shouldRenderDesktopRightSidebarLayout,
     showRightSidebar,
     rightSidebarSizePercent: effectiveRightSidebarSize,
+    skipNextOpenAnimationRef,
   })
 
   const {
@@ -639,7 +689,7 @@ export function ChatPage() {
     showRightSidebar,
   })
 
-  const { typedEmptyStateText, isEmptyStateTypingComplete } = useEmptyStateTyping(showEmptyState, state.activeChatId)
+  const { typedEmptyStateText, isEmptyStateTypingComplete } = useEmptyStateTyping(showEmptyState)
 
   // Read off the sidebar snapshot rather than the git one: the sidebar carries
   // a resolved forge URL for every project, while `project-git` only knows a
@@ -747,6 +797,18 @@ export function ChatPage() {
     // lands somewhere visible.
     if (isMobileViewport && projectId) hideWidgets(projectId)
   }, [activeChatId, hideWidgets, isMobileViewport, navigate, projectId])
+
+  // A new chat on desktop opens with the widgets already showing: no slide-in,
+  // since nobody asked for them, and a layout effect so the closed frame never
+  // paints. Keyed on the chat, so closing them on that page sticks until the
+  // next new chat.
+  const openWidgets = useRightSidebarStore((store) => store.openWidgets)
+  useLayoutEffect(() => {
+    if (!showEmptyState || isMobileViewport || !projectId) return
+    if (useRightSidebarStore.getState().projects[projectId]?.widgetsOpen) return
+    skipNextOpenAnimationRef.current = true
+    openWidgets(projectId)
+  }, [activeChatId, isMobileViewport, openWidgets, projectId, showEmptyState])
 
   // On a phone the widget column is a sheet over the chat, and the viewer
   // opens over the chat: close the sheet so what you opened is what you see.
@@ -1053,7 +1115,7 @@ export function ChatPage() {
           onStopDraining={state.handleStopDraining}
           onSteerQueuedMessage={state.handleSteerQueuedMessage}
           onRemoveQueuedMessage={state.handleRemoveQueuedMessage}
-          onOpenLocalLink={state.handleOpenLocalLink}
+          onOpenLocalLink={handleOpenLocalLink}
           editorPreset={editorPreset}
           editorCommandTemplate={editorCommandTemplate}
           platform={state.localProjects?.machine.platform}
@@ -1076,6 +1138,8 @@ export function ChatPage() {
           showEmptyState={showEmptyState}
           socket={state.socket}
           emptyStateProjectPath={state.navbarLocalPath}
+          emptyStateProjectId={projectId}
+          showEmptyStateUsage={isMobileViewport}
           onOpenProjectExternal={handleOpenExternal}
           scrollbarGutterHostRef={chatCardRef}
         />
@@ -1120,6 +1184,7 @@ export function ChatPage() {
   const diffViewerContext = useMemo<DiffViewerContext | undefined>(() => (projectId ? {
     projectId,
     files: state.chatDiffSnapshot?.files ?? EMPTY_DIFF_SNAPSHOT.files,
+    filesReady: state.chatDiffSnapshot?.status === "ready",
     editorLabel: state.editorLabel,
     diffRenderMode,
     wrapLines: wrapDiffLines,
@@ -1127,7 +1192,8 @@ export function ChatPage() {
     onWrapLinesChange: setWrapDiffLines,
     onLoadPatch: handleLoadDiffPatch,
     onOpenFile: handleOpenDiffFile,
-  } : undefined), [diffRenderMode, handleLoadDiffPatch, handleOpenDiffFile, projectId, setDiffRenderMode, setWrapDiffLines, state.chatDiffSnapshot?.files, state.editorLabel, wrapDiffLines])
+    isMac: state.localProjects?.machine.platform === "darwin",
+  } : undefined), [diffRenderMode, handleLoadDiffPatch, handleOpenDiffFile, projectId, setDiffRenderMode, setWrapDiffLines, state.chatDiffSnapshot?.files, state.chatDiffSnapshot?.status, state.editorLabel, state.localProjects?.machine.platform, wrapDiffLines])
 
   const chatWorkspace = projectId ? (
     <ChatWorkspace
@@ -1170,7 +1236,7 @@ export function ChatPage() {
       </div>
       {/* No right padding beside the widget column: its own 8px gutter is
           the gap, and the viewer's on top of it read as a double margin. */}
-      <ViewerLayer diff={diffViewerContext} className={showRightSidebar && !isMobileViewport ? "pr-0" : undefined} />
+      <ViewerLayer diff={diffViewerContext} onOpenLocalLink={handleViewerLocalLink} className={showRightSidebar && !isMobileViewport ? "pr-0" : undefined} />
     </div>
   )
 
@@ -1234,6 +1300,9 @@ export function ChatPage() {
     state.editorLabel,
   ])
   const rightPanelContent = projectId ? (
+    // The chat's payload store: an Agents card fetches a prompt the
+    // transcript left in the sidecar, as the chat's own rows do.
+    <ToolPayloadProvider store={toolPayloadStore}>
     <WidgetsSidebar
       projectId={projectId}
       chatId={state.activeChatId}
@@ -1246,7 +1315,9 @@ export function ChatPage() {
       onRunQuickAction={handleRunQuickAction}
       onJumpToToolCall={handleJumpToToolCall}
       gitWidgets={gitWidgetsProps ? <GitWidgetsContent {...gitWidgetsProps} /> : null}
+      isNewChat={showEmptyState}
     />
+    </ToolPayloadProvider>
   ) : null
 
   return (

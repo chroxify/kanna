@@ -85,6 +85,8 @@ interface KannaSidebarProps {
   onCollapse: () => void
   onExpand: () => void
   onCreateChat: (projectId: string) => void
+  /** The New Chat row: a chat in the current project, no picker. */
+  onCompose: () => void
   onForkChat: (chat: SidebarChatRow) => void
   currentProjectId: string | null
   keybindings: KeybindingsSnapshot | null
@@ -120,6 +122,7 @@ function KannaSidebarImpl({
   onCollapse,
   onExpand,
   onCreateChat,
+  onCompose,
   onForkChat,
   currentProjectId,
   keybindings,
@@ -734,7 +737,7 @@ function KannaSidebarImpl({
                     <div className="relative">
                       <button
                         type="button"
-                        onClick={() => openCommandPalette("new-thread")}
+                        onClick={onCompose}
                         className="flex w-full items-center gap-2 rounded-lg border border-border/0 px-2 py-1.5 max-md:py-2 text-sm max-md:text-base text-muted-foreground transition-colors hover:border-border hover:bg-muted"
                       >
                         <SquarePen className="h-4 w-4 shrink-0" />

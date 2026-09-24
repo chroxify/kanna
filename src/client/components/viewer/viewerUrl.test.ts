@@ -12,6 +12,16 @@ describe("viewer address", () => {
     expect(readViewerParams(params, null)).toBeNull()
   })
 
+  test("a project file round-trips with its line, and without one", () => {
+    const params = new URLSearchParams()
+    writeViewerParams(params, { kind: "file", projectId: "p1", path: "src/app.ts", line: 12 })
+    expect(params.get("viewer")).toBe("file")
+    expect(readViewerParams(params, "p1")).toEqual({ kind: "file", projectId: "p1", path: "src/app.ts", line: 12 })
+    writeViewerParams(params, { kind: "file", projectId: "p1", path: "README.md" })
+    expect(params.has("line")).toBe(false)
+    expect(readViewerParams(params, "p1")).toEqual({ kind: "file", projectId: "p1", path: "README.md" })
+  })
+
   test("an attachment round-trips with its name, type and size", () => {
     const attachment = { url: "/api/chats/c1/media/data.csv", name: "data.csv", mimeType: "text/csv", size: 317_000 }
     const params = new URLSearchParams()

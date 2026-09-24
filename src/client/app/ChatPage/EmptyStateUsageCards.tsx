@@ -4,6 +4,8 @@ import { NEW_CHAT_COMPOSER_ID, useChatPreferencesStore } from "../../stores/chat
 import type { KannaSocket } from "../socket"
 import { ProviderCard } from "../settings/UsageSection"
 
+let lastUsageSnapshot: UsageLimitsSnapshot | null = null
+
 /**
  * Compact harness usage meters shown on the empty (new chat) page. Renders
  * only providers with live limit data (Claude/Codex when signed in with a
@@ -18,10 +20,15 @@ export function EmptyStateUsageCards({
   socket: KannaSocket
   activeChatId: string | null
 }) {
-  const [snapshot, setSnapshot] = useState<UsageLimitsSnapshot | null>(null)
+  // Starts from the last push: each new chat remounts this, and waiting on a
+  // fresh subscription made the cards drop out and pop back in.
+  const [snapshot, setSnapshot] = useState<UsageLimitsSnapshot | null>(() => lastUsageSnapshot)
 
   useEffect(() => {
-    return socket.subscribe<UsageLimitsSnapshot>({ type: "usage-limits" }, setSnapshot)
+    return socket.subscribe<UsageLimitsSnapshot>({ type: "usage-limits" }, (next) => {
+      lastUsageSnapshot = next
+      setSnapshot(next)
+    })
   }, [socket])
 
   // The composer provider currently chosen for this (new/empty) chat.

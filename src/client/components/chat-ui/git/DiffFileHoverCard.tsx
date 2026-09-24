@@ -3,7 +3,7 @@ import { FileText } from "lucide-react"
 import { cn } from "../../../lib/utils"
 import { TURN_CARD_ROW_INSET, TurnCardMetaRow, TurnCardMetaSeparator } from "../../ui/turn-card"
 import { useCardDetails, WidgetHoverCard } from "../widgets/WidgetHoverCard"
-import { diffStatus, getDiffPreviewAttachment, type DiffFile } from "./shared"
+import { diffHold, diffStatus, getDiffPreviewAttachment, type DiffFile } from "./shared"
 
 // Keyed by path and patch digest: an edit to the file reads it again.
 const patchCache = new Map<string, string>()
@@ -45,12 +45,15 @@ export function DiffFileCardContent({
   file,
   patch,
   previewUrl,
+  note,
 }: {
   file: DiffFile
   /** Absent until the read lands (or if it fails). */
   patch: string | null
   /** An image's own URL, shown instead of a patch. */
   previewUrl?: string
+  /** Why there's no peek (a binary, a lockfile, a huge diff), said instead of one. */
+  note?: string
 }) {
   const status = diffStatus(file)
   const peek = patch ? peekPatch(patch) : null
@@ -106,6 +109,11 @@ export function DiffFileCardContent({
             </div>
           ) : null}
         </>
+      ) : note ? (
+        <TurnCardMetaRow className="mt-1">
+          <FileText className="size-2.5 shrink-0" strokeWidth={2.5} />
+          <span>{note}</span>
+        </TurnCardMetaRow>
       ) : patch !== null ? (
         <TurnCardMetaRow className="mt-1">
           <FileText className="size-2.5 shrink-0" strokeWidth={2.5} />
@@ -132,14 +140,17 @@ function DiffFileHoverCardBody({
 }) {
   const preview = getDiffPreviewAttachment(projectId, file)
   const imageUrl = preview?.kind === "image" ? preview.contentUrl : undefined
-  // An image shows as itself, and a PDF as its name: neither has a patch to peek.
+  // An image shows as itself, and a PDF as its name: neither has a patch to
+  // peek. Nor does a file the viewer holds back (a binary, a lockfile, a huge
+  // diff): the card says why rather than reading all of it for twelve lines.
+  const hold = preview ? null : diffHold(file)
   const patch = useCardDetails(
     patchCache,
     `${file.path}\u0000${file.patchDigest}`,
-    onLoadPatch && !preview ? () => onLoadPatch(file.path) : null,
+    onLoadPatch && !preview && !hold ? () => onLoadPatch(file.path) : null,
     50,
   )
-  return <DiffFileCardContent file={file} patch={preview ? null : patch} previewUrl={imageUrl} />
+  return <DiffFileCardContent file={file} patch={preview || hold ? null : patch} previewUrl={imageUrl} note={hold?.message} />
 }
 
 /** The Changes list's hover card: a file's card on the row under the pointer. */

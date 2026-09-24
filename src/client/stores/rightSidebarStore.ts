@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
+import type { AgentProvider } from "../../shared/types"
 
 /**
  * The right sidebar is one column of widgets (agents, git, attachments,
@@ -11,7 +12,9 @@ export interface ProjectRightSidebarVisibilityState {
 }
 
 /** The widget disclosures whose open state is remembered per project. */
-export type WidgetDisclosureId = "changes" | "history" | "ports" | "quickActions" | "usage"
+// Usage is one card per harness, so one disclosure each. The bare "usage" is
+// the single card from before that, left in the type so persisted state reads.
+export type WidgetDisclosureId = "changes" | "history" | "ports" | "quickActions" | "usage" | `usage:${AgentProvider}`
 
 export interface ProjectRightSidebarUiState {
   /**

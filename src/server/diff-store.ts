@@ -122,6 +122,7 @@ function snapshotsEqual(left: StoredChatDiffState | undefined, right: StoredChat
       && file.patchDigest === other.patchDigest
       && file.mimeType === other.mimeType
       && file.size === other.size
+      && file.binary === other.binary
   })
 }
 
@@ -1000,7 +1001,7 @@ async function readBaseFile(repoRoot: string, baseCommit: string | null, relativ
   return result.stdout
 }
 
-async function createPatch(beforePathLabel: string, afterPathLabel: string, beforeText: string | null, afterText: string | null) {
+async function createPatch(beforePathLabel: string, afterPathLabel: string, beforeText: string | null, afterText: string | null, contextLines = 3) {
   const tempDir = await mkdtemp(path.join(tmpdir(), "kanna-diff-"))
   const beforePath = path.join(tempDir, "before")
   const afterPath = path.join(tempDir, "after")
@@ -1015,7 +1016,7 @@ async function createPatch(beforePathLabel: string, afterPathLabel: string, befo
         "--no-index",
         "--no-ext-diff",
         "--text",
-        "--unified=3",
+        `--unified=${contextLines}`,
         "--src-prefix=a/",
         "--dst-prefix=b/",
         "before",
@@ -1080,14 +1081,16 @@ function parseNumstatZ(stdout: string): ChatCommitFile[] {
     if (typeof additionsValue !== "string" || typeof deletionsValue !== "string") continue
     const additions = parseNumstatValue(additionsValue)
     const deletions = parseNumstatValue(deletionsValue)
+    // numstat's "-\t-" is git saying the file is binary.
+    const binary = additionsValue === "-" && deletionsValue === "-" ? true : undefined
     if (pathValue) {
-      files.push({ path: pathValue, additions, deletions })
+      files.push({ path: pathValue, additions, deletions, ...(binary ? { binary } : {}) })
       continue
     }
     const previousPath = tokens[index++] ?? ""
     const nextPath = tokens[index++] ?? ""
     if (!nextPath) continue
-    files.push({ path: nextPath, previousPath: previousPath || undefined, additions, deletions })
+    files.push({ path: nextPath, previousPath: previousPath || undefined, additions, deletions, ...(binary ? { binary } : {}) })
   }
   return files
 }
@@ -1121,6 +1124,15 @@ interface LineCountCacheEntry {
   size: number
   mtimeMs: number
   lineCount: number
+  binary: boolean
+}
+
+/** How far git looks for a NUL byte when it decides a file is binary. */
+const BINARY_SNIFF_BYTES = 8000
+
+/** Git's binary test on text already read: a NUL in the first 8000 characters. */
+export function looksBinary(text: string | null) {
+  return text !== null && text.slice(0, BINARY_SNIFF_BYTES).includes("\u0000")
 }
 
 type LineCountCache = Map<string, LineCountCacheEntry>
@@ -1286,16 +1298,27 @@ export async function probeWorkingTree(repoRoot: string): Promise<WorkingTreeSca
   return { dirty: dirtyPaths.length > 0, paths: toDirtyPaths(dirtyPaths) }
 }
 
-async function countFileLines(absolutePath: string, size: number): Promise<number> {
+/**
+ * An untracked file's lines, the count git would give once it's added, and
+ * whether it's binary by git's test (a NUL in the first 8000 bytes). A binary
+ * file has no lines to count: a font's newline bytes aren't lines.
+ */
+async function countFileLines(absolutePath: string, size: number): Promise<{ lineCount: number; binary: boolean }> {
   if (size <= 0 || size > MAX_LINE_COUNT_BYTES) {
-    return 0
+    return { lineCount: 0, binary: false }
   }
 
   let lineCount = 0
   let lastByte = 0
+  let sniffed = 0
   try {
     for await (const chunk of createReadStream(absolutePath)) {
       const bytes = chunk as Buffer
+      if (sniffed < BINARY_SNIFF_BYTES) {
+        const window = bytes.subarray(0, BINARY_SNIFF_BYTES - sniffed)
+        if (window.includes(0)) return { lineCount: 0, binary: true }
+        sniffed += window.length
+      }
       let index = bytes.indexOf(10)
       while (index !== -1) {
         lineCount += 1
@@ -1306,13 +1329,13 @@ async function countFileLines(absolutePath: string, size: number): Promise<numbe
       }
     }
   } catch {
-    return 0
+    return { lineCount: 0, binary: false }
   }
 
   if (lastByte !== 10) {
     lineCount += 1
   }
-  return lineCount
+  return { lineCount, binary: false }
 }
 
 async function getCachedLineCount(args: {
@@ -1321,16 +1344,16 @@ async function getCachedLineCount(args: {
   absolutePath: string
   size: number
   mtimeMs: number
-}): Promise<number> {
+}): Promise<{ lineCount: number; binary: boolean }> {
   const cached = args.cache.get(args.absolutePath)
   if (cached && cached.size === args.size && cached.mtimeMs === args.mtimeMs) {
     args.nextCache.set(args.absolutePath, cached)
-    return cached.lineCount
+    return cached
   }
 
-  const lineCount = await countFileLines(args.absolutePath, args.size)
-  args.nextCache.set(args.absolutePath, { size: args.size, mtimeMs: args.mtimeMs, lineCount })
-  return lineCount
+  const counted = await countFileLines(args.absolutePath, args.size)
+  args.nextCache.set(args.absolutePath, { size: args.size, mtimeMs: args.mtimeMs, ...counted })
+  return counted
 }
 
 async function getWorktreeFileSize(repoRoot: string, relativePath: string): Promise<number> {
@@ -1363,7 +1386,7 @@ async function isPatchSourceTooLarge(repoRoot: string, baseCommit: string | null
 }
 
 async function getTrackedDiffStats(repoRoot: string, baseCommit: string | null) {
-  const statsByPath = new Map<string, { additions: number; deletions: number }>()
+  const statsByPath = new Map<string, { additions: number; deletions: number; binary?: boolean }>()
   if (!baseCommit) {
     return statsByPath
   }
@@ -1374,7 +1397,7 @@ async function getTrackedDiffStats(repoRoot: string, baseCommit: string | null) 
   }
 
   for (const file of parseNumstatZ(result.stdout)) {
-    statsByPath.set(file.path, { additions: file.additions, deletions: file.deletions })
+    statsByPath.set(file.path, { additions: file.additions, deletions: file.deletions, binary: file.binary })
   }
 
   return statsByPath
@@ -1420,20 +1443,22 @@ async function computeCurrentFiles(
     const mtimeMs = isFile || isSymlink ? fileInfo!.mtimeMs : undefined
 
     const trackedStats = trackedStatsByPath.get(relativePath)
+    const counted = !trackedStats && !isSymlink && isFile
+      ? await getCachedLineCount({
+          cache: lineCountCache,
+          nextCache: nextLineCountCache,
+          absolutePath,
+          size: size ?? 0,
+          mtimeMs: mtimeMs ?? 0,
+        })
+      : null
     const additions = trackedStats
       ? trackedStats.additions
       : isSymlink
         ? SYMLINK_LINE_COUNT
-        : isFile
-          ? await getCachedLineCount({
-              cache: lineCountCache,
-              nextCache: nextLineCountCache,
-              absolutePath,
-              size: size ?? 0,
-              mtimeMs: mtimeMs ?? 0,
-            })
-          : 0
+        : counted?.lineCount ?? 0
     const deletions = trackedStats?.deletions ?? 0
+    const binary = trackedStats ? trackedStats.binary === true : counted?.binary === true
 
     return {
       path: relativePath,
@@ -1451,6 +1476,7 @@ async function computeCurrentFiles(
       }),
       mimeType,
       size,
+      ...(binary ? { binary } : {}),
     }
   })
 
@@ -1827,6 +1853,8 @@ export class DiffStore {
   async readPatch(args: {
     projectPath: string
     path: string
+    /** The whole file as context ("Show full file"), not three lines either side. */
+    fullContext?: boolean
   }) {
     const relativePath = normalizeRepoRelativePath(args.path)
     const repo = await resolveRepo(args.projectPath)
@@ -1846,7 +1874,17 @@ export class DiffStore {
 
     const beforeText = await readBaseFile(repo.repoRoot, repo.baseCommit, beforePath)
     const afterText = await readWorktreeFile(repo.repoRoot, relativePath)
-    const patch = await createPatch(beforePath, relativePath, beforeText, afterText)
+    // A binary file has no text diff: forced through `--text` it comes out
+    // as pages of mojibake. Git would say "Binary files differ"; so does this,
+    // by sending no patch.
+    if (looksBinary(beforeText) || looksBinary(afterText)) {
+      return { patch: "", binary: true }
+    }
+    // As much context as the longer side has lines is the whole file.
+    const contextLines = args.fullContext
+      ? Math.max(3, (beforeText ?? "").split("\n").length, (afterText ?? "").split("\n").length)
+      : 3
+    const patch = await createPatch(beforePath, relativePath, beforeText, afterText, contextLines)
 
     return { patch }
   }

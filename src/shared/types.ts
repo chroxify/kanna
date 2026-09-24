@@ -1838,6 +1838,11 @@ export interface ChatDiffFile {
   patchDigest: string
   mimeType?: string
   size?: number
+  /**
+   * Binary content by git's own test (a NUL in the first 8000 bytes, or
+   * numstat's "-"): no line counts, and no text diff worth drawing.
+   */
+  binary?: boolean
 }
 
 export type ChatCommitChecksState = "pending" | "success" | "failure"
@@ -1874,6 +1879,8 @@ export interface ChatCommitFile {
   previousPath?: string
   additions: number
   deletions: number
+  /** Git sees binary content: no line counts, no text diff. */
+  binary?: boolean
 }
 
 /**

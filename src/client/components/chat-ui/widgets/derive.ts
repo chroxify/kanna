@@ -1,5 +1,5 @@
 import { ATTACHMENT_TOOL_NAMES, displayAttachments, type DisplayAttachment } from "../../../../shared/display-tools"
-import type { SubagentActivity, TranscriptEntry } from "../../../../shared/types"
+import type { NormalizedToolCall, SubagentActivity, ToolCallEntry, TranscriptEntry } from "../../../../shared/types"
 
 /**
  * What the widgets read out of the transcript. Kept pure (entries in, data
@@ -84,4 +84,62 @@ export function deriveSubagentToolIds(
     tail.forEach((toolId, index) => toolIds.set(agents[offset + index]!.id, toolId))
   }
   return toolIds
+}
+
+/** What an Agents row and its card know about one subagent, from the transcript. */
+export interface SubagentDetails {
+  /** The call that spawned it: its entry, for fetching a prompt left in the sidecar. */
+  spawn: ToolCallEntry
+  /** The short task the caller gave it ("Audit durable.ts turn engine"). */
+  description?: string
+  /** "general-purpose", "Explore", … */
+  subagentType?: string
+  /** The full task text, when the transcript carries it inline. */
+  prompt?: string
+  /** Tool calls it has made so far. */
+  toolCalls: number
+  /** Messages it has written so far (its text, not its tool calls). */
+  messages: number
+  /** Its latest tool call: what it's doing now, or did last. */
+  latestTool?: NormalizedToolCall
+}
+
+/**
+ * Each subagent's spawn call and what it has done since, keyed by subagent
+ * id. Its work is every entry whose `parentToolUseId` is the spawn call:
+ * providers that don't stream a subagent's steps give zeros, not a guess.
+ */
+export function deriveSubagentDetails(
+  entries: readonly TranscriptEntry[],
+  toolIds: ReadonlyMap<string, string>,
+): Map<string, SubagentDetails> {
+  const byToolId = new Map<string, SubagentDetails>()
+  const wanted = new Set(toolIds.values())
+  for (const entry of entries) {
+    if (entry.kind === "tool_call" && entry.tool.toolKind === "subagent_task" && wanted.has(entry.tool.toolId)) {
+      byToolId.set(entry.tool.toolId, {
+        spawn: entry,
+        description: entry.tool.input.description || undefined,
+        subagentType: entry.tool.input.subagentType || undefined,
+        prompt: entry.tool.input.prompt || undefined,
+        toolCalls: 0,
+        messages: 0,
+      })
+      continue
+    }
+    const parent = entry.parentToolUseId ? byToolId.get(entry.parentToolUseId) : undefined
+    if (!parent) continue
+    if (entry.kind === "tool_call") {
+      parent.toolCalls += 1
+      parent.latestTool = entry.tool
+    } else if (entry.kind === "assistant_text" && entry.text.trim()) {
+      parent.messages += 1
+    }
+  }
+  const details = new Map<string, SubagentDetails>()
+  for (const [agentId, toolId] of toolIds) {
+    const found = byToolId.get(toolId)
+    if (found) details.set(agentId, found)
+  }
+  return details
 }

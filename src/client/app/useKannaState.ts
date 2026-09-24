@@ -1050,9 +1050,11 @@ export function useKannaState(activeChatId: string | null): KannaState {
     handleOpenStandaloneShareLink,
   } = useShareExport({ socket, activeChatId, resolvedTheme, dialog, setCommandError })
 
+  // The sidebar's New Chat: a chat in the project you're looking at, like the
+  // iOS app. Picking another project is the empty chat's path button.
   const handleCompose = useCallback(() => {
     const intent = resolveComposeIntent({
-      selectedProjectId,
+      selectedProjectId: activeProjectId,
       sidebarProjectId: getMostRecentlyActiveProjectId(getSidebarProjectGroups()),
       fallbackLocalProjectPath,
     })

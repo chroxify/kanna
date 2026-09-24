@@ -22,19 +22,37 @@ export interface ViewerAttachment {
 
 export type ViewerItem =
   | { kind: "diff"; projectId: string; path: string }
+  /** A file in the project, as it is on disk: `path` relative to the project, `line` to jump to. */
+  | { kind: "file"; projectId: string; path: string; line?: number }
   | { kind: "attachment"; attachment: ViewerAttachment }
   | { kind: "chart"; payload: ChartToolPayload }
 
 interface ViewerState {
   item: ViewerItem | null
+  /**
+   * Counts opens, so opening the same file again (a click on the Changes row
+   * you already opened, after scrolling away from it) still jumps back to it.
+   */
+  openCount: number
+  /**
+   * The file the diff list is scrolled to, which the Changes card lights.
+   * Apart from `item`, which is the file that was opened: that one decides
+   * where the list jumps and what the address names, and scrolling mustn't
+   * move either.
+   */
+  scrolledDiffPath: string | null
   open: (item: ViewerItem) => void
   close: () => void
+  setScrolledDiffPath: (path: string | null) => void
 }
 
 export const useViewerStore = create<ViewerState>()((set) => ({
   item: null,
-  open: (item) => set({ item }),
-  close: () => set({ item: null }),
+  openCount: 0,
+  scrolledDiffPath: null,
+  open: (item) => set((state) => ({ item, openCount: state.openCount + 1, scrolledDiffPath: null })),
+  close: () => set({ item: null, scrolledDiffPath: null }),
+  setScrolledDiffPath: (path) => set((state) => (state.scrolledDiffPath === path ? state : { scrolledDiffPath: path })),
 }))
 
 export function openViewer(item: ViewerItem) {
@@ -49,9 +67,15 @@ export function viewerAttachmentFromDisplay(attachment: DisplayAttachment): View
   return { url: attachment.url, name: attachment.name, mimeType: attachment.mimeType, size: attachment.size }
 }
 
-/** The path the viewer shows a diff of, in this project, or null. */
+/**
+ * The file the viewer's diff list is on, in this project, or null: the one
+ * scrolled to, else the one opened. The Changes card lights it, so the two
+ * move together.
+ */
 export function useReviewedPath(projectId: string | null) {
   return useViewerStore((store) => (
-    projectId && store.item?.kind === "diff" && store.item.projectId === projectId ? store.item.path : null
+    projectId && store.item?.kind === "diff" && store.item.projectId === projectId
+      ? store.scrolledDiffPath ?? store.item.path
+      : null
   ))
 }

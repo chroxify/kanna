@@ -414,8 +414,11 @@ export function WidgetStatic({ children, className }: { children: ReactNode; cla
 }
 
 /**
- * Full-width actions under a card's body: the commit row, Merge / PR, Init
- * Git. The only place a card puts buttons. The card draws the divider above.
+ * Actions under a card's body: the commit row, Merge / PR, Init Git. The
+ * only place a card puts buttons. They're the footer itself rather than
+ * buttons on it: borderless, edge to edge, lighting under the pointer, so
+ * there's no second surface nested in the card. Side by side they're split
+ * by full-height rules. The card draws the divider above.
  */
 export function WidgetFooter({ children, above }: {
   children: ReactNode
@@ -423,17 +426,17 @@ export function WidgetFooter({ children, above }: {
   above?: ReactNode
 }) {
   return (
-    <div className="space-y-2 p-2">
-      {above}
-      <div className="flex gap-2">{children}</div>
+    <div>
+      {above ? <div className="border-b border-border p-2">{above}</div> : null}
+      <div className="flex h-10 min-w-0 items-stretch divide-x divide-border">{children}</div>
     </div>
   )
 }
 
-/** A Footer's main button: an outline button taking the row's width. */
-export const WIDGET_FOOTER_BUTTON_CLASS = "min-w-0 flex-1 rounded-xl"
+/** A Footer's main button (an outline Button, unframed): the row's width and height. */
+export const WIDGET_FOOTER_BUTTON_CLASS = "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent"
 /** A Footer's square button, beside the main one. */
-export const WIDGET_FOOTER_ICON_BUTTON_CLASS = "size-10 shrink-0 rounded-xl p-0"
+export const WIDGET_FOOTER_ICON_BUTTON_CLASS = "h-full w-10 shrink-0 rounded-none border-0 bg-transparent p-0"
 
 /**
  * Tiles in a List (Attachments' thumbnails). Cells touch: each carries 3px of

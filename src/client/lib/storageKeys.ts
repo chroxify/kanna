@@ -14,6 +14,16 @@ export const SIDEBAR_WIDTH_STORAGE_KEY = "kanna:sidebar-width"
 /** localStorage: last action chosen in the open-external menu. */
 export const OPEN_EXTERNAL_SELECT_STORAGE_KEY = "kanna:last-open-external"
 
+/**
+ * sessionStorage, + project id: where the diff viewer was (how far into the
+ * file, which files were collapsed, previewed, shown whole), so a reload
+ * comes back to the same spot. Cleared when the viewer closes.
+ */
+export const DIFF_REVIEW_STORAGE_KEY_PREFIX = "kanna:diff-review:"
+
+/** localStorage: last app chosen to open a single file from the viewer. */
+export const OPEN_FILE_DESTINATION_STORAGE_KEY = "kanna:last-open-file"
+
 /** localStorage: active sidebar view ("recents" | "projects") when the recent-chats Labs mode is on. */
 export const SIDEBAR_VIEW_STORAGE_KEY = "kanna:sidebar-view"
 

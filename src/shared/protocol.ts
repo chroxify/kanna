@@ -127,7 +127,8 @@ export type ClientCommand =
   | { type: "project.remove"; projectId: string }
   | { type: "project.remove"; localPath: string }
   | { type: "sidebar.reorderProjectGroups"; projectIds: string[] }
-  | { type: "project.readDiffPatch"; projectId: string; path: string }
+  // fullContext: the whole file around the changes, not three lines either side.
+  | { type: "project.readDiffPatch"; projectId: string; path: string; fullContext?: boolean }
   | { type: "project.readCommit"; projectId: string; sha: string }
   | { type: "project.readBranch"; projectId: string; branch: SelectedBranch }
   // Committing is addressed by project, not by chat: the diff panel's file

@@ -232,7 +232,9 @@ export function defaultWidgetExpanded(rowCount: number) {
 /**
  * A disclosure's open state, remembered per project once toggled.
  *
- * Until then it follows defaultWidgetExpanded. That default is fixed at the
+ * Until then it follows defaultWidgetExpanded, or `defaultOpen` for a
+ * disclosure that pages its own rows (the changed files show five, then
+ * more) and so is never too long to start open. That default is fixed at the
  * first non-zero count the project shows. A default that tracked the count
  * would fold the card shut under you the moment a fourth file changed.
  */
@@ -240,12 +242,13 @@ export function useWidgetExpanded(
   projectId: string | null,
   id: WidgetDisclosureId,
   rowCount: number,
+  defaultOpen?: boolean,
 ): [expanded: boolean, setExpanded: (expanded: boolean) => void] {
   const stored = useRightSidebarStore((store) => (projectId ? store.projectUi[projectId]?.expanded?.[id] : undefined))
   const setWidgetExpanded = useRightSidebarStore((store) => store.setWidgetExpanded)
   const defaultsRef = useRef(new Map<string, boolean>())
   const key = projectId ?? ""
-  if (!defaultsRef.current.has(key) && rowCount > 0) defaultsRef.current.set(key, defaultWidgetExpanded(rowCount))
+  if (!defaultsRef.current.has(key) && rowCount > 0) defaultsRef.current.set(key, defaultOpen ?? defaultWidgetExpanded(rowCount))
   const expanded = stored ?? defaultsRef.current.get(key) ?? false
   const setExpanded = useCallback((next: boolean) => {
     if (projectId) setWidgetExpanded(projectId, id, next)

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties } from "react"
 import {
   MessageScroller,
   MessageScrollerContent,
@@ -13,12 +13,12 @@ import { QueuedUserMessage } from "../../components/messages/QueuedUserMessage"
 import { OpenLocalLinkProvider, type OpenLocalLinkTarget } from "../../components/messages/shared"
 import { ProcessingMessage } from "../../components/messages/ProcessingMessage"
 import { ContextMenu, ContextMenuTrigger } from "../../components/ui/context-menu"
-import { OpenExternalContextMenuContent, openContextMenuFromButton } from "../../components/open-external-menu"
+import { OpenExternalContextMenuContent } from "../../components/open-external-menu"
 import { TRANSCRIPT_PADDING_BOTTOM_OFFSET } from "../kannaStateHelpers"
 import { useScrollbarGutterVar } from "../../hooks/useScrollbarGutterVar"
 import { cn } from "../../lib/utils"
 import type { ChatJumpRole } from "../../lib/chat-navigation"
-import { formatPathWithTilde, shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
+import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
 import {
   buildResolvedTranscriptRows,
   KannaTranscriptRow,
@@ -44,6 +44,7 @@ import { TranscriptMinimap } from "./TranscriptMinimap"
 import { buildTranscriptTurns, type TranscriptTurn } from "./transcriptTurns"
 import { EmptyStateAuthCards } from "./EmptyStateAuthCards"
 import { EmptyStateUsageCards } from "./EmptyStateUsageCards"
+import { EmptyStateProjectChats, EmptyStateProjectPicker } from "./EmptyStateProject"
 import {
   CHAT_NAVBAR_OFFSET_PX,
   EMPTY_STATE_TEXT,
@@ -270,6 +271,10 @@ interface ChatTranscriptViewportProps {
   /** When provided, the empty state shows live harness usage cards. */
   socket?: KannaSocket
   emptyStateProjectPath?: string | null
+  /** The empty state lists this project's recent chats. */
+  emptyStateProjectId?: string | null
+  /** The empty state shows harness usage cards. */
+  showEmptyStateUsage?: boolean
   onOpenProjectExternal?: (action: OpenExternalAction, editor?: EditorOpenSettings, terminal?: TerminalPreset) => void
   editorPreset?: EditorPreset
   editorCommandTemplate?: string
@@ -475,6 +480,8 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   showEmptyState,
   socket,
   emptyStateProjectPath,
+  emptyStateProjectId,
+  showEmptyStateUsage = false,
   onOpenProjectExternal,
   editorPreset = "cursor",
   editorCommandTemplate,
@@ -501,6 +508,14 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   const [toolGroupExpanded, setToolGroupExpanded] = useState<Record<string, boolean>>({})
   const [localLinkMenuTarget, setLocalLinkMenuTarget] = useState<OpenLocalLinkTarget | null>(null)
   const isMac = platform === "darwin"
+  // Whether the empty state plays its entrance, fixed when it first shows in
+  // this viewport. The viewport is keyed per chat, so one new chat after
+  // another remounts it; typing already done then means it was on screen a
+  // moment ago, and it appears in place instead of fading in again.
+  const emptyStateAnimatesInRef = useRef<boolean | null>(null)
+  if (!showEmptyState) emptyStateAnimatesInRef.current = null
+  else if (emptyStateAnimatesInRef.current === null) emptyStateAnimatesInRef.current = !isEmptyStateTypingComplete
+  const emptyStateAnimatesIn = emptyStateAnimatesInRef.current ?? false
 
   const rawRows = useMemo(() => buildResolvedTranscriptRows(messages, {
     isLoading: isProcessing,
@@ -1134,25 +1149,39 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
 
       {showEmptyState ? (
         <div
-          className="pointer-events-none absolute inset-x-4 animate-fade-in"
+          className={cn("pointer-events-none absolute inset-x-4", emptyStateAnimatesIn && "animate-fade-in")}
           style={{
-            top: headerOffsetPx,
+            // To the window's top, not the header's bottom: scrolled, the
+            // content passes under the header and its fade, like the
+            // transcript does, instead of being cut off at a hard edge.
+            top: 0,
             // Align the scroll area's bottom to the top of the chat input.
             // transcriptPaddingBottom carries an extra clearance offset the
             // message list needs; the empty state shouldn't include it.
             bottom: Math.max(0, transcriptPaddingBottom - TRANSCRIPT_PADDING_BOTTOM_OFFSET),
           }}
         >
-          <div className="pointer-events-auto mx-auto flex h-full max-w-[740px] flex-col items-center overflow-y-auto">
+          {/* The composer's width, so the project card lines up with it. The
+              header's height is padding inside the scroller, so the resting
+              layout centres below the header, and the offset rides along as a
+              variable for what sticks (the chat search). */}
+          <div
+            className="pointer-events-auto mx-auto flex h-full max-w-[840px] flex-col items-center overflow-y-auto"
+            style={{
+              paddingTop: headerOffsetPx ?? 0,
+              "--empty-state-header-offset": `${headerOffsetPx ?? 0}px`,
+            } as CSSProperties}
+          >
             {/* Flexbox-only center-or-scroll: my-auto centers the group when
                 there's room, but its auto margins collapse once the content
                 outgrows the container, so overflow-y-auto scrolls it from the
                 top instead of clipping — no height measurement. */}
             <div className="my-auto flex w-full flex-col items-center gap-[6vh] py-6">
+            <div className="flex w-full flex-col items-center gap-4">
             <div className="flex flex-col items-center justify-center gap-4 text-muted-foreground opacity-70">
-              <Flower strokeWidth={1.5} className="kanna-empty-state-flower size-8 text-muted-foreground" />
+              <Flower strokeWidth={1.5} className={cn("size-8 text-muted-foreground", emptyStateAnimatesIn && "kanna-empty-state-flower")} />
               <div
-                className="kanna-empty-state-text flex max-w-xs items-center text-center text-base font-normal text-muted-foreground"
+                className={cn(emptyStateAnimatesIn && "kanna-empty-state-text", "flex max-w-xs items-center text-center text-base font-normal text-muted-foreground")}
                 aria-label={EMPTY_STATE_TEXT}
               >
                 <span className="relative inline-grid place-items-start">
@@ -1171,38 +1200,29 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
                   </span>
                 </span>
               </div>
-              {emptyStateProjectPath && onOpenProjectExternal ? (
-                <ContextMenu>
-                  <ContextMenuTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={openContextMenuFromButton}
-                      title={emptyStateProjectPath}
-                      className={cn(
-                        "max-w-xs truncate rounded-md px-2 py-1 font-mono text-xs text-muted-foreground/80 transition-all duration-300 hover:bg-muted hover:text-foreground",
-                        isEmptyStateTypingComplete
-                          ? "pointer-events-auto opacity-100"
-                          : "pointer-events-none opacity-0",
-                      )}
-                    >
-                      {formatPathWithTilde(emptyStateProjectPath)}
-                    </button>
-                  </ContextMenuTrigger>
-                  <OpenExternalContextMenuContent
-                    isMac={isMac}
-                    editorPreset={editorPreset}
-                    editorCommandTemplate={editorCommandTemplate}
-                    includeFinder
-                    includeTerminal
-                    onOpenExternal={onOpenProjectExternal}
-                  />
-                </ContextMenu>
-              ) : null}
             </div>
+            {/* Where the chat will start, under the line that asks what to
+                build. Outside the dimmed group so it reads as a control. */}
+            {emptyStateProjectId && emptyStateProjectPath ? (
+              <div
+                className={cn(
+                  "flex max-w-full justify-center transition-opacity duration-300",
+                  isEmptyStateTypingComplete
+                    ? "pointer-events-auto opacity-100"
+                    : "pointer-events-none opacity-0",
+                )}
+              >
+                <EmptyStateProjectPicker localPath={emptyStateProjectPath} />
+              </div>
+            ) : null}
+            </div>
+            {/* Everything below sits on the page background, like the
+                sidebars' lists: onboarding first while it applies, then the
+                project's chats. */}
             {socket ? (
               <div
                 className={cn(
-                  "mt-8 flex w-full justify-center transition-opacity duration-500",
+                  "flex w-full justify-center transition-opacity duration-500",
                   isEmptyStateTypingComplete
                     ? "pointer-events-auto opacity-100"
                     : "pointer-events-none opacity-0",
@@ -1210,7 +1230,12 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
               >
                 <div className="w-full space-y-3">
                   <EmptyStateAuthCards />
-                  <EmptyStateUsageCards socket={socket} activeChatId={activeChatId} />
+                  {/* On desktop usage lives in the widget column, which a new
+                      chat opens; a phone's column is a closed sheet. */}
+                  {showEmptyStateUsage ? <EmptyStateUsageCards socket={socket} activeChatId={activeChatId} /> : null}
+                  {emptyStateProjectId ? (
+                    <EmptyStateProjectChats projectId={emptyStateProjectId} activeChatId={activeChatId} />
+                  ) : null}
                 </div>
               </div>
             ) : null}

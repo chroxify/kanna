@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { GitWidgets, summarizeChanges, visibleHistoryEntries, canIgnoreDiffFile, canIgnoreDiffFolder, getPrimaryCommitActionPrefix } from "./GitWidgets"
+import { filterFilesByQuery, GitWidgets, summarizeChanges, visibleHistoryEntries, canIgnoreDiffFile, canIgnoreDiffFolder, getPrimaryCommitActionPrefix } from "./GitWidgets"
 import { TooltipProvider } from "../../ui/tooltip"
 
 describe("GitWidgets", () => {
@@ -116,7 +116,7 @@ describe("GitWidgets", () => {
   // A static render reads the store's initial state (zustand's server
   // snapshot), so this pins the default; a toggle is the store's `expanded`
   // map, covered in rightSidebarStore.test.ts.
-  test("a large Changes card starts collapsed behind a disclosure, counting files", () => {
+  test("the Changes card starts open, counting files, in tree order", () => {
     const markup = renderToStaticMarkup(createElement(
       TooltipProvider,
       null,
@@ -154,8 +154,10 @@ describe("GitWidgets", () => {
     // Totals across the change set: +1 and +4 added, 1 removed.
     expect(markup).toContain(">+5<")
     expect(markup).toContain(">-1<")
-    expect(markup).toContain('aria-expanded="false"')
-    expect(markup).not.toContain("src/b.ts")
+    expect(markup).toContain('aria-expanded="true"')
+    // By path, not size: app.ts (+1 -1) before b.ts (+4).
+    expect(markup.indexOf(">app.ts<")).toBeGreaterThan(-1)
+    expect(markup.indexOf(">app.ts<")).toBeLessThan(markup.indexOf(">b.ts<"))
     expect(markup).not.toContain("Side-by-side diff")
     // No commits yet, so no History card.
     expect(markup).not.toContain(">History<")
@@ -486,6 +488,17 @@ describe("GitWidgets", () => {
     expect(markup).toContain(">A<")
     expect(markup).toContain(">D<")
     expect(markup).toContain(">Review all<")
-    expect(markup).toContain("All files in the commit")
+    expect(markup).toContain('placeholder="Search files"')
+    expect(markup).not.toContain("All files in the commit")
+  })
+})
+
+describe("filterFilesByQuery", () => {
+  test("keeps files whose path holds every word, in the list's order", () => {
+    const files = [{ path: "src/widgets/WidgetCard.tsx" }, { path: "src/git/DiffViewer.tsx" }, { path: "src/widgets/parts.tsx" }]
+    expect(filterFilesByQuery(files, "widget card").map((file) => file.path)).toEqual(["src/widgets/WidgetCard.tsx"])
+    expect(filterFilesByQuery(files, "WIDGETS").map((file) => file.path)).toEqual(["src/widgets/WidgetCard.tsx", "src/widgets/parts.tsx"])
+    expect(filterFilesByQuery(files, "  ")).toBe(files)
+    expect(filterFilesByQuery(files, "nope")).toEqual([])
   })
 })

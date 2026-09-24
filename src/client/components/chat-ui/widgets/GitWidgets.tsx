@@ -30,11 +30,12 @@ import { DiffFileHoverCard } from "../git/DiffFileHoverCard"
 import { DiffFileRow, type DiffFileActions } from "../git/DiffFileRow"
 import { GitHubPublishModal } from "../git/GitHubPublishModal"
 import { MergeBranchModal } from "../git/MergeBranchModal"
-import { DiffFileStat, StageCheckbox } from "../git/shared"
+import { DiffFileStat, sortByPath, StageCheckbox } from "../git/shared"
 import {
   WIDGET_FOOTER_BUTTON_CLASS,
   WIDGET_FOOTER_ICON_BUTTON_CLASS,
   WIDGET_ROW_REVEAL_CLASS,
+  WIDGET_STRIP_INPUT_CLASS,
   WidgetFooter,
   WidgetList,
   WidgetMoreRow,
@@ -48,7 +49,21 @@ export type { DiffFileActions } from "../git/DiffFileRow"
 
 // The Changes list opens on a screenful and pages on from there: the card is
 // an index, and thousands of rows at once make the whole app sluggish.
-export const INITIAL_VISIBLE_DIFF_FILE_COUNT = 12
+/**
+ * The Changes search: every word of the query in the file's path, in any
+ * order, ignoring case ("widget card" finds widgets/WidgetCard.tsx). Keeps
+ * the list's order.
+ */
+export function filterFilesByQuery<T extends { path: string }>(files: readonly T[], query: string): readonly T[] {
+  const words = query.toLowerCase().split(/\s+/u).filter(Boolean)
+  if (words.length === 0) return files
+  return files.filter((file) => {
+    const path = file.path.toLowerCase()
+    return words.every((word) => path.includes(word))
+  })
+}
+
+export const INITIAL_VISIBLE_DIFF_FILE_COUNT = 5
 export const VISIBLE_DIFF_FILE_INCREMENT = 200
 // History opens on the latest few commits; "Show more" reveals the rest of
 // what the server sends, which is 25 (diff-store's BRANCH_HISTORY_LIMIT).
@@ -194,6 +209,7 @@ function GitWidgetsImpl({
   const [mergeBranchList, setMergeBranchList] = useState<ChatBranchListResult | null>(null)
   const [isGitHubPublishModalOpen, setIsGitHubPublishModalOpen] = useState(false)
   const [visibleFileCount, setVisibleFileCount] = useState(INITIAL_VISIBLE_DIFF_FILE_COUNT)
+  const [fileQuery, setFileQuery] = useState("")
   const filePaths = useMemo(() => diffs.files.map((file) => file.path), [diffs.files])
   const filePathsKey = useMemo(() => filePaths.join("\u0000"), [filePaths])
   // Local, not persisted: the picker is a place you visit, not a view to keep open.
@@ -201,7 +217,10 @@ function GitWidgetsImpl({
   const [showAllHistory, setShowAllHistory] = useState(false)
   const historyListRef = useRef<HTMLDivElement | null>(null)
   const changesListRef = useRef<HTMLDivElement | null>(null)
-  const [changesExpanded, setChangesExpanded] = useWidgetExpanded(projectId, "changes", diffs.files.length)
+  const [changesExpanded, setChangesExpanded] = useWidgetExpanded(projectId, "changes", diffs.files.length, true)
+  // Tree order, here and in the viewer, as GitHub and VS Code list changes:
+  // related files sit together and the order doesn't move as edits grow.
+  const filesInOrder = useMemo(() => sortByPath(diffs.files), [diffs.files])
   const [historyExpanded, setHistoryExpanded] = useWidgetExpanded(projectId, "history", diffs.branchHistory?.entries.length ?? 0)
   const summary = useRightSidebarStore((store) => (projectId ? (store.projectUi[projectId]?.summary ?? "") : ""))
   const description = useRightSidebarStore((store) => (projectId ? (store.projectUi[projectId]?.description ?? "") : ""))
@@ -212,6 +231,21 @@ function GitWidgetsImpl({
   const [commitEditorOpen, setCommitEditorOpen] = useState(() => summary.trim().length > 0 || description.trim().length > 0)
   const commitMessageInputRef = useRef<HTMLInputElement | null>(null)
   const reviewedPath = useReviewedPath(projectId)
+
+  // The row the viewer is on stays in sight: scrolling the diff list moves
+  // the highlight here, so the list shows that row, past the first five if
+  // it must be, and scrolls just far enough to show it.
+  useEffect(() => {
+    if (!reviewedPath) return
+    const index = filterFilesByQuery(filesInOrder, fileQuery).findIndex((file) => file.path === reviewedPath)
+    if (index === -1) return
+    setVisibleFileCount((count) => Math.max(count, index + 1))
+    requestAnimationFrame(() => {
+      changesListRef.current
+        ?.querySelector(`[data-row-key="${CSS.escape(reviewedPath)}"]`)
+        ?.scrollIntoView({ block: "nearest" })
+    })
+  }, [fileQuery, filesInOrder, reviewedPath])
   const setCommitDraft = useRightSidebarStore((store) => store.setCommitDraft)
   const clearCommitDraft = useRightSidebarStore((store) => store.clearCommitDraft)
   const diffCommitSelection = useDiffCommitStore((store) => (projectId ? store.selectionsByProjectId[projectId] : undefined))
@@ -221,6 +255,7 @@ function GitWidgetsImpl({
 
   useEffect(() => {
     setVisibleFileCount(INITIAL_VISIBLE_DIFF_FILE_COUNT)
+    setFileQuery("")
     setShowAllHistory(false)
   }, [projectId])
 
@@ -540,13 +575,12 @@ function GitWidgetsImpl({
 
   const commitBox = hasChanges && diffs.status === "ready" ? (
     <WidgetFooter above={commitEditorOpen ? commitFields : undefined}>
-      {/* A split button: one outline surface, the commit taking the width and
-          the pencil an accessory at its end, like a split button's dropdown
-          half. They're one control (commit, optionally with your own message),
-          so one surface; each half still lights on its own under the pointer.
-          The divider runs the full height, so each half's hover fill meets
-          it edge to edge. */}
-      <div className="flex h-10 min-w-0 flex-1 items-stretch overflow-hidden rounded-xl border border-border bg-card">
+      {/* A split button, as the footer itself: the commit taking the width
+          and the pencil an accessory at its end, like a split button's
+          dropdown half. Each half lights on its own under the pointer, and
+          the rule between them runs the full height, so each half's hover
+          fill meets it edge to edge. */}
+      <div className="flex h-full min-w-0 flex-1 items-stretch">
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <button
@@ -631,8 +665,14 @@ function GitWidgetsImpl({
   const openFileReview = (path: string) => {
     if (projectId) openViewer({ kind: "diff", projectId, path })
   }
-  const visibleFiles = visibleFileCount < diffs.files.length ? diffs.files.slice(0, visibleFileCount) : diffs.files
-  const hiddenFileCount = diffs.files.length - visibleFiles.length
+  const firstCheckedPath = filesInOrder.find((file) => isDiffPathChecked(diffCommitSelection, file.path))?.path ?? null
+  // A search shows what it finds, a page at once rather than five: you typed
+  // to get to a file, not to page through for it.
+  const matchingFiles = filterFilesByQuery(filesInOrder, fileQuery)
+  const searching = fileQuery.trim().length > 0
+  const pageSize = searching ? Math.max(visibleFileCount, VISIBLE_DIFF_FILE_INCREMENT) : visibleFileCount
+  const visibleFiles = pageSize < matchingFiles.length ? matchingFiles.slice(0, pageSize) : matchingFiles
+  const hiddenFileCount = matchingFiles.length - visibleFiles.length
   // A page at a time (the count says what this click shows, and "left" what
   // remains), then "Show less" back to the first screenful.
   const filesMore = hiddenFileCount > 0 ? (
@@ -641,12 +681,12 @@ function GitWidgetsImpl({
       detail={hiddenFileCount > VISIBLE_DIFF_FILE_INCREMENT ? `${hiddenFileCount.toLocaleString()} left` : undefined}
       onShow={() => setVisibleFileCount((count) => count + VISIBLE_DIFF_FILE_INCREMENT)}
     />
-  ) : diffs.files.length > INITIAL_VISIBLE_DIFF_FILE_COUNT ? (
+  ) : !searching && diffs.files.length > INITIAL_VISIBLE_DIFF_FILE_COUNT ? (
     <WidgetMoreRow count={0} shown onHide={() => setVisibleFileCount(INITIAL_VISIBLE_DIFF_FILE_COUNT)} />
   ) : null
 
-  // A Strip for what acts on the whole list (include every file, review from
-  // the top), then the files. The list is an index: a row opens its diff in
+  // A Strip for what acts on the whole list (include every file, find one,
+  // review the checked ones), then the files. The list is an index: a row opens its diff in
   // the viewer over the chat, never inside this card.
   const fileList = hasChanges ? (
     <>
@@ -667,18 +707,43 @@ function GitWidgetsImpl({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => openFileReview(reviewedPath ?? diffs.files[0]!.path)}
+            disabled={!firstCheckedPath}
+            onClick={() => {
+              // Opens on a checked file, so the review is the checked files
+              // and nothing else (the viewer adds an unchecked file only when
+              // you open that file itself).
+              const reviewedIsChecked = reviewedPath !== null && isDiffPathChecked(diffCommitSelection, reviewedPath)
+              const target = reviewedIsChecked ? reviewedPath : firstCheckedPath
+              if (target) openFileReview(target)
+            }}
             className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:text-foreground hover:!bg-transparent hover:!border-border/0"
           >
-            {/* Words, not an eye: it opens the first file and steps through
-                them all, which a glyph can't say. */}
-            <span>Review all</span>
+            {/* Words, not an eye: it opens the checked files in one scroll,
+                and says how many, which a glyph can't. */}
+            <span>{allSelected ? "Review all" : someSelected ? `Review ${selectedCount}` : "Review"}</span>
           </Button>
         )}
       >
-        <span className="truncate text-xs text-muted-foreground">
-          {allSelected ? "All files in the commit" : someSelected ? `${selectedCount} of ${diffs.files.length} in the commit` : "No files in the commit"}
-        </span>
+        {/* What's in the commit is already said: the header counts it ("2 of
+            3 files changed") and Review names it. This line finds a file. */}
+        <input
+          value={fileQuery}
+          onChange={(event) => setFileQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && fileQuery) {
+              event.preventDefault()
+              event.stopPropagation()
+              setFileQuery("")
+            }
+          }}
+          placeholder="Search files"
+          aria-label="Search changed files"
+          type="search"
+          autoComplete="off"
+          spellCheck={false}
+          data-1p-ignore
+          className={cn(WIDGET_STRIP_INPUT_CLASS, "[&::-webkit-search-cancel-button]:hidden")}
+        />
       </WidgetStrip>
       <WidgetList listRef={changesListRef}>
         {visibleFiles.map((file, index) => {
@@ -696,10 +761,13 @@ function GitWidgetsImpl({
                 setCheckedPath(projectId, file.path, !isChecked)
               }}
               onReview={() => openFileReview(file.path)}
-              className={index >= INITIAL_VISIBLE_DIFF_FILE_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
+              className={!searching && index >= INITIAL_VISIBLE_DIFF_FILE_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
             />
           )
         })}
+        {searching && matchingFiles.length === 0 ? (
+          <div className="truncate px-2 py-1.5 text-xs text-muted-foreground">No files match “{fileQuery.trim()}”</div>
+        ) : null}
         {filesMore}
       </WidgetList>
       <DiffFileHoverCard
@@ -802,7 +870,9 @@ function GitWidgetsImpl({
             entries={visibleHistory.shown}
             aheadCount={aheadCount}
             onReadCommit={onReadCommit}
-            onOpenFile={onOpenFile}
+            // A commit's file opens in the viewer, as it reads now; the
+            // editor is a button away there.
+            onOpenFile={projectId ? (path) => openViewer({ kind: "file", projectId, path }) : undefined}
           />
         </WidgetCard>
       </WidgetPresence>

@@ -1478,6 +1478,7 @@ export function createWsRouter({
           const result = await diffStore.readPatch({
             projectPath: project.localPath,
             path: command.path,
+            fullContext: command.fullContext === true,
           })
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
           return

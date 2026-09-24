@@ -7,7 +7,7 @@ import { AttachmentsWidget } from "./AttachmentsWidget"
 import { deriveSentAttachments, deriveSubagentToolIds } from "./derive"
 import { PortsWidget } from "./PortsWidget"
 import { QuickActionsWidget } from "./QuickActionsWidget"
-import { UsageWidget } from "./UsageWidget"
+import { UsageWidgets } from "./UsageWidget"
 import { WidgetPresence } from "./WidgetCard"
 
 /**
@@ -21,7 +21,8 @@ import { WidgetPresence } from "./WidgetCard"
  * Order runs from what the agent is doing right now to what it has left
  * behind: its delegated agents, then git (branch, working tree, history),
  * the files it sent, the servers it started and the commands that start
- * them. The selected harness's usage limits close the column.
+ * them. Usage limits close the column: the selected harness's, or on a new
+ * chat every harness's, selected first.
  *
  * The git widgets arrive as a node because the page lazy-loads them (they pull
  * in the diff renderer), and this column should paint without waiting.
@@ -38,9 +39,12 @@ function WidgetsSidebarImpl({
   onRunQuickAction,
   onJumpToToolCall,
   gitWidgets,
+  isNewChat,
 }: {
   projectId: string
   chatId: string | null
+  /** The chat hasn't sent yet: usage shows for every harness, not only the selected one. */
+  isNewChat: boolean
   /** The provider the chat's live session is locked to, if any. */
   activeProvider: AgentProvider | null
   availableProviders: ProviderCatalogEntry[]
@@ -75,7 +79,7 @@ function WidgetsSidebarImpl({
           away with it. */}
       <div className="flex flex-col px-2 pb-2">
         <WidgetPresence show={subagents.length > 0}>
-          <AgentsWidget subagents={subagents} toolIds={subagentToolIds} onJumpToToolCall={onJumpToToolCall} />
+          <AgentsWidget subagents={subagents} toolIds={subagentToolIds} entries={entries} onJumpToToolCall={onJumpToToolCall} />
         </WidgetPresence>
         {gitWidgets}
         <WidgetPresence show={attachments.length > 0}>
@@ -85,7 +89,7 @@ function WidgetsSidebarImpl({
         <WidgetPresence show>
           <QuickActionsWidget projectId={projectId} socket={socket} onRun={runQuickAction} />
         </WidgetPresence>
-        <UsageWidget projectId={projectId} socket={socket} active={active} provider={selectedProvider} />
+        <UsageWidgets projectId={projectId} socket={socket} active={active} selectedProvider={selectedProvider} showAll={isNewChat} />
       </div>
     </div>
   )

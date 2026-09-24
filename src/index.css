@@ -235,12 +235,42 @@
   }
 }
 
+/*
+ * The table skeleton's wave: each bar brightens and draws out to full length
+ * as the band passes, then rests for the rest of the cycle. Delays are set
+ * per cell by its diagonal. Stepped for the same reason as `kanna-ping`:
+ * hundreds of bars at display rate is a lot of compositor frames for a
+ * loading state; 12 steps a beat is about 28 fps.
+ */
+.kanna-table-wave {
+  transform-origin: left center;
+  animation: kanna-table-wave 2.4s steps(12) infinite backwards;
+}
+
+@keyframes kanna-table-wave {
+  0%,
+  40%,
+  100% {
+    opacity: 0.45;
+    transform: scaleX(0.92);
+  }
+
+  18% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .kanna-shiny-track {
     display: none;
   }
 
   .kanna-ping {
+    animation: none;
+  }
+
+  .kanna-table-wave {
     animation: none;
   }
 }

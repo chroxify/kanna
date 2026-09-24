@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import { OPEN_EXTERNAL_SELECT_STORAGE_KEY } from "../lib/storageKeys"
+import { OPEN_EXTERNAL_SELECT_STORAGE_KEY, OPEN_FILE_DESTINATION_STORAGE_KEY } from "../lib/storageKeys"
 
 /**
  * The destination the navbar's "Open in…" split button last opened, kept in a
@@ -13,12 +13,20 @@ import { OPEN_EXTERNAL_SELECT_STORAGE_KEY } from "../lib/storageKeys"
 interface OpenDestinationState {
   value: string | null
   setValue: (value: string) => void
+  /**
+   * The viewer's "Open in…" for one file, remembered apart from the
+   * navbar's: a file can open in Preview or its default app, which the
+   * navbar (a whole project) doesn't offer, and picking one for a file
+   * shouldn't change where the project opens.
+   */
+  fileValue: string | null
+  setFileValue: (value: string) => void
 }
 
-function readStoredValue() {
+function readStoredValue(key = OPEN_EXTERNAL_SELECT_STORAGE_KEY) {
   if (typeof window === "undefined") return null
   try {
-    return window.localStorage.getItem(OPEN_EXTERNAL_SELECT_STORAGE_KEY)
+    return window.localStorage.getItem(key)
   } catch {
     // Private-mode Safari and friends: remembering the choice is a nicety.
     return null
@@ -34,5 +42,14 @@ export const useOpenDestinationStore = create<OpenDestinationState>()((set) => (
       // Not persisted, but still honoured for this session.
     }
     set({ value })
+  },
+  fileValue: readStoredValue(OPEN_FILE_DESTINATION_STORAGE_KEY),
+  setFileValue: (fileValue) => {
+    try {
+      window.localStorage.setItem(OPEN_FILE_DESTINATION_STORAGE_KEY, fileValue)
+    } catch {
+      // Not persisted, but still honoured for this session.
+    }
+    set({ fileValue })
   },
 }))

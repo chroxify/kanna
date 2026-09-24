@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp, X } from "lucide-react"
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
 import { cn } from "../../lib/utils"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
 
@@ -16,6 +17,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
  * Keys: Esc closes; j/k (or ]/[) step when there's more than one item, but
  * never while you're typing in a field.
  */
+
+/**
+ * A menu, select or dialog open over the page: Escape is theirs to close
+ * first. Tooltips don't count; they close with the viewer.
+ */
+function hasOpenLayer() {
+  return Boolean(document.querySelector("[role='menu'][data-state='open'], [role='listbox'][data-state='open'], [role='dialog'][data-state='open'], [role='alertdialog'][data-state='open']"))
+}
 
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false
@@ -55,14 +64,18 @@ export function ViewerSurface({
   bodyClassName?: string
   /** Names the region for assistive tech, e.g. "Review src/app.ts". */
   label: string
-  /** Changes when the body shows something new (the next file): it starts at its top. */
+  /**
+   * Changes when the body shows something new: it starts at its top. Without
+   * one the body's scroll is its content's to set (the diff list opens
+   * scrolled to the file you clicked).
+   */
   scrollKey?: string
 }) {
   const surfaceRef = useRef<HTMLDivElement | null>(null)
   const bodyRef = useRef<HTMLDivElement | null>(null)
 
   useLayoutEffect(() => {
-    bodyRef.current?.scrollTo({ top: 0 })
+    if (scrollKey !== undefined) bodyRef.current?.scrollTo({ top: 0 })
   }, [scrollKey])
 
   // Focus comes here on open, so its keys work at once and nothing behind
@@ -71,15 +84,27 @@ export function ViewerSurface({
     surfaceRef.current?.focus({ preventScroll: true })
   }, [])
 
+  // Escape always closes, from wherever focus is. It's heard first (window,
+  // capture phase), because on its way things swallow it: the composer's
+  // focus keeper takes it to refocus the chat input, and an open tooltip
+  // (the close button's own "Close (Esc)") takes it to close itself. Only a
+  // menu, select or dialog open over the viewer gets it first.
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return
+      if (hasOpenLayer()) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      onClose()
+    }
+    window.addEventListener("keydown", handleEscape, true)
+    return () => window.removeEventListener("keydown", handleEscape, true)
+  }, [onClose])
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      // Something closer to the key (a menu, a dialog) already answered it.
+      // Something closer to the key (a menu, a field) already answered it.
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      if (event.key === "Escape") {
-        event.preventDefault()
-        onClose()
-        return
-      }
       if (!navigation || navigation.count < 2 || isTypingTarget(event.target)) return
       if (event.key === "j" || event.key === "]") {
         event.preventDefault()
@@ -99,6 +124,10 @@ export function ViewerSurface({
       tabIndex={-1}
       role="region"
       aria-label={label}
+      // An overlay to the composer's focus keeper: a click in here isn't a
+      // click away from the chat input to take back.
+      {...{ [FOCUS_FALLBACK_IGNORE_ATTRIBUTE]: "" }}
+      data-state="open"
       className={cn(
         "flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-xl outline-none dark:bg-card",
         // Opens like the modal it effectively is: from its own centre, a
@@ -182,6 +211,39 @@ export function ViewerIconButton({ label, active = false, onClick, children }: {
 }
 
 /**
+ * The bodies a ViewerToggle switches between. Each mounts the first time it's
+ * shown and then stays: a CSV's table is tens of thousands of cells, and
+ * building it again on every switch back from "Original" froze the viewer.
+ * The one not showing is `content-visibility: hidden`, which keeps its layout
+ * for when it comes back, rather than `display: none`, which throws it away.
+ * Each pane is its own scroller, so each keeps its place.
+ */
+export function ViewerPanes<T extends string>({ value, panes }: {
+  value: T
+  panes: Record<T, () => ReactNode>
+}) {
+  const [shown, setShown] = useState<ReadonlySet<T>>(() => new Set([value]))
+  if (!shown.has(value)) setShown(new Set([...shown, value]))
+  return (
+    <div className="relative h-full">
+      {(Object.keys(panes) as T[]).filter((key) => shown.has(key) || key === value).map((key) => {
+        const active = key === value
+        return (
+          <div
+            key={key}
+            inert={!active}
+            aria-hidden={!active || undefined}
+            className={cn("absolute inset-0 overflow-auto", !active && "pointer-events-none [content-visibility:hidden]")}
+          >
+            {panes[key]()}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
  * Two or three mutually exclusive views of one thing ("Preview" / "Original"),
  * as text in the header. One control, so the active one reads as selected
  * rather than as a pressed button beside another.
@@ -192,7 +254,9 @@ export function ViewerToggle<T extends string>({ value, options, onChange }: {
   onChange: (value: T) => void
 }) {
   return (
-    <div role="radiogroup" className="flex h-7 shrink-0 items-center rounded-md border border-border p-0.5">
+    // Concentric corners: the segment's radius is the frame's less the 3px
+    // between their edges (1px border, 2px padding), 8px outside, 5px inside.
+    <div role="radiogroup" className="flex h-7 shrink-0 items-center rounded-[8px] border border-border p-0.5">
       {options.map((option) => (
         <button
           key={option.value}
