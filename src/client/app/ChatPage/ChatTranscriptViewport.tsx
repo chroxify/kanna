@@ -1077,7 +1077,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
         <MessageScroller className="h-full flex-1">
           <MessageScrollerViewport
             ref={viewportRef}
-            className="h-full overflow-x-hidden overscroll-y-contain px-3"
+            className="h-full overflow-x-hidden overscroll-y-contain px-3 scrollbar-hide"
             style={{ scrollPaddingTop: headerOffsetPx }}
           >
             <MessageScrollerContent style={contentContainerStyle}>
@@ -1166,7 +1166,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
               layout centres below the header, and the offset rides along as a
               variable for what sticks (the chat search). */}
           <div
-            className="pointer-events-auto mx-auto flex h-full max-w-[840px] flex-col items-center overflow-y-auto"
+            className="pointer-events-auto mx-auto flex h-full max-w-[840px] flex-col items-center overflow-y-auto scrollbar-hide"
             style={{
               paddingTop: headerOffsetPx ?? 0,
               "--empty-state-header-offset": `${headerOffsetPx ?? 0}px`,
