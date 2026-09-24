@@ -171,7 +171,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   let discoveredProjects: DiscoveredProject[] = []
 
   async function refreshDiscovery() {
-    discoveredProjects = discoverProjects()
+    discoveredProjects = await discoverProjects()
     return discoveredProjects
   }
 

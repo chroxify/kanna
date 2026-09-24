@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
@@ -28,7 +28,7 @@ afterEach(() => {
 })
 
 describe("project discovery", () => {
-  test("Claude adapter decodes saved project paths", () => {
+  test("Claude adapter decodes saved project paths", async () => {
     const homeDir = makeTempDir()
     const projectDir = path.join(homeDir, "workspace", "alpha-project")
     const claudeProjectsDir = path.join(homeDir, ".claude", "projects")
@@ -38,7 +38,7 @@ describe("project discovery", () => {
     mkdirSync(projectMarkerDir, { recursive: true })
     utimesSync(projectMarkerDir, new Date("2026-03-16T10:00:00.000Z"), new Date("2026-03-16T10:00:00.000Z"))
 
-    const projects = new ClaudeProjectDiscoveryAdapter().scan(homeDir)
+    const projects = await new ClaudeProjectDiscoveryAdapter().scan(homeDir)
 
     expect(projects).toEqual([
       {
@@ -50,7 +50,7 @@ describe("project discovery", () => {
     ])
   })
 
-  test("Codex adapter reads cwd from session metadata and ignores stale or invalid entries", () => {
+  test("Codex adapter reads cwd from session metadata and ignores stale or invalid entries", async () => {
     const homeDir = makeTempDir()
     const sessionsDir = path.join(homeDir, ".codex", "sessions", "2026", "03", "16")
     const liveProjectDir = path.join(homeDir, "workspace", "kanna")
@@ -106,7 +106,7 @@ describe("project discovery", () => {
       }),
     ].join("\n"))
 
-    const projects = new CodexProjectDiscoveryAdapter().scan(homeDir)
+    const projects = await new CodexProjectDiscoveryAdapter().scan(homeDir)
 
     expect(projects).toEqual([
       {
@@ -118,7 +118,7 @@ describe("project discovery", () => {
     ])
   })
 
-  test("Codex adapter falls back to session timestamps and config projects when session index misses CLI entries", () => {
+  test("Codex adapter falls back to session timestamps and config projects when session index misses CLI entries", async () => {
     const homeDir = makeTempDir()
     const sessionsDir = path.join(homeDir, ".codex", "sessions", "2026", "03", "16")
     const cliProjectDir = path.join(homeDir, "workspace", "codex-test-2")
@@ -148,7 +148,7 @@ describe("project discovery", () => {
       }),
     ].join("\n"))
 
-    const projects = new CodexProjectDiscoveryAdapter().scan(homeDir)
+    const projects = await new CodexProjectDiscoveryAdapter().scan(homeDir)
 
     expect(projects.map((project) => project.localPath).sort()).toEqual([
       cliProjectDir,
@@ -159,11 +159,11 @@ describe("project discovery", () => {
     )
   })
 
-  test("discoverProjects de-dupes provider results by normalized path and keeps the newest timestamp", () => {
+  test("discoverProjects de-dupes provider results by normalized path and keeps the newest timestamp", async () => {
     const adapters: ProjectDiscoveryAdapter[] = [
       {
         provider: "claude",
-        scan() {
+        async scan() {
           return [
             {
               provider: "claude",
@@ -176,7 +176,7 @@ describe("project discovery", () => {
       },
       {
         provider: "codex",
-        scan() {
+        async scan() {
           return [
             {
               provider: "codex",
@@ -195,7 +195,7 @@ describe("project discovery", () => {
       },
     ]
 
-    expect(discoverProjects("/unused-home", adapters)).toEqual([
+    expect(await discoverProjects("/unused-home", adapters)).toEqual([
       {
         localPath: "/tmp/project",
         title: "Codex Project",
@@ -207,5 +207,102 @@ describe("project discovery", () => {
         modifiedAt: 15,
       },
     ])
+  })
+
+  function writeCodexSession(filePath: string, sessionId: string, cwd: string, mtime: Date) {
+    writeFileSync(filePath, JSON.stringify({
+      timestamp: "2026-03-16T23:05:52.000Z",
+      type: "session_meta",
+      payload: { id: sessionId, cwd },
+    }))
+    utimesSync(filePath, mtime, mtime)
+  }
+
+  function makeCountingCodexAdapter() {
+    const reads: string[] = []
+    const adapter = new CodexProjectDiscoveryAdapter({
+      readFileHead: async (filePath) => {
+        reads.push(filePath)
+        return readFileSync(filePath, "utf8")
+      },
+    })
+    return { adapter, reads }
+  }
+
+  test("Codex adapter does not reopen a session file whose mtime and size are unchanged", async () => {
+    const homeDir = makeTempDir()
+    const sessionsDir = path.join(homeDir, ".codex", "sessions")
+    const firstProject = path.join(homeDir, "workspace", "aaaa")
+    const secondProject = path.join(homeDir, "workspace", "bbbb")
+    mkdirSync(firstProject, { recursive: true })
+    mkdirSync(secondProject, { recursive: true })
+    mkdirSync(sessionsDir, { recursive: true })
+    const sessionFile = path.join(sessionsDir, "rollout-session.jsonl")
+    const mtime = new Date("2026-03-16T23:05:52.000Z")
+    writeCodexSession(sessionFile, "session", firstProject, mtime)
+
+    const { adapter, reads } = makeCountingCodexAdapter()
+    expect((await adapter.scan(homeDir)).map((project) => project.localPath)).toEqual([firstProject])
+    expect(reads).toEqual([sessionFile])
+
+    // Same length, same mtime: the cache must answer without opening the file,
+    // so the stale cwd is what comes back.
+    writeCodexSession(sessionFile, "session", secondProject, mtime)
+    expect((await adapter.scan(homeDir)).map((project) => project.localPath)).toEqual([firstProject])
+    expect(reads).toEqual([sessionFile])
+  })
+
+  test("Codex adapter rereads a session file after its mtime changes and forgets deleted files", async () => {
+    const homeDir = makeTempDir()
+    const sessionsDir = path.join(homeDir, ".codex", "sessions")
+    const firstProject = path.join(homeDir, "workspace", "aaaa")
+    const secondProject = path.join(homeDir, "workspace", "bbbb")
+    mkdirSync(firstProject, { recursive: true })
+    mkdirSync(secondProject, { recursive: true })
+    mkdirSync(sessionsDir, { recursive: true })
+    const sessionFile = path.join(sessionsDir, "rollout-session.jsonl")
+    writeCodexSession(sessionFile, "session", firstProject, new Date("2026-03-16T23:05:52.000Z"))
+
+    const { adapter, reads } = makeCountingCodexAdapter()
+    await adapter.scan(homeDir)
+
+    writeCodexSession(sessionFile, "session", secondProject, new Date("2026-03-16T23:10:00.000Z"))
+    expect((await adapter.scan(homeDir)).map((project) => project.localPath)).toEqual([secondProject])
+    expect(reads).toEqual([sessionFile, sessionFile])
+
+    rmSync(sessionFile)
+    expect(await adapter.scan(homeDir)).toEqual([])
+    writeCodexSession(sessionFile, "session", secondProject, new Date("2026-03-16T23:10:00.000Z"))
+    await adapter.scan(homeDir)
+    expect(reads).toEqual([sessionFile, sessionFile, sessionFile])
+  })
+
+  test("discoverProjects shares one scan between concurrent callers", async () => {
+    let scans = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const adapters: ProjectDiscoveryAdapter[] = [
+      {
+        provider: "claude",
+        async scan() {
+          scans += 1
+          await gate
+          return [{ provider: "claude", localPath: "/tmp/project", title: "Project", modifiedAt: 1 }]
+        },
+      },
+    ]
+
+    const first = discoverProjects("/unused-home", adapters)
+    const second = discoverProjects("/unused-home", adapters)
+    release()
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(scans).toBe(1)
+    expect(secondResult).toEqual(firstResult)
+
+    // Once settled, the next call scans again rather than returning a stale result.
+    await discoverProjects("/unused-home", adapters)
+    expect(scans).toBe(2)
   })
 })

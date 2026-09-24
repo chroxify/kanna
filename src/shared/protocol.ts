@@ -21,6 +21,7 @@ import type {
   EditorPreset,
   TerminalPreset,
 } from "./types"
+import type { SidebarPatch } from "./sidebar-patch"
 
 export type { EditorPreset, TerminalPreset }
 
@@ -48,7 +49,14 @@ export interface ProjectQuickAction {
 }
 
 export type SubscriptionTopic =
-  | { type: "sidebar" }
+  | {
+    type: "sidebar"
+    /**
+     * Answer with `sidebar-patch` snapshots instead of full ones. Optional so
+     * the iOS app, which only decodes full snapshots, is unaffected.
+     */
+    patches?: boolean
+  }
   | { type: "local-projects" }
   | { type: "update" }
   | { type: "keybindings" }
@@ -346,6 +354,7 @@ export type ClientEnvelope =
 
 export type ServerSnapshot =
   | { type: "sidebar"; data: SidebarData }
+  | { type: "sidebar-patch"; data: SidebarPatch }
   | { type: "local-projects"; data: LocalProjectsSnapshot }
   | { type: "update"; data: UpdateSnapshot }
   | { type: "keybindings"; data: KeybindingsSnapshot }

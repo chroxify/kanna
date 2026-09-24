@@ -61,6 +61,7 @@ import { useSendMessage } from "./useSendMessage"
 import { useShareExport } from "./useShareExport"
 import { useUpdateRestart } from "./useUpdateRestart"
 import type { EditorOpenSettings, OpenExternalAction, TerminalPreset } from "../../shared/protocol"
+import { applySidebarPatch, type SidebarPatch } from "../../shared/sidebar-patch"
 
 export {
   getUiUpdateReadinessPath,
@@ -307,11 +308,46 @@ export function useKannaState(activeChatId: string | null): KannaState {
   // sidebar field several times a second, and holding the snapshot here would
   // re-render this hook's whole subtree — the chat page included — every time.
   // Consumers select the slice they paint (see stores/sidebarStore).
+  //
+  // Patches rather than full snapshots (see shared/sidebar-patch.ts). They
+  // apply to `held`, the server's last snapshot as sent, not to the store,
+  // which also carries the local drag order. A patch that doesn't start from
+  // `held` means the two fell out of step; a fresh subscription starts over
+  // with a reset. A full snapshot still arrives when the server can't patch.
   useEffect(() => {
-    return socket.subscribe<SidebarData>({ type: "sidebar" }, (snapshot) => {
-      useSidebarStore.getState().setSnapshot(snapshot)
-      setCommandError(null)
-    })
+    let held: { revision: number | null; data: SidebarData } | null = null
+    let unsubscribe = () => {}
+    const subscribe = () => {
+      held = null
+      unsubscribe = socket.subscribe<SidebarData | SidebarPatch>({ type: "sidebar", patches: true }, (snapshot) => {
+        let data: SidebarData
+        if ("projectGroups" in snapshot) {
+          data = snapshot
+          held = { revision: null, data }
+        } else {
+          if (snapshot.from !== null && snapshot.from !== held?.revision) {
+            resubscribe()
+            return
+          }
+          try {
+            data = applySidebarPatch(held?.data ?? null, snapshot)
+          } catch (error) {
+            console.warn("[sidebar] patch did not apply, resubscribing:", error)
+            resubscribe()
+            return
+          }
+          held = { revision: snapshot.to, data }
+        }
+        useSidebarStore.getState().setSnapshot(data)
+        setCommandError(null)
+      })
+    }
+    const resubscribe = () => {
+      unsubscribe()
+      subscribe()
+    }
+    subscribe()
+    return () => unsubscribe()
   }, [socket])
 
   useEffect(() => {
@@ -1026,7 +1062,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     }
 
     navigate("/")
-  }, [fallbackLocalProjectPath, navigate, selectedProjectId, startChatFromIntent])
+  }, [activeProjectId, fallbackLocalProjectPath, navigate, startChatFromIntent])
 
   // On mobile the sidebar is the `/` page rather than an overlay, so "open"
   // means navigate there. Desktop always shows it and never calls this.
