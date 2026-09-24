@@ -43,6 +43,14 @@ import {
   filterSkillMenuItems,
   getActiveSlashQuery,
 } from "../../lib/skill-menu"
+import {
+  applyProjectMention,
+  filterProjectMentionItems,
+  getActiveProjectMention,
+  projectMentionCandidates,
+  type ProjectMentionItem,
+} from "../../lib/project-mention"
+import { useSidebarStore } from "../../stores/sidebarStore"
 
 /** Stable default, so a chat with no delegated work doesn't re-render on it. */
 
@@ -287,6 +295,10 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skillMenuOffset, setSkillMenuOffset] = useState(0)
   const skillsFetchRef = useRef<{ provider: AgentProvider | null; pending: boolean }>({ provider: null, pending: false })
   const selectedSkillItemRef = useRef<HTMLButtonElement | null>(null)
+  // "@" project menu state, the same shape as the skill menu's.
+  const [projectMenuDismissed, setProjectMenuDismissed] = useState(false)
+  const [projectMenuOffset, setProjectMenuOffset] = useState(0)
+  const selectedProjectItemRef = useRef<HTMLButtonElement | null>(null)
 
   // The label goes into a textarea placeholder, which browsers do not clip
   // or ellipsize the way a span would: a long path runs past the pill. Keep
@@ -380,6 +392,52 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       element.selectionEnd = nextCaret
     })
   }, [value, chatId, setDraft])
+
+  // "@" project menu derivations. The project list is read from the store
+  // when the menu opens rather than subscribed to: the sidebar changes on
+  // every chat update, and a subscription would re-render the composer each time.
+  const projectMention = !disabled ? getActiveProjectMention(value, caretPosition) : null
+  const projectMentionActive = projectMention !== null
+  const projectMentionCandidateList = useMemo(
+    () => (projectMentionActive ? projectMentionCandidates(useSidebarStore.getState().data.projectGroups, projectPath ?? null) : []),
+    [projectMentionActive, projectPath]
+  )
+  const projectMenuItems = useMemo(
+    () => (projectMention ? filterProjectMentionItems(projectMentionCandidateList, projectMention.query) : []),
+    [projectMention?.query, projectMentionCandidateList]
+  )
+  const projectMenuOpen = projectMentionActive && !projectMenuDismissed && projectMenuItems.length > 0
+  const selectedProjectIndex = projectMenuItems.length > 0
+    ? projectMenuItems.length - 1 - Math.min(projectMenuOffset, projectMenuItems.length - 1)
+    : -1
+
+  useEffect(() => {
+    if (!projectMentionActive) setProjectMenuDismissed(false)
+  }, [projectMentionActive])
+
+  useEffect(() => {
+    setProjectMenuOffset(0)
+  }, [projectMention?.query])
+
+  useEffect(() => {
+    selectedProjectItemRef.current?.scrollIntoView({ block: "nearest" })
+  }, [selectedProjectIndex, projectMenuOpen])
+
+  const acceptProject = useCallback((project: ProjectMentionItem) => {
+    const mention = getActiveProjectMention(value, caretPosition)
+    if (!mention) return
+    const next = applyProjectMention(value, mention, project.localPath)
+    setValue(next.value)
+    if (chatId) setDraft(chatId, next.value)
+    setCaretPosition(next.caret)
+    requestAnimationFrame(() => {
+      const element = textareaRef.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = next.caret
+      element.selectionEnd = next.caret
+    })
+  }, [value, caretPosition, chatId, setDraft])
 
   const uploadedAttachments = attachments.filter((attachment) => attachment.status === "uploaded")
   const hasPendingUploads = attachments.some((attachment) => attachment.status === "uploading")
@@ -817,6 +875,32 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
 
+    if (projectMenuOpen) {
+      if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        setProjectMenuOffset((offset) => Math.min(offset + 1, projectMenuItems.length - 1))
+        return
+      }
+      if (event.key === "ArrowDown" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        setProjectMenuOffset((offset) => Math.max(offset - 1, 0))
+        return
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+        const selected = projectMenuItems[selectedProjectIndex]
+        if (selected) {
+          event.preventDefault()
+          acceptProject(selected)
+          return
+        }
+      }
+      if (event.key === "Escape") {
+        event.preventDefault()
+        setProjectMenuDismissed(true)
+        return
+      }
+    }
+
     if (event.key === "Tab" && !event.shiftKey) {
       event.preventDefault()
       focusNextChatInput(textareaRef.current, document)
@@ -953,6 +1037,36 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   {skill.description ? (
                     <span className="min-w-0 truncate text-xs text-muted-foreground">{skill.description}</span>
                   ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {projectMenuOpen ? (
+            <div
+              className="absolute bottom-full left-0 right-0 mb-2 z-30 max-h-64 overflow-y-auto rounded-2xl border border-border bg-popover/95 backdrop-blur-lg shadow-lg py-1"
+              role="listbox"
+              aria-label="Projects"
+            >
+              {projectMenuItems.map((project, index) => (
+                <button
+                  key={project.projectId}
+                  ref={index === selectedProjectIndex ? selectedProjectItemRef : undefined}
+                  type="button"
+                  role="option"
+                  aria-selected={index === selectedProjectIndex}
+                  className={cn(
+                    "flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                    index === selectedProjectIndex ? "bg-accent text-accent-foreground" : "text-foreground"
+                  )}
+                  onMouseEnter={() => setProjectMenuOffset(projectMenuItems.length - 1 - index)}
+                  onMouseDown={(event) => {
+                    // mousedown (not click) so the textarea never loses focus.
+                    event.preventDefault()
+                    acceptProject(project)
+                  }}
+                >
+                  <span className="shrink-0 text-[13px]">@{project.title}</span>
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{formatPathWithTilde(project.localPath)}</span>
                 </button>
               ))}
             </div>
