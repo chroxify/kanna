@@ -2,9 +2,8 @@ import { memo, useCallback, useMemo, useState, type ReactNode } from "react"
 import type { AgentProvider, ProviderCatalogEntry, SubagentActivity, TranscriptEntry } from "../../../../shared/types"
 import type { KannaSocket } from "../../../app/socket"
 import { useComposer } from "../../../hooks/useComposer"
-import { AgentsWidget } from "./AgentsWidget"
 import { AttachmentsWidget } from "./AttachmentsWidget"
-import { deriveSentAttachments, deriveSubagentToolIds } from "./derive"
+import { deriveSentAttachments } from "./derive"
 import { PortsWidget } from "./PortsWidget"
 import { QuickActionsWidget } from "./QuickActionsWidget"
 import { UsageWidgets } from "./UsageWidget"
@@ -18,8 +17,9 @@ import { WidgetPresence } from "./WidgetCard"
  * work is. Each sits in a WidgetPresence slot, so one arriving or leaving
  * slides the rest instead of jumping them.
  *
- * Order runs from what the agent is doing right now to what it has left
- * behind: its delegated agents, then git (branch, working tree, history),
+ * Delegated agents show in the composer's activity pill, not here. Order
+ * runs from the work in progress to what it left behind: git (branch,
+ * working tree, history),
  * the files it sent, the servers it started and the commands that start
  * them. Usage limits close the column: the selected harness's, or on a new
  * chat every harness's, selected first.
@@ -35,9 +35,7 @@ function WidgetsSidebarImpl({
   socket,
   active,
   entries,
-  subagents,
   onRunQuickAction,
-  onJumpToToolCall,
   gitWidgets,
   isNewChat,
 }: {
@@ -56,6 +54,7 @@ function WidgetsSidebarImpl({
   active: boolean
   /** The loaded transcript window, for the agent and attachment widgets. */
   entries: readonly TranscriptEntry[]
+  /** Unused: delegated work shows in the composer pill. Kept so the page's props match upstream's. */
   subagents: readonly SubagentActivity[]
   onRunQuickAction: (command: string) => void
   /** Scrolls the chat to a tool call (an Agents row's spawn call). */
@@ -66,7 +65,6 @@ function WidgetsSidebarImpl({
   // started, otherwise whatever the composer is set to send with.
   const { selectedProvider } = useComposer({ chatId, activeProvider, availableProviders })
   const attachments = useMemo(() => deriveSentAttachments(entries), [entries])
-  const subagentToolIds = useMemo(() => deriveSubagentToolIds(entries, subagents), [entries, subagents])
   const [portsRefreshRequest, setPortsRefreshRequest] = useState(0)
   const runQuickAction = useCallback((command: string) => {
     onRunQuickAction(command)
@@ -78,9 +76,6 @@ function WidgetsSidebarImpl({
       {/* No gap: each slot carries its own top spacing, so a card's gap folds
           away with it. */}
       <div className="flex flex-col px-2 pb-2">
-        <WidgetPresence show={subagents.length > 0}>
-          <AgentsWidget subagents={subagents} toolIds={subagentToolIds} entries={entries} onJumpToToolCall={onJumpToToolCall} />
-        </WidgetPresence>
         {gitWidgets}
         <WidgetPresence show={attachments.length > 0}>
           <AttachmentsWidget attachments={attachments} />
