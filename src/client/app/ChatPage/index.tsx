@@ -1270,6 +1270,7 @@ export function ChatPage() {
         activeProvider={state.runtime?.provider ?? null}
         availableProviders={state.availableProviders}
         contextWindowSnapshot={contextWindowSnapshot}
+        subagents={state.runtime?.subagents ?? EMPTY_SUBAGENTS}
         onSubmit={handleChatSubmit}
         onCancel={handleCancel}
         onEditModels={handleEditModels}
