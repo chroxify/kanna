@@ -2506,8 +2506,14 @@ export class AgentCoordinator {
         // Background wakeups (Monitor, Cron*, ScheduleWakeup, RemoteTrigger)
         // emit new activity after the previous turn completed. Re-register an
         // active turn so the chat reads as in-progress instead of idle.
+        //
+        // Not on a background subagent's own entries: they stream on the same
+        // iterator after the main agent's result, and that is the task running
+        // (the Tasks widget shows it), not the main agent waking up. Resuming
+        // on them read the chat as "Running..." while the main agent was done.
         if (
-          !this.activeTurns.has(session.chatId)
+          !event.entry.parentToolUseId
+          && !this.activeTurns.has(session.chatId)
           && !session.suppressResume
           && (
             event.entry.kind === "assistant_text"

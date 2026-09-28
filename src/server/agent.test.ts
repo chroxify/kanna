@@ -1647,6 +1647,56 @@ describe("AgentCoordinator claude integration", () => {
     queues.forEach((queue) => queue.close())
   })
 
+  test("a background subagent's own entries after the result do not reopen the turn", async () => {
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 0,
+              result: "spawned a background agent",
+            }),
+          })
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "run an agent in the background",
+      model: "claude-opus-4-1",
+    })
+    await waitFor(() => !coordinator.getActiveStatuses().has("chat-1"))
+
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "assistant_text", text: "subagent working", parentToolUseId: "toolu_agent" }),
+    })
+    await waitFor(() => store.messages.some((entry) => entry.kind === "assistant_text" && entry.text === "subagent working"))
+    // A resume would register right after the append; give it the chance.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+
+    events.close()
+  })
+
   test("claudeToolset only offers EnterPlanMode in auto plan", () => {
     expect(claudeToolset(false)).not.toContain("EnterPlanMode")
     // ExitPlanMode stays available so a mid-session switch into plan mode
