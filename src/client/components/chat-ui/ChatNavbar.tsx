@@ -113,6 +113,9 @@ interface Props {
   onOpenSidebar: () => void
   onExpandSidebar: () => void
   localPath?: string
+  /** Shown centered on mobile only, where the sidebar that names it is hidden. */
+  chatTitle?: string
+  projectName?: string
   embeddedTerminalVisible?: boolean
   onToggleEmbeddedTerminal?: () => void
   /** Whether the right sidebar's widget column is open. */
@@ -269,6 +272,8 @@ function ChatNavbarImpl({
   onOpenSidebar,
   onExpandSidebar,
   localPath,
+  chatTitle,
+  projectName,
   embeddedTerminalVisible = false,
   onToggleEmbeddedTerminal,
   widgetsOpen = false,
@@ -379,10 +384,17 @@ function ChatNavbarImpl({
             holding: nothing with the sidebar open, the expand button and the
             room for the traffic lights with it collapsed. It is the row's
             flexible middle, taking what the buttons leave. Desktop only (it
-            hides itself under `md`), so the spacer stays for a phone, and for
-            a page with no chat to title. */}
+            hides itself under `md`). */}
         {titleSlot}
-        <div className={cn("min-w-0 flex-1", titleSlot ? "md:hidden" : null)} />
+        {/* Mobile has no sidebar on screen, so the bar names the chat and its
+            project itself. It fills the gap between the button groups rather
+            than centering on the bar: a phone has little enough room that the
+            title is worth more than the few pixels of symmetry. On desktop it
+            is the spacer for a page with no chat to title. */}
+        <div className={cn("min-w-0 flex-1 max-md:flex flex-col items-center justify-center text-center leading-tight", titleSlot && "md:hidden")}>
+          {chatTitle ? <div className="w-full truncate text-sm font-medium text-foreground md:hidden">{chatTitle}</div> : null}
+          {projectName ? <div className="w-full truncate text-xs text-muted-foreground md:hidden">{projectName}</div> : null}
+        </div>
 
         {localPath && (onOpenExternal || onToggleEmbeddedTerminal || onToggleWidgets || onExportTranscript) ? (
           <div className="flex items-center gap-2 flex-shrink-0">
