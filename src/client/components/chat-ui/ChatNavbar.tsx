@@ -113,6 +113,9 @@ interface Props {
   onOpenSidebar: () => void
   onExpandSidebar: () => void
   localPath?: string
+  /** Shown centered on mobile only, where the sidebar that names it is hidden. */
+  chatTitle?: string
+  projectName?: string
   embeddedTerminalVisible?: boolean
   onToggleEmbeddedTerminal?: () => void
   /** Whether the right sidebar's widget column is open. */
@@ -211,6 +214,8 @@ function ChatNavbarImpl({
   onOpenSidebar,
   onExpandSidebar,
   localPath,
+  chatTitle,
+  projectName,
   embeddedTerminalVisible = false,
   onToggleEmbeddedTerminal,
   widgetsOpen = false,
@@ -311,7 +316,15 @@ function ChatNavbarImpl({
           </Button>
         </div>
 
-        <div className="flex-1 min-w-0" />
+        {/* Mobile has no sidebar on screen, so the bar names the chat and its
+            project itself. It fills the gap between the button groups rather
+            than centering on the bar: a phone has little enough room that the
+            title is worth more than the few pixels of symmetry. */}
+        <div className="flex-1 min-w-0 max-md:flex flex-col items-center justify-center text-center leading-tight hidden">
+          {chatTitle ? <div className="w-full truncate text-sm font-medium text-foreground">{chatTitle}</div> : null}
+          {projectName ? <div className="w-full truncate text-xs text-muted-foreground">{projectName}</div> : null}
+        </div>
+        <div className="flex-1 min-w-0 max-md:hidden" />
 
         {localPath && (onOpenExternal || onToggleEmbeddedTerminal || onToggleWidgets || onExportTranscript) ? (
           <div className="flex items-center gap-2 flex-shrink-0">

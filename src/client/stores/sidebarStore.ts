@@ -3,7 +3,7 @@ import { useShallow } from "zustand/react/shallow"
 import type { KannaStatus, SidebarChatRow, SidebarData } from "../../shared/types"
 import { stabilizeSidebarData } from "../app/sidebarStability"
 import { applySidebarProjectOrder } from "../app/kannaStateHelpers"
-import { formatProjectRepoBranch } from "../lib/project-label"
+import { formatProjectRepoBranch, getProjectSidebarLabel } from "../lib/project-label"
 import { prunePendingSends } from "./pendingSendStore"
 
 /**
@@ -175,6 +175,19 @@ export function useNavbarRepoLabel(projectId: string | null, localPath: string |
     const group = groups.find((item) => item.groupKey === projectId)
       ?? groups.find((item) => item.localPath === localPath)
     return group ? formatProjectRepoBranch(group) : null
+  })
+}
+
+/**
+ * The project's name as the sidebar shows it (rename, repo, or folder) — for
+ * the mobile navbar's title block, which has room for the name but not the path.
+ */
+export function useNavbarProjectName(projectId: string | null, localPath: string | undefined): string | null {
+  return useSidebarStore((state) => {
+    const groups = state.data.projectGroups
+    const group = groups.find((item) => item.groupKey === projectId)
+      ?? groups.find((item) => item.localPath === localPath)
+    return group ? getProjectSidebarLabel(group).name : null
   })
 }
 

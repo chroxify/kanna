@@ -26,7 +26,7 @@ import type { OpenLocalLinkTarget } from "../../components/messages/shared"
 import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
 import { getChatViewer, openViewer, useChatViewer, useViewerStore } from "../../stores/viewerStore"
 import type { DiffViewerContext } from "../../components/chat-ui/git/DiffViewer"
-import { useProjectRepoUrl, useSidebarChatHasMessages } from "../../stores/sidebarStore"
+import { useNavbarProjectName, useProjectRepoUrl, useSidebarChatHasMessages } from "../../stores/sidebarStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, isTerminalVisible, useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { usePaneChatKey } from "../../lib/paneVisibility"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
@@ -519,6 +519,7 @@ export function ChatPage() {
     : state.messages.length === 0 && state.runtime?.title === "New Chat"
   settledShowEmptyStateRef.current = showEmptyState
   const projectId = state.activeProjectId
+  const navbarProjectName = useNavbarProjectName(projectId, state.navbarLocalPath)
   const projectTerminalLayout = useTerminalLayoutStore((store) => (projectId ? store.projects[projectId] : undefined))
   const storedTerminalLayout = projectTerminalLayout ?? DEFAULT_PROJECT_TERMINAL_LAYOUT
   // Set to the active chat when that pane opens and closes per chat, null when
@@ -1430,6 +1431,8 @@ export function ChatPage() {
       onOpenSidebar={state.openSidebar}
       onExpandSidebar={state.expandSidebar}
       localPath={state.navbarLocalPath}
+      chatTitle={state.activeChatId ? state.runtime?.title : undefined}
+      projectName={navbarProjectName ?? undefined}
       embeddedTerminalVisible={showTerminalPane}
       onToggleEmbeddedTerminal={projectId ? handleToggleEmbeddedTerminal : undefined}
       widgetsOpen={showRightSidebar}
