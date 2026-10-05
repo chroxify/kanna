@@ -1362,6 +1362,11 @@ export interface AppSettingsSnapshot {
    * Off unless true, and absent when off.
    */
   widgetsPeekEnabled?: boolean
+  /**
+   * Show the collapsed sidebar over the chat while the mouse is at the
+   * window's left edge. On unless false, and absent when on.
+   */
+  sidebarPeekEnabled?: boolean
   /** Base directory where cloned and newly created projects are placed. */
   newProjectsDirectory: string
   /**
@@ -1416,6 +1421,7 @@ export interface AppSettingsPatch {
   projectIconsInChats?: boolean
   chatTabsEnabled?: boolean
   widgetsPeekEnabled?: boolean
+  sidebarPeekEnabled?: boolean
   newProjectsDirectory?: string
   setupShown?: boolean
   setupCompleted?: boolean

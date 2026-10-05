@@ -130,6 +130,12 @@ export const SETTINGS_ROWS = defineRows({
     description: "Show the closed widget column over the chat while the mouse is at the window's right edge.",
     keywords: ["widgets", "right sidebar", "hover", "edge", "popout", "overlay", "slideover", "peek"],
   },
+  sidebarPeek: {
+    sectionId: "general",
+    title: "Peek at Sidebar",
+    description: "Show the collapsed sidebar over the chat while the mouse is at the window's left edge.",
+    keywords: ["sidebar", "left sidebar", "hover", "edge", "popout", "overlay", "slideover", "peek", "floating"],
+  },
   chatSounds: {
     sectionId: "general",
     title: "Chat Sounds",

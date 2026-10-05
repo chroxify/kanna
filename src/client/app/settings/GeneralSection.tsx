@@ -311,6 +311,15 @@ export function GeneralSection({
     }
   }
 
+  async function handleSidebarPeekChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ sidebarPeekEnabled: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
   async function handleAnalyticsPreferenceChange(enabled: boolean) {
     try {
       setAppSettingsError(null)
@@ -417,6 +426,15 @@ export function GeneralSection({
                 void handleWidgetsPeekChange(checked)
               }}
               aria-label={SETTINGS_ROWS.widgetsPeek.title}
+            />
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.sidebarPeek}>
+            <Switch
+              checked={appSettings?.sidebarPeekEnabled !== false}
+              onCheckedChange={(checked) => {
+                void handleSidebarPeekChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.sidebarPeek.title}
             />
           </SettingsRow>
         </SettingsGroup>

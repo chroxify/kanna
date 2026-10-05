@@ -831,7 +831,8 @@ function KannaSidebarImpl({
   // its width under the card. 8px is both how near the edge opens it and the
   // card's left margin once it is there.
   const sidebarCardRef = useRef<HTMLDivElement>(null)
-  const peeking = useEdgePeek({ side: "left", enabled: collapsed, panelRef: sidebarCardRef, edgePx: 8, insetPx: 8 })
+  const peekEnabled = useAppSettingsStore((store) => store.settings?.sidebarPeekEnabled !== false)
+  const peeking = useEdgePeek({ side: "left", enabled: peekEnabled && collapsed, panelRef: sidebarCardRef, edgePx: 8, insetPx: 8 })
 
   const hasVisibleChats = activeVisibleCount > 0
   // `/` is the sidebar itself on mobile; the projects page lives at `/home`
@@ -1125,12 +1126,24 @@ function KannaSidebarImpl({
               size="icon"
               onClick={newSidebarEnabled ? () => openCommandPalette() : () => navigate("/home")}
               className={cn(
-                "hidden md:inline-flex h-10 w-auto rounded-lg pl-1.5 pr-3 hover:!border-border/0 hover:!bg-transparent mac-app:md:h-8 mac-app:md:pr-1.5",
-                !newSidebarEnabled && "pl-2 mac-app:md:pr-2"
+                "hidden md:inline-flex h-10 w-auto rounded-lg px-1.5 hover:!border-border/0 hover:!bg-transparent mac-app:md:h-8",
+                !newSidebarEnabled && "px-2"
               )}
               title={newSidebarEnabled ? "Search" : "New project"}
             >
               {newSidebarEnabled ? <Search className="size-4" /> : <Plus className="size-4" />}
+            </Button>
+            {/* The flower's hover toggle, always visible. The app has its own
+                beside the traffic lights. Reachable while collapsed only in a
+                peek, where it keeps the sidebar open. */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={collapsed ? onExpand : onCollapse}
+              className="hidden md:inline-flex mac-app:md:hidden h-10 w-auto rounded-lg pl-1.5 pr-3 text-muted-foreground hover:!border-border/0 hover:!bg-transparent hover:text-foreground"
+              title={collapsed ? "Keep sidebar open" : "Collapse sidebar"}
+            >
+              <PanelLeft className="size-4" />
             </Button>
           </div>
         </div>

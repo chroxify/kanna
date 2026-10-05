@@ -68,6 +68,7 @@ interface AppSettingsFile {
   projectIconsInChats?: unknown
   chatTabsEnabled?: unknown
   widgetsPeekEnabled?: unknown
+  sidebarPeekEnabled?: unknown
   newProjectsDirectory?: unknown
   setupShown?: unknown
   setupCompleted?: unknown
@@ -193,6 +194,7 @@ function toFilePayload(state: AppSettingsState) {
     ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
     ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
     ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    ...(state.sidebarPeekEnabled === false ? { sidebarPeekEnabled: false } : {}),
     newProjectsDirectory: state.newProjectsDirectory,
     setupShown: state.setupShown,
     setupCompleted: state.setupCompleted,
@@ -225,6 +227,7 @@ function toSnapshot(
     ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
     ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
     ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    ...(state.sidebarPeekEnabled === false ? { sidebarPeekEnabled: false } : {}),
     newProjectsDirectory: state.newProjectsDirectory,
     setupShown: state.setupShown,
     setupCompleted: state.setupCompleted,
@@ -314,6 +317,7 @@ function normalizeAppSettings(
     ...(source?.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
     ...(source?.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
     ...(source?.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    ...(source?.sidebarPeekEnabled === false ? { sidebarPeekEnabled: false } : {}),
     newProjectsDirectory,
     // Onboarding markers default to false so a machine that has never run the
     // wizard still gets it; once set they stay set for every browser.
@@ -356,6 +360,7 @@ function toComparablePayload(source: AppSettingsFile) {
     projectIconsInChats: source.projectIconsInChats,
     chatTabsEnabled: source.chatTabsEnabled,
     widgetsPeekEnabled: source.widgetsPeekEnabled,
+    sidebarPeekEnabled: source.sidebarPeekEnabled,
     newProjectsDirectory: typeof source.newProjectsDirectory === "string"
       ? source.newProjectsDirectory.trim()
       : source.newProjectsDirectory,
