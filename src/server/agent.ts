@@ -276,11 +276,14 @@ interface ClaudeSessionState {
 }
 
 /**
- * One retry per chat per window. A fresh login that is itself at its limit
- * is rejected again; without this the chat would bounce between accounts
- * for as long as claude-swap keeps answering.
+ * Retries per chat are bounded per window: one per distinct account, and at
+ * most CLAUDE_RATE_LIMIT_MAX_RETRIES in all. A fresh login that is itself at
+ * its limit is rejected again, and claude-swap then moves on to the next
+ * account with headroom; without the bound the chat would bounce between
+ * spent accounts for as long as claude-swap keeps answering.
  */
 const CLAUDE_RATE_LIMIT_RETRY_WINDOW_MS = 2 * 60_000
+const CLAUDE_RATE_LIMIT_MAX_RETRIES = 3
 
 interface AgentCoordinatorArgs {
   /**
@@ -1113,8 +1116,8 @@ export class AgentCoordinator {
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
   private readonly startClaudeSessionFn: NonNullable<AgentCoordinatorArgs["startClaudeSession"]>
   private readonly rotateClaudeAccountFn: RotateClaudeAccount
-  /** Per chat, when a rate-limited turn was last retried on a fresh login. */
-  private readonly claudeRateLimitRetryAt = new Map<string, number>()
+  /** Per chat, the retries of a rate-limited turn in the current window and the accounts they ran on. */
+  private readonly claudeRateLimitRetries = new Map<string, { startedAt: number; accounts: Set<string> }>()
   private readonly checkSessionArtifactFn: NonNullable<AgentCoordinatorArgs["checkSessionArtifact"]>
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
@@ -2757,8 +2760,13 @@ export class AgentCoordinator {
   private async retryClaudeTurnOnFreshLogin(session: ClaudeSessionState, active: ActiveTurn): Promise<boolean> {
     const prompt = session.lastPrompt
     if (!prompt) return false
-    const lastRetryAt = this.claudeRateLimitRetryAt.get(session.chatId) ?? 0
-    if (Date.now() - lastRetryAt < CLAUDE_RATE_LIMIT_RETRY_WINDOW_MS) return false
+    const now = Date.now()
+    let retries = this.claudeRateLimitRetries.get(session.chatId)
+    if (!retries || now - retries.startedAt >= CLAUDE_RATE_LIMIT_RETRY_WINDOW_MS) {
+      retries = { startedAt: now, accounts: new Set() }
+      this.claudeRateLimitRetries.set(session.chatId, retries)
+    }
+    if (retries.accounts.size >= CLAUDE_RATE_LIMIT_MAX_RETRIES) return false
 
     let rotation: ClaudeAccountRotation | null = null
     try {
@@ -2767,17 +2775,25 @@ export class AgentCoordinator {
       rotation = null
     }
     if (!rotation || !(rotation.switched || rotation.alreadySwitched)) return false
+    const account = rotation.to?.email ?? null
+    // Every account gets one try per window: landing again on one that
+    // already rejected this chat means nothing with headroom is left.
+    const accountKey = account?.toLowerCase() ?? ""
+    if (retries.accounts.has(accountKey)) return false
+    // The other chats whose process is pinned to the spent account would
+    // fail the same way on their next prompt; have them spawn fresh instead.
+    this.markClaudeSessionsRateLimited(session.accountEmail, session.chatId)
     // Something else (a steer, a queued message) took the chat while the
     // switch ran; it starts on the fresh login by itself.
     if (this.activeTurns.has(session.chatId) || this.startingTurns.has(session.chatId)) return false
 
-    this.claudeRateLimitRetryAt.set(session.chatId, Date.now())
-    const account = rotation.to?.email
+    retries.accounts.add(accountKey)
+    const verb = rotation.switched ? "Switched Claude login to" : "Claude login moved to"
     await this.store.appendMessage(
       session.chatId,
       timestamped({
         kind: "status",
-        status: account ? `Switched Claude login to ${account} · retrying` : "Switched Claude login · retrying",
+        status: account ? `${verb} ${account} · retrying` : "Switched Claude login · retrying",
       }),
     )
     try {
@@ -2809,6 +2825,22 @@ export class AgentCoordinator {
       return false
     }
     return true
+  }
+
+  /**
+   * Flag every other Claude session whose process started on `email` as
+   * rate-limited, so its next prompt recreates it on the current login
+   * instead of sending to an account known to be spent. Sessions whose
+   * account is not known yet are left alone.
+   */
+  private markClaudeSessionsRateLimited(email: string | null, exceptChatId: string) {
+    if (!email) return
+    for (const [chatId, other] of this.claudeSessions) {
+      if (chatId === exceptChatId || other.rateLimited) continue
+      if (other.accountEmail && other.accountEmail.toLowerCase() === email.toLowerCase()) {
+        other.rateLimited = true
+      }
+    }
   }
 
   private async runClaudeSession(session: ClaudeSessionState) {

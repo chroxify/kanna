@@ -3395,4 +3395,155 @@ describe("AgentCoordinator claude-swap relogin", () => {
 
     for (const session of sessions) session.events.close()
   })
+
+  test("retries on each account with headroom once, then leaves the turn failed", async () => {
+    // Every session is rejected; claude-swap keeps offering a new account,
+    // then lands back on one that already rejected this chat.
+    const sessions: Array<{ events: AsyncEventQueue<any>; closed: boolean }> = []
+    const emails = ["a@example.com", "b@example.com", "c@example.com"]
+    const startClaudeSession = async () => {
+      const events = new AsyncEventQueue<any>()
+      const record = { events, closed: false }
+      sessions.push(record)
+      const index = sessions.length
+      return {
+        provider: "claude" as const,
+        stream: events,
+        getAccountInfo: async () => ({ email: emails[Math.min(index, emails.length) - 1] }),
+        interrupt: async () => {},
+        close: () => {
+          record.closed = true
+        },
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({ kind: "result", subtype: "error", isError: true, durationMs: 0, result: LIMIT_MESSAGE }),
+          })
+        },
+      }
+    }
+    const store = createFakeStore()
+    store.chat.provider = "claude"
+    store.chat.sessionToken = "session-1"
+    let failures = 0
+    store.recordTurnFailed = (async () => {
+      failures += 1
+    }) as never
+    const targets = ["b@example.com", "c@example.com", "b@example.com", "c@example.com"]
+    let rotations = 0
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession,
+      rotateClaudeAccount: async ({ rejectedEmail }) => {
+        const to = targets[rotations] ?? "b@example.com"
+        rotations += 1
+        return {
+          switched: true,
+          alreadySwitched: false,
+          from: { number: null, email: rejectedEmail ?? "" },
+          to: { number: null, email: to },
+          message: "",
+        }
+      },
+    })
+
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "fix the build" })
+    await waitFor(() => failures === 3)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    // a → b → c, then b again is refused: three failures, three sessions.
+    expect(rotations).toBe(3)
+    expect(sessions).toHaveLength(3)
+    expect(store.messages.filter((entry) => entry.kind === "status")).toHaveLength(2)
+    expect(coordinator.isBusy("chat-1")).toBe(false)
+
+    for (const session of sessions) session.events.close()
+  })
+
+  test("a switch flags the other chats on the spent account so their next prompt spawns fresh", async () => {
+    const sessions: Array<{ chatId: string; events: AsyncEventQueue<any>; closed: boolean; prompts: number }> = []
+    // Each chat lives in its own project, so the session factory can tell
+    // them apart by the path it is started on.
+    const chatByPath: Record<string, string> = { "/tmp/project-a": "chat-1", "/tmp/project-b": "chat-2" }
+    const startClaudeSession = async (args: { localPath: string }) => {
+      const events = new AsyncEventQueue<any>()
+      const chatId = chatByPath[args.localPath] ?? "chat-?"
+      const record = { chatId, events, closed: false, prompts: 0 }
+      sessions.push(record)
+      // The first session per chat runs on the account about to be spent;
+      // only chat-1's turn is rejected, the others succeed.
+      const onSpent = sessions.filter((s) => s.chatId === chatId).length === 1
+      return {
+        provider: "claude" as const,
+        stream: events,
+        getAccountInfo: async () => ({ email: onSpent ? "a@example.com" : "b@example.com" }),
+        interrupt: async () => {},
+        close: () => {
+          record.closed = true
+        },
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          record.prompts += 1
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const rejected = onSpent && chatId === "chat-1"
+          events.push({
+            type: "transcript" as const,
+            entry: rejected
+              ? timestamped({ kind: "result", subtype: "error", isError: true, durationMs: 0, result: LIMIT_MESSAGE })
+              : timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+          })
+        },
+      }
+    }
+    const chat1 = createFakeChat("chat-1", "project-1")
+    const chat2 = createFakeChat("chat-2", "project-2")
+    for (const chat of [chat1, chat2]) {
+      chat.provider = "claude"
+      chat.sessionToken = `session-${chat.id}`
+    }
+    const store = createFakeStore({
+      chats: [chat1, chat2],
+      projects: [
+        { id: "project-1", localPath: "/tmp/project-a" },
+        { id: "project-2", localPath: "/tmp/project-b" },
+      ],
+    })
+    store.recordTurnFailed = (async () => {}) as never
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession,
+      rotateClaudeAccount: async () => ({
+        switched: true,
+        alreadySwitched: false,
+        from: { number: 1, email: "a@example.com" },
+        to: { number: 2, email: "b@example.com" },
+        message: "",
+      }),
+    })
+
+    // chat-2 runs a turn on account a and finishes fine; its process stays up.
+    await coordinator.send({ type: "chat.send", chatId: "chat-2", provider: "claude", content: "hello" })
+    await waitFor(() => store.turnFinishedCount === 1)
+    expect(sessions.filter((s) => s.chatId === "chat-2")).toHaveLength(1)
+
+    // chat-1 is rejected on account a; the switch to b retries it.
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "fix the build" })
+    await waitFor(() => store.turnFinishedCount === 2)
+
+    // chat-2's next prompt does not go to the process pinned to a: it spawns fresh on b.
+    await coordinator.send({ type: "chat.send", chatId: "chat-2", provider: "claude", content: "again" })
+    await waitFor(() => store.turnFinishedCount === 3)
+    const chat2Sessions = sessions.filter((s) => s.chatId === "chat-2")
+    expect(chat2Sessions).toHaveLength(2)
+    expect(chat2Sessions[0]!.closed).toBe(true)
+    expect(chat2Sessions[1]!.prompts).toBe(1)
+
+    for (const session of sessions) session.events.close()
+  })
 })

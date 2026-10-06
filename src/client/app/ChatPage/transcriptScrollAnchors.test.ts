@@ -20,6 +20,8 @@ function promptRow(id: string, content: string): ResolvedTranscriptRow {
     isFirstSystem: false,
     isModelChange: false,
     isFirstAccount: false,
+
+    isAccountChange: false,
     isLatestAskUserQuestion: false,
     isLatestExitPlanMode: false,
     isLatestTodoWrite: false,
@@ -44,6 +46,8 @@ function textRow(id: string, text: string): ResolvedTranscriptRow {
     isFirstSystem: false,
     isModelChange: false,
     isFirstAccount: false,
+
+    isAccountChange: false,
     isLatestAskUserQuestion: false,
     isLatestExitPlanMode: false,
     isLatestTodoWrite: false,

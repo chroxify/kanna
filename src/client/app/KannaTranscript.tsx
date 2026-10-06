@@ -42,6 +42,7 @@ export interface ResolvedSingleTranscriptRow {
   /** Set on a system_init that follows a session restore (session_restored). */
   restored?: SessionRestore
   isFirstAccount: boolean
+  isAccountChange: boolean
   isLatestAskUserQuestion: boolean
   isLatestExitPlanMode: boolean
   isLatestTodoWrite: boolean
@@ -76,6 +77,7 @@ interface TranscriptMessageRenderState {
   handoff?: SessionHandoff
   restored?: SessionRestore
   isFirstAccount: boolean
+  isAccountChange: boolean
   isLatestTodoWrite: boolean
   hideResult: boolean
   isFinalStatus: boolean
@@ -113,6 +115,7 @@ function getTranscriptMessageRenderState(
     handoff,
     restored,
     isFirstAccount,
+    isAccountChange,
     isLatestTodoWrite,
     hideResult,
     isFinalStatus,
@@ -139,7 +142,7 @@ function getTranscriptMessageRenderState(
         shouldRender = false
         break
       case "account_info":
-        shouldRender = isFirstAccount
+        shouldRender = isFirstAccount || isAccountChange
         break
       case "tool":
         shouldRender = message.toolKind !== "todo_write" || isLatestTodoWrite
@@ -165,6 +168,7 @@ function getTranscriptMessageRenderState(
     handoff,
     restored,
     isFirstAccount,
+    isAccountChange,
     isLatestTodoWrite,
     hideResult,
     isFinalStatus,
@@ -249,6 +253,20 @@ function buildTranscriptMessageRenderStates(
     previousModel = message.model
   }
 
+  // Mark account reads whose email differs from the previous one: each new
+  // Claude process reports the login it started on, so a change here is the
+  // login having moved to another account (claude-swap, a re-login) since.
+  const accountChanges = new Array<boolean>(messages.length).fill(false)
+  let previousAccount: string | undefined
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!
+    if (message.kind !== "account_info") continue
+    const email = message.accountInfo.email?.toLowerCase()
+    if (!email) continue
+    accountChanges[index] = previousAccount !== undefined && email !== previousAccount
+    previousAccount = email
+  }
+
   // Attach each handoff boundary to the next session init: the switch renders
   // as that init's destination harness label rather than as its own row.
   // Session restores surface the same way ("Session Repaired").
@@ -287,6 +305,7 @@ function buildTranscriptMessageRenderStates(
       handoff: handoffs[index],
       restored: restores[index],
       isFirstAccount: firstAccountIndex === index,
+      isAccountChange: accountChanges[index] ?? false,
       isLatestTodoWrite: message.id === latestToolIds.TodoWrite,
       hideResult: emptyTurnResults[index]
         || nextMessage?.kind === "context_cleared"
@@ -478,6 +497,8 @@ function isResolvedTranscriptRowUnchanged(left: ResolvedTranscriptRow, right: Re
       && sameHandoff(left.handoff, right.handoff)
       && sameRestore(left.restored, right.restored)
       && left.isFirstAccount === right.isFirstAccount
+
+      && left.isAccountChange === right.isAccountChange
       && left.isLatestAskUserQuestion === right.isLatestAskUserQuestion
       && left.isLatestExitPlanMode === right.isLatestExitPlanMode
       && left.isLatestTodoWrite === right.isLatestTodoWrite
@@ -546,6 +567,7 @@ interface TranscriptSingleRowProps {
   handoff?: SessionHandoff
   restored?: SessionRestore
   isFirstAccount: boolean
+  isAccountChange: boolean
   isLatestAskUserQuestion: boolean
   isLatestExitPlanMode: boolean
   isLatestTodoWrite: boolean
@@ -575,6 +597,7 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   handoff,
   restored,
   isFirstAccount,
+  isAccountChange,
   isLatestAskUserQuestion,
   isLatestExitPlanMode,
   isLatestTodoWrite,
@@ -623,7 +646,9 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
           : null
         break
       case "account_info":
-        rendered = isFirstAccount ? <AccountInfoMessage key={message.id} message={message} /> : null
+        rendered = isFirstAccount || isAccountChange
+          ? <AccountInfoMessage key={message.id} message={message} accountChanged={isAccountChange} />
+          : null
         break
       case "assistant_text":
         rendered = <TextMessage key={message.id} message={message} />
@@ -704,6 +729,8 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   && sameHandoff(prev.handoff, next.handoff)
   && sameRestore(prev.restored, next.restored)
   && prev.isFirstAccount === next.isFirstAccount
+
+  && prev.isAccountChange === next.isAccountChange
   && prev.isLatestAskUserQuestion === next.isLatestAskUserQuestion
   && prev.isLatestExitPlanMode === next.isLatestExitPlanMode
   && prev.isLatestTodoWrite === next.isLatestTodoWrite
@@ -804,6 +831,8 @@ export function buildResolvedTranscriptRows(
       handoff: renderState.handoff,
       restored: renderState.restored,
       isFirstAccount: renderState.isFirstAccount,
+
+      isAccountChange: renderState.isAccountChange,
       isLatestAskUserQuestion: item.message.id === latestToolIds.AskUserQuestion,
       isLatestExitPlanMode: item.message.id === latestToolIds.ExitPlanMode,
       isLatestTodoWrite: renderState.isLatestTodoWrite,
@@ -876,6 +905,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
       handoff={row.handoff}
       restored={row.restored}
       isFirstAccount={row.isFirstAccount}
+
+      isAccountChange={row.isAccountChange}
       isLatestAskUserQuestion={row.isLatestAskUserQuestion}
       isLatestExitPlanMode={row.isLatestExitPlanMode}
       isLatestTodoWrite={row.isLatestTodoWrite}
@@ -918,6 +949,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
       && sameHandoff(prev.row.handoff, next.row.handoff)
       && sameRestore(prev.row.restored, next.row.restored)
       && prev.row.isFirstAccount === next.row.isFirstAccount
+
+      && prev.row.isAccountChange === next.row.isAccountChange
       && prev.row.isLatestAskUserQuestion === next.row.isLatestAskUserQuestion
       && prev.row.isLatestExitPlanMode === next.row.isLatestExitPlanMode
       && prev.row.isLatestTodoWrite === next.row.isLatestTodoWrite
