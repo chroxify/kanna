@@ -45,6 +45,12 @@ import { fetchGrokAccountUsage, GrokCliManager } from "./grok-cli"
 import { PiAgentManager, resolvePiConnection } from "./pi-agent"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import type { ClaudeRateLimitInfoRaw, ClaudeUsageRaw } from "./usage-limits"
+import {
+  type ClaudeAccountRotation,
+  createClaudeSwapRotator,
+  isClaudeRateLimitMessage,
+  type RotateClaudeAccount,
+} from "./claude-swap"
 import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-types"
 import {
   appendSystemMessageBlock,
@@ -255,9 +261,34 @@ interface ClaudeSessionState {
    * being sent immediately after the cancel (the steer path).
    */
   cancelledPromptSeqs: Set<number>
+  /** Email of the login this session's process started on, once read. */
+  accountEmail: string | null
+  /**
+   * The API rejected this session for a subscription rate limit. Its process
+   * read the login once, at spawn, and keeps that token: a login swapped
+   * since (claude-swap, a re-login) only reaches a new process. So the next
+   * prompt recreates the session — resuming by token, the conversation
+   * carries over — instead of reusing one pinned to a spent account.
+   */
+  rateLimited: boolean
+  /** The last prompt sent, so a rate-limited turn can be retried on a fresh login. */
+  lastPrompt: { content: string; attachments: ChatAttachment[]; source?: MessageSource } | null
 }
 
+/**
+ * One retry per chat per window. A fresh login that is itself at its limit
+ * is rejected again; without this the chat would bounce between accounts
+ * for as long as claude-swap keeps answering.
+ */
+const CLAUDE_RATE_LIMIT_RETRY_WINDOW_MS = 2 * 60_000
+
 interface AgentCoordinatorArgs {
+  /**
+   * Moves the Claude login to an account with headroom after a rate-limit
+   * rejection. Defaults to claude-swap when it is installed, and to a no-op
+   * when it is not. Injectable for tests.
+   */
+  rotateClaudeAccount?: RotateClaudeAccount
   store: EventStore
   onStateChange: (chatId?: string, options?: { immediate?: boolean }) => void
   analytics?: AnalyticsReporter
@@ -1081,6 +1112,9 @@ export class AgentCoordinator {
   private readonly resolvePiConnection: () => Promise<import("./pi-agent").PiConnection | null>
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
   private readonly startClaudeSessionFn: NonNullable<AgentCoordinatorArgs["startClaudeSession"]>
+  private readonly rotateClaudeAccountFn: RotateClaudeAccount
+  /** Per chat, when a rate-limited turn was last retried on a fresh login. */
+  private readonly claudeRateLimitRetryAt = new Map<string, number>()
   private readonly checkSessionArtifactFn: NonNullable<AgentCoordinatorArgs["checkSessionArtifact"]>
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
@@ -1143,6 +1177,7 @@ export class AgentCoordinator {
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
     this.startClaudeSessionFn = args.startClaudeSession ?? startClaudeSession
     this.checkSessionArtifactFn = args.checkSessionArtifact ?? checkSessionArtifact
+    this.rotateClaudeAccountFn = args.rotateClaudeAccount ?? createClaudeSwapRotator()
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
@@ -2146,6 +2181,9 @@ export class AgentCoordinator {
           if (args.provider === "claude") {
             const session = this.claudeSessions.get(args.chatId)
             if (session) {
+              if (typeof accountInfo.email === "string" && accountInfo.email) {
+                session.accountEmail = accountInfo.email
+              }
               if (session.accountInfoLoaded) return
               session.accountInfoLoaded = true
             } else {
@@ -2164,6 +2202,7 @@ export class AgentCoordinator {
         throw new Error("Claude session was not initialized")
       }
       session.suppressResume = false
+      session.lastPrompt = { content: args.content, attachments: args.attachments, source: args.source }
       const promptSeq = session.nextPromptSeq + 1
       const promptId = crypto.randomUUID()
       session.nextPromptSeq = promptSeq
@@ -2213,12 +2252,14 @@ export class AgentCoordinator {
     // autoPlan changes the SDK's `tools` allowlist, which is fixed at query()
     // time — unlike planMode (setPermissionMode) it can only be applied by
     // restarting the session. The restart resumes by sessionToken, so the
-    // conversation carries over.
+    // conversation carries over. A rate-limited session restarts for the
+    // same reason: only a new process reads the current login.
     if (
       !session
       || session.localPath !== args.localPath
       || session.effort !== args.effort
       || session.autoPlan !== args.autoPlan
+      || session.rateLimited
       || args.forkSession
     ) {
       if (session) {
@@ -2237,7 +2278,13 @@ export class AgentCoordinator {
         forkSession: args.forkSession,
         onToolRequest: args.onToolRequest,
         customTools: args.customTools,
-        onRateLimitEvent: (info) => this.onClaudeRateLimit?.(info),
+        onRateLimitEvent: (info) => {
+          this.onClaudeRateLimit?.(info)
+          if (info.status === "rejected") {
+            const rejected = this.claudeSessions.get(args.chatId)
+            if (rejected) rejected.rateLimited = true
+          }
+        },
         onSubagentActivity: (update) => this.applySubagentActivity(args.chatId, update),
       })
       this.refreshClaudeModelCatalog(started)
@@ -2260,6 +2307,9 @@ export class AgentCoordinator {
         echoesPromptIds: started.echoesPromptIds ?? false,
         suppressResume: false,
         cancelledPromptSeqs: new Set(),
+        accountEmail: null,
+        rateLimited: false,
+        lastPrompt: null,
       }
       this.claudeSessions.set(args.chatId, session)
       void this.runClaudeSession(session)
@@ -2694,6 +2744,73 @@ export class AgentCoordinator {
     this.emitStateChange(session.chatId)
   }
 
+  /**
+   * A turn the API rejected for a subscription limit is sent again on a
+   * fresh login when claude-swap can provide one (or already has: a login
+   * swapped while this process ran only reaches a new process). The session
+   * is flagged rateLimited, so the retry's prompt recreates it — the old
+   * process would have kept the spent account whatever the login now says.
+   *
+   * The failed result stays in the transcript; a status line records the
+   * account the retry runs on. Returns whether a retry was started.
+   */
+  private async retryClaudeTurnOnFreshLogin(session: ClaudeSessionState, active: ActiveTurn): Promise<boolean> {
+    const prompt = session.lastPrompt
+    if (!prompt) return false
+    const lastRetryAt = this.claudeRateLimitRetryAt.get(session.chatId) ?? 0
+    if (Date.now() - lastRetryAt < CLAUDE_RATE_LIMIT_RETRY_WINDOW_MS) return false
+
+    let rotation: ClaudeAccountRotation | null = null
+    try {
+      rotation = await this.rotateClaudeAccountFn({ rejectedEmail: session.accountEmail })
+    } catch {
+      rotation = null
+    }
+    if (!rotation || !(rotation.switched || rotation.alreadySwitched)) return false
+    // Something else (a steer, a queued message) took the chat while the
+    // switch ran; it starts on the fresh login by itself.
+    if (this.activeTurns.has(session.chatId) || this.startingTurns.has(session.chatId)) return false
+
+    this.claudeRateLimitRetryAt.set(session.chatId, Date.now())
+    const account = rotation.to?.email
+    await this.store.appendMessage(
+      session.chatId,
+      timestamped({
+        kind: "status",
+        status: account ? `Switched Claude login to ${account} · retrying` : "Switched Claude login · retrying",
+      }),
+    )
+    try {
+      await this.startTurnForChat({
+        chatId: session.chatId,
+        provider: "claude",
+        content: prompt.content,
+        attachments: prompt.attachments,
+        model: active.model,
+        effort: active.effort,
+        serviceTier: active.serviceTier,
+        planMode: active.planExited ? false : active.planMode,
+        autoPlan: active.autoPlan,
+        appendUserPrompt: false,
+        source: prompt.source,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.store.appendMessage(
+        session.chatId,
+        timestamped({
+          kind: "result",
+          subtype: "error",
+          isError: true,
+          durationMs: 0,
+          result: message,
+        }),
+      )
+      return false
+    }
+    return true
+  }
+
   private async runClaudeSession(session: ClaudeSessionState) {
     const customToolEvents = new KannaToolEventFilter()
     try {
@@ -2786,6 +2903,9 @@ export class AgentCoordinator {
           : completedPromptSeqs.includes(active.claudePromptSeq)
         if (event.entry.kind === "result" && active && completesActive) {
           active.hasFinalResult = true
+          const rateLimited = event.entry.isError
+            && !active.cancelRequested
+            && (session.rateLimited || isClaudeRateLimitMessage(event.entry.result))
           if (event.entry.isError) {
             await this.store.recordTurnFailed(session.chatId, event.entry.result || "Turn failed")
           } else if (!active.cancelRequested) {
@@ -2793,7 +2913,13 @@ export class AgentCoordinator {
           }
           active.customTools?.abort()
           this.activeTurns.delete(session.chatId)
-          if (!active.cancelRequested) {
+          let retrying = false
+          if (rateLimited) {
+            session.rateLimited = true
+            retrying = await this.retryClaudeTurnOnFreshLogin(session, active)
+          }
+          // A retried turn drains the queue when it ends, as this one would have.
+          if (!active.cancelRequested && !retrying) {
             await this.maybeStartNextQueuedMessage(session.chatId)
           }
           this.notifySettled(session.chatId)

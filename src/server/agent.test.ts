@@ -3272,3 +3272,127 @@ describe("subagent activity", () => {
     expect(byId.get("a2")).toMatchObject({ status: "completed", endedAt: 2000 })
   })
 })
+
+describe("AgentCoordinator claude-swap relogin", () => {
+  const LIMIT_MESSAGE = "You've hit your session limit · resets 10:20pm (Europe/Berlin)"
+
+  function createLimitedThenFreshSessions(options: { firstEmail?: string } = {}) {
+    const sessions: Array<{ events: AsyncEventQueue<any>; prompts: string[]; closed: boolean }> = []
+    const startClaudeSession = async () => {
+      const events = new AsyncEventQueue<any>()
+      const record = { events, prompts: [] as string[], closed: false }
+      sessions.push(record)
+      const index = sessions.length
+      return {
+        provider: "claude" as const,
+        stream: events,
+        getAccountInfo: async () => ({ email: index === 1 ? options.firstEmail ?? "a@example.com" : "b@example.com" }),
+        interrupt: async () => {},
+        close: () => {
+          record.closed = true
+        },
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (content: string) => {
+          record.prompts.push(content)
+          // Account info is read at turn start; let it land before the result.
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          events.push({
+            type: "transcript" as const,
+            entry: index === 1
+              ? timestamped({ kind: "result", subtype: "error", isError: true, durationMs: 0, result: LIMIT_MESSAGE })
+              : timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+          })
+        },
+      }
+    }
+    return { sessions, startClaudeSession }
+  }
+
+  test("retries a rate-limited turn on a fresh session after claude-swap rotates the login", async () => {
+    const { sessions, startClaudeSession } = createLimitedThenFreshSessions()
+    const store = createFakeStore()
+    store.chat.provider = "claude"
+    store.chat.sessionToken = "session-1"
+    let failures = 0
+    store.recordTurnFailed = (async () => {
+      failures += 1
+    }) as never
+    const rotations: Array<{ rejectedEmail: string | null }> = []
+
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession,
+      rotateClaudeAccount: async (args) => {
+        rotations.push(args)
+        return {
+          switched: true,
+          alreadySwitched: false,
+          from: { number: 1, email: "a@example.com" },
+          to: { number: 2, email: "b@example.com" },
+          message: "Switched to Account-2 (b@example.com)",
+        }
+      },
+    })
+
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "fix the build" })
+    await waitFor(() => store.turnFinishedCount === 1)
+
+    expect(failures).toBe(1)
+    expect(rotations).toEqual([{ rejectedEmail: "a@example.com" }])
+    // The spent session was closed and the retry ran on a new one, with the same prompt.
+    expect(sessions).toHaveLength(2)
+    expect(sessions[0]!.closed).toBe(true)
+    expect(sessions[1]!.prompts).toHaveLength(1)
+    expect(sessions[1]!.prompts[0]).toContain("fix the build")
+    // One user prompt in the transcript, the failed result, then the switch note.
+    expect(store.messages.filter((entry) => entry.kind === "user_prompt")).toHaveLength(1)
+    const status = store.messages.find((entry) => entry.kind === "status")
+    expect(status && status.kind === "status" ? status.status : null).toBe("Switched Claude login to b@example.com · retrying")
+    expect(coordinator.isBusy("chat-1")).toBe(false)
+
+    for (const session of sessions) session.events.close()
+  })
+
+  test("leaves the turn failed when no other login has headroom", async () => {
+    const { sessions, startClaudeSession } = createLimitedThenFreshSessions()
+    const store = createFakeStore()
+    store.chat.provider = "claude"
+    store.chat.sessionToken = "session-1"
+    let failures = 0
+    store.recordTurnFailed = (async () => {
+      failures += 1
+    }) as never
+
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession,
+      rotateClaudeAccount: async () => ({
+        switched: false,
+        alreadySwitched: false,
+        from: { number: 1, email: "a@example.com" },
+        to: { number: 1, email: "a@example.com" },
+        message: "Already on Account-1 (a@example.com)",
+      }),
+    })
+
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "fix the build" })
+    await waitFor(() => failures === 1)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(sessions).toHaveLength(1)
+    expect(store.messages.some((entry) => entry.kind === "status")).toBe(false)
+    expect(coordinator.isBusy("chat-1")).toBe(false)
+
+    // The next prompt still gets a fresh process: the old one is pinned to
+    // the spent account even if the login changes by hand meanwhile.
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "try again" })
+    await waitFor(() => store.turnFinishedCount === 1)
+    expect(sessions).toHaveLength(2)
+    expect(sessions[0]!.closed).toBe(true)
+
+    for (const session of sessions) session.events.close()
+  })
+})
