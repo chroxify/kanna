@@ -100,6 +100,9 @@ export function getBrowserPageStatus(args: {
   switch (chat.status) {
     case "starting":
     case "running":
+    // The chat's own turn has ended, but work it handed off is still going and
+    // nothing is wanted from you — a tab's worth of detail says "working".
+    case "waiting_on_subagent":
       return { status: "working", badge }
     case "waiting_for_user":
       return { status: "waiting", badge }
