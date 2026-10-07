@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react"
-import { DownloadCloud, Loader2 } from "lucide-react"
+import { DownloadCloud } from "lucide-react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { UpdateSnapshot } from "../../../shared/types"
 import { markdownComponents } from "../../components/messages/shared"
-import { buttonVariants } from "../../components/ui/button"
-import { SettingsHeaderButton } from "../../components/ui/settings-header-button"
 import { cn } from "../../lib/utils"
+import { SettingsActionButton, SettingsBadge, SettingsNotice, SettingsPlaceholder } from "./shared"
 
 const GITHUB_RELEASES_URL = "https://api.github.com/repos/jakemor/kanna/releases"
 const CHANGELOG_CACHE_TTL_MS = 5 * 60 * 1000
@@ -183,52 +182,37 @@ export function ChangelogSection({
   return (
     <div className="space-y-4">
       {status === "loading" || status === "idle" ? (
-        <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-border bg-card/40 px-6 py-8 text-sm text-muted-foreground">
-          <div className="flex items-center gap-3">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span>Loading release notes…</span>
-          </div>
-        </div>
+        <SettingsPlaceholder loading>Loading release notes…</SettingsPlaceholder>
       ) : null}
 
       {status === "error" ? (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-6 py-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-sm font-medium text-foreground">Could not load changelog</div>
-              <div className="mt-1 text-sm text-muted-foreground">
+        <SettingsNotice>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <div className="font-medium">Could not load changelog</div>
+              <div className="mt-0.5 text-muted-foreground">
                 {error ?? "Unable to load changelog."}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={onRetry}
-              className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
-            >
-              Retry
-            </button>
+            <SettingsActionButton onClick={onRetry}>Retry</SettingsActionButton>
           </div>
-        </div>
+        </SettingsNotice>
       ) : null}
 
       {status === "success" && releases.length === 0 ? (
-        <div className="rounded-lg border border-border bg-card/30 px-6 py-8">
-          <div className="text-sm font-medium text-foreground">No releases yet</div>
-          <div className="mt-2 text-sm text-muted-foreground">
-            GitHub did not return any published releases for this repository.
-          </div>
-        </div>
+        <SettingsPlaceholder>
+          GitHub did not return any published releases for this repository.
+        </SettingsPlaceholder>
       ) : null}
 
       {!canInstallUpdate && status === "success" ? (
         <div className="flex justify-end">
-          <SettingsHeaderButton
-            variant="outline"
+          <SettingsActionButton
             onClick={onCheckForUpdates}
             disabled={isChecking || isUpdating}
           >
             {isChecking ? "Checking…" : "Check for updates"}
-          </SettingsHeaderButton>
+          </SettingsActionButton>
         </div>
       ) : null}
 
@@ -242,75 +226,52 @@ export function ChangelogSection({
             <article
               key={release.id}
               className={cn(
-                "rounded-xl border bg-card/30 pl-6 pr-4 py-4",
-                isLatestRelease ? "border-border bg-muted" : "border-border"
+                "rounded-2xl border border-border px-4 py-4",
+                isLatestRelease ? "bg-muted" : "bg-card/40"
               )}
             >
-              <div className="flex flex-row items-center min-w-0 flex-1 gap-3 ">
-                <div className="flex flex-row items-center min-w-0 flex-1 gap-2 ">
-                  <div className="text-lg font-semibold tracking-[-0.2px] text-foreground">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-1">
+                  <h3 className="text-base font-semibold tracking-[-0.2px] text-foreground">
                     {release.name?.trim() || release.tag_name}
-                  </div>
-                  <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                    <span>{formatPublishedDate(release.published_at)}</span>
-                    {release.prerelease ? (
-                      <span className="rounded-full border border-border px-2.5 py-1 uppercase tracking-wide">
-                        Prerelease
-                      </span>
-                    ) : null}
-                  </div>
+                  </h3>
+                  <span className="text-sm text-muted-foreground">{formatPublishedDate(release.published_at)}</span>
+                  {isCurrentRelease ? <SettingsBadge>Current</SettingsBadge> : null}
+                  {release.prerelease ? <SettingsBadge>Prerelease</SettingsBadge> : null}
                 </div>
 
-                <div className="flex flex-row items-center justify-end min-w-0 flex-1 gap-2 ">
+                <div className="flex shrink-0 items-center gap-2">
                   <a
                     href={release.html_url}
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="View release on GitHub"
-                    className={cn(
-                      buttonVariants({ variant: "ghost", size: "icon-sm" }),
-                      "h-8 w-8 shrink-0 rounded-md hover:!bg-transparent hover:border-border/0"
-                    )}
+                    className="inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
                   >
                     <GitHubIcon className="h-4 w-4" />
                   </a>
 
-                  {isCurrentRelease ? (
-                    <span
-                      className={cn(
-                        "bg-transparent border border-border text-secondary-foreground",
-                        'h-9 rounded-full px-3 text-sm',
-                        "h-auto gap-1.5 px-3 py-1.5"
-                      )}
-                    >
-                      Current
-                    </span>
-                  ) : null}
-
                   {isLatestRelease && canInstallUpdate ? (
-                    <SettingsHeaderButton
-                      variant="default"
-                      className=""
+                    <SettingsActionButton
+                      prominent
                       onClick={onInstallUpdate}
                       disabled={isUpdating}
+                      icon={<DownloadCloud />}
                     >
-                      <div className="flex flex-row items-center justify-center gap-2">
-                        <DownloadCloud className="size-4" />
-                        {isUpdating ? "Updating…" : "Update"}
-                      </div>
-                    </SettingsHeaderButton>
+                      {isUpdating ? "Updating…" : "Update"}
+                    </SettingsActionButton>
                   ) : null}
                 </div>
               </div>
 
               {release.body?.trim() ? (
-                <div className="prose prose-sm mt-5 max-w-none text-foreground dark:prose-invert">
+                <div className="prose prose-sm mt-4 max-w-none text-foreground dark:prose-invert">
                   <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                     {release.body}
                   </Markdown>
                 </div>
               ) : (
-                <div className="mt-5 text-sm text-muted-foreground">No release notes were provided.</div>
+                <div className="mt-4 text-sm text-muted-foreground">No release notes were provided.</div>
               )}
             </article>
           )

@@ -211,7 +211,7 @@ props and context only.
 
 Moves here: `components/messages/*`, `components/ui/*` (as
 `@kanna/chat-ui/primitives`), `KannaTranscript.tsx`,
-`ChatPage/ChatTranscriptViewport.tsx`, `ChatInput.tsx`, `GitPanel.tsx`,
+`ChatPage/ChatTranscriptViewport.tsx`, `ChatInput.tsx`, `widgets/GitWidgets.tsx`,
 `chat-ui/git/*`, `ContextWindowMeter.tsx`, `TranscriptMinimap.tsx`,
 `lib/thread-sections.ts`, `lib/contextWindow.ts`, `lib/formatters.ts`.
 

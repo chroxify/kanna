@@ -206,6 +206,9 @@ interface HarnessOptions {
   llmProvider?: LlmProviderSnapshot
   fetchLatestNpmVersion?: (pkg: string) => Promise<string>
   platform?: NodeJS.Platform
+  claudeMinimumVersion?: string
+  /** Files that exist and are executable (npm or bun beside a CLI). */
+  executables?: string[]
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -213,6 +216,7 @@ function createHarness(options: HarnessOptions = {}) {
     claude: "/usr/local/bin/claude",
     codex: "/usr/local/bin/codex",
     "cursor-agent": "/home/user/.local/bin/cursor-agent",
+    grok: "/home/user/.local/bin/grok",
     gh: "/usr/local/bin/gh",
     git: "/usr/bin/git",
     npm: "/usr/local/bin/npm",
@@ -249,6 +253,9 @@ function createHarness(options: HarnessOptions = {}) {
     fetchFn: options.fetchFn ?? ((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch),
     fetchLatestNpmVersion: options.fetchLatestNpmVersion,
     resolveCommandPath: (command) => paths[command] ?? null,
+    isExecutable: (filePath) => (options.executables ?? []).includes(filePath),
+    // Below the fake CLI's 2.1.218; the floor has its own test.
+    claudeMinimumVersion: options.claudeMinimumVersion ?? "2.1.0",
     onSignedIn: (service) => signedIn.push(service),
     trackEvent: (name) => events.push(name),
     sleep: async () => {},
@@ -278,6 +285,7 @@ function signedOutExec(argv: string[]): ExecResult {
     if (argv[0].includes("claude")) return { code: 0, stdout: "2.1.218 (Claude Code)", stderr: "" }
     if (argv[0].includes("codex")) return { code: 0, stdout: "codex-cli 0.145.0", stderr: "" }
     if (argv[0].includes("cursor-agent")) return { code: 0, stdout: "2026.07.23-e383d2b\n", stderr: "" }
+    if (argv[0].includes("grok")) return { code: 0, stdout: "grok 1.0.13 (abc)\n", stderr: "" }
     if (argv[0].includes("gh")) return { code: 0, stdout: "gh version 2.96.0 (2026-07-02)", stderr: "" }
   }
   if (joined.includes("auth status --json")) {
@@ -285,6 +293,7 @@ function signedOutExec(argv: string[]): ExecResult {
   }
   if (joined.includes("login status")) return { code: 1, stdout: "", stderr: "Not logged in" }
   if (joined.includes("cursor-agent status")) return { code: 0, stdout: "Not logged in", stderr: "" }
+  if (joined.includes("grok") && joined.includes("models")) return { code: 1, stdout: "Not logged in. Run `grok login`.", stderr: "" }
   if (joined.includes("auth status")) return { code: 1, stdout: "", stderr: "You are not logged into any GitHub hosts." }
   return { code: 0, stdout: "", stderr: "" }
 }
@@ -296,11 +305,11 @@ function signedOutExec(argv: string[]): ExecResult {
 describe("ProviderAuthManager probing", () => {
   test("reports not_installed when the binary is missing", async () => {
     const harness = createHarness({
-      paths: { claude: null, codex: null, "cursor-agent": null, gh: null },
+      paths: { claude: null, codex: null, "cursor-agent": null, grok: null, gh: null },
     })
     await harness.manager.refresh({ force: true })
     const snapshot = harness.manager.getSnapshot()
-    for (const service of ["claude", "codex", "cursor", "gh"]) {
+    for (const service of ["claude", "codex", "cursor", "grok", "gh"]) {
       const entry = snapshot.services.find((s) => s.service === service)!
       expect(entry.authStatus).toBe("not_installed")
       expect(entry.installed).toBe(false)
@@ -314,6 +323,7 @@ describe("ProviderAuthManager probing", () => {
     expect(byService.get("claude")).toMatchObject({ installed: true, version: "2.1.218", authStatus: "signed_out" })
     expect(byService.get("codex")).toMatchObject({ version: "0.145.0", authStatus: "signed_out" })
     expect(byService.get("cursor")).toMatchObject({ version: "2026.07.23-e383d2b", authStatus: "signed_out" })
+    expect(byService.get("grok")).toMatchObject({ version: "1.0.13", authStatus: "signed_out" })
     expect(byService.get("gh")).toMatchObject({ version: "2.96.0", authStatus: "signed_out" })
     expect(byService.get("openrouter")).toMatchObject({ installed: true, authStatus: "signed_out" })
   })
@@ -327,6 +337,9 @@ describe("ProviderAuthManager probing", () => {
         }
         if (joined.includes("login status")) return { code: 0, stdout: "Logged in using ChatGPT", stderr: "" }
         if (joined.includes("cursor-agent status")) return { code: 0, stdout: "Logged in as jake@x.com", stderr: "" }
+        if (argv[0].includes("grok") && argv.includes("models")) {
+          return { code: 0, stdout: "You are logged in with grok.com.\nDefault model: grok-4.6\n", stderr: "" }
+        }
         if (joined.includes("auth status")) {
           return { code: 0, stdout: "✓ Logged in to github.com account jakemny (keyring)", stderr: "" }
         }
@@ -339,6 +352,7 @@ describe("ProviderAuthManager probing", () => {
     expect(byService.get("claude")).toMatchObject({ authStatus: "signed_in", account: "jake@example.com" })
     expect(byService.get("codex")).toMatchObject({ authStatus: "signed_in", account: "ChatGPT" })
     expect(byService.get("cursor")).toMatchObject({ authStatus: "signed_in", account: "jake@x.com" })
+    expect(byService.get("grok")).toMatchObject({ authStatus: "signed_in", account: "grok.com" })
     expect(byService.get("gh")).toMatchObject({ authStatus: "signed_in", account: "jakemny" })
     expect(byService.get("openrouter")).toMatchObject({ authStatus: "signed_in" })
   })
@@ -369,7 +383,31 @@ describe("ProviderAuthManager probing", () => {
     expect(() => harness.manager.startLogin("claude")).toThrow("too old")
   })
 
-  test("non-forced refresh is TTL-coalesced", async () => {
+  test("a Claude CLI older than the Agent SDK's pairing reads as outdated", async () => {
+    const harness = createHarness({
+      claudeMinimumVersion: "2.1.277",
+      exec: (argv) => {
+        if (argv[0].includes("claude") && argv.join(" ").includes("auth status --json")) {
+          return { code: 0, stdout: JSON.stringify({ loggedIn: true, email: "jake@example.com" }), stderr: "" }
+        }
+        return signedOutExec(argv)
+      },
+    })
+    await harness.manager.refresh({ force: true })
+    const claude = harness.manager.getSnapshot().services.find((s) => s.service === "claude")!
+    expect(claude.authStatus).toBe("outdated")
+    expect(claude.statusDetail).toContain("2.1.218")
+    expect(claude.statusDetail).toContain("2.1.277")
+  })
+
+  test("a Claude CLI at the pairing version is fine", async () => {
+    const harness = createHarness({ claudeMinimumVersion: "2.1.218", exec: signedOutExec })
+    await harness.manager.refresh({ force: true })
+    const claude = harness.manager.getSnapshot().services.find((s) => s.service === "claude")!
+    expect(claude.authStatus).toBe("signed_out")
+  })
+
+    test("non-forced refresh is TTL-coalesced", async () => {
     const harness = createHarness({ exec: signedOutExec })
     await harness.manager.refresh()
     const callsAfterFirst = harness.execCalls.length
@@ -912,13 +950,110 @@ describe("install", () => {
     expect(command).toBe("'/usr/local/bin/claude' update || (curl -fsSL https://claude.ai/install.sh | bash)")
   })
 
+  test("update stays installing until the re-probe reads the new version", async () => {
+    let updated = false
+    const harness = createHarness({
+      exec: (argv) => {
+        if (argv[0] === "sh") {
+          updated = true
+          return { code: 0, stdout: "updated", stderr: "" }
+        }
+        if (updated && argv[0].includes("claude") && argv.join(" ").endsWith("--version")) {
+          return { code: 0, stdout: "2.1.300 (Claude Code)", stderr: "" }
+        }
+        return signedOutExec(argv)
+      },
+    })
+    await harness.manager.refresh({ force: true })
+
+    const states: Array<{ installState: string; version: string | null }> = []
+    harness.manager.onChange((snapshot) => {
+      const claude = snapshot.services.find((s) => s.service === "claude")!
+      states.push({ installState: claude.installState, version: claude.version })
+    })
+    await harness.manager.install("claude")
+
+    const firstIdle = states.find((state) => state.installState === "idle")
+    expect(firstIdle?.version).toBe("2.1.300")
+  })
+
+  test("a probe that started before the update can't write the old version back", async () => {
+    let updated = false
+    let releaseSlowProbe: () => void = () => {}
+    const slowProbe = new Promise<void>((resolve) => {
+      releaseSlowProbe = resolve
+    })
+    let holdNextAuthStatus = false
+    const harness = createHarness({
+      exec: async (argv) => {
+        const joined = argv.join(" ")
+        if (argv[0] === "sh") {
+          updated = true
+          return { code: 0, stdout: "updated", stderr: "" }
+        }
+        if (argv[0].includes("claude") && joined.endsWith("--version")) {
+          return { code: 0, stdout: `${updated ? "2.1.300" : "2.1.218"} (Claude Code)`, stderr: "" }
+        }
+        if (holdNextAuthStatus && argv[0].includes("claude") && joined.includes("auth status")) {
+          holdNextAuthStatus = false
+          await slowProbe
+        }
+        return signedOutExec(argv)
+      },
+    })
+    await harness.manager.refresh({ force: true })
+
+    // A page-open refresh reads the old version, then stalls past the update.
+    holdNextAuthStatus = true
+    const refresh = harness.manager.refresh({ force: true })
+    await harness.manager.install("claude")
+    releaseSlowProbe()
+    await refresh
+
+    expect(harness.manager.getSnapshot().services.find((s) => s.service === "claude")!.version).toBe("2.1.300")
+  })
+
+  test("an update that leaves the old version on PATH says so", async () => {
+    const harness = createHarness({
+      paths: { brew: "/opt/homebrew/bin/brew" },
+      exec: signedOutExec,
+      fetchFn: (async (url: string | URL | Request) => {
+        if (String(url).includes("api.github.com")) return Response.json({ tag_name: "v2.97.0" })
+        return new Response("{}", { status: 200 })
+      }) as typeof fetch,
+    })
+    await harness.manager.refresh({ force: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    await harness.manager.install("gh")
+    const gh = harness.manager.getSnapshot().services.find((s) => s.service === "gh")!
+    expect(gh.installState).toBe("error")
+    expect(gh.installError).toBe("The update finished, but GitHub still reports 2.96.0 (latest is 2.97.0).")
+    const installCall = harness.execCalls.find((call) => call.argv[0] === "sh")
+    expect(installCall?.argv[2]).toBe("brew update --quiet; brew install gh || brew upgrade gh")
+  })
+
+  test("claude update targets the CLAUDE_EXECUTABLE the card probes", async () => {
+    const previous = process.env.CLAUDE_EXECUTABLE
+    process.env.CLAUDE_EXECUTABLE = "/opt/claude/bin/claude"
+    try {
+      const harness = createHarness({ exec: signedOutExec })
+      await harness.manager.install("claude")
+      const installCall = harness.execCalls.find((call) => call.argv[0] === "sh")
+      expect(installCall?.argv[2]).toStartWith("'/opt/claude/bin/claude' update ||")
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_EXECUTABLE
+      else process.env.CLAUDE_EXECUTABLE = previous
+    }
+  })
+
   test("installs codex via npm and re-probes", async () => {
     let installed = false
     const harness = createHarness({
       paths: { codex: null },
       exec: (argv) => {
         const joined = argv.join(" ")
-        if (argv[0] === "sh" && joined.includes("npm install -g @openai/codex")) {
+        if (argv[0] === "sh" && joined.includes("npm' install -g @openai/codex")) {
           installed = true
           return { code: 0, stdout: "added 3 packages", stderr: "" }
         }
@@ -940,6 +1075,29 @@ describe("install", () => {
     expect(codex.authStatus).toBe("signed_out")
   })
 
+  test("codex updates with the npm beside the codex the card runs, on that npm's node", async () => {
+    // nvm's codex comes first on Kanna's PATH; the login shell's npm is Homebrew's.
+    const harness = createHarness({
+      paths: { codex: "/Users/j/.nvm/versions/node/v22/bin/codex", npm: "/opt/homebrew/bin/npm" },
+      executables: ["/Users/j/.nvm/versions/node/v22/bin/npm"],
+      exec: signedOutExec,
+    })
+    await harness.manager.install("codex")
+    const script = harness.execCalls.find((call) => call.argv[0] === "sh")?.argv[2]
+    expect(script).toBe(`PATH='/Users/j/.nvm/versions/node/v22/bin':"$PATH" '/Users/j/.nvm/versions/node/v22/bin/npm' install -g @openai/codex`)
+  })
+
+  test("a codex from bun's global install updates with that bun", async () => {
+    const harness = createHarness({
+      paths: { codex: "/Users/j/.bun/bin/codex" },
+      executables: ["/Users/j/.bun/bin/bun"],
+      exec: signedOutExec,
+    })
+    await harness.manager.install("codex")
+    const script = harness.execCalls.find((call) => call.argv[0] === "sh")?.argv[2]
+    expect(script).toBe(`PATH='/Users/j/.bun/bin':"$PATH" '/Users/j/.bun/bin/bun' add -g @openai/codex`)
+  })
+
   test("install failure surfaces the error output", async () => {
     const harness = createHarness({
       exec: (argv) => {
@@ -954,7 +1112,7 @@ describe("install", () => {
     expect(codex.installError).toContain("EACCES")
   })
 
-  test("gh install on macOS without brew fails with a hint", async () => {
+  test("gh install on macOS without brew downloads the release zip", async () => {
     const harness = createHarness({
       paths: { gh: null, brew: null },
       exec: signedOutExec,
@@ -962,9 +1120,11 @@ describe("install", () => {
     })
     await harness.manager.refresh({ force: true })
     await harness.manager.install("gh")
-    const gh = harness.manager.getSnapshot().services.find((s) => s.service === "gh")!
-    expect(gh.installState).toBe("error")
-    expect(gh.installError).toContain("Homebrew")
+    const script = harness.execCalls.find((call) => call.argv[0] === "sh")?.argv[2] ?? ""
+    expect(script).toContain(`_macOS_$arch.zip"`)
+    expect(script).toContain(`unzip -q "$tmp/gh.zip" -d "$tmp"`)
+    expect(script).toContain(`cp "$tmp/gh_$(echo $ver | tr -d v)_macOS_$arch/bin/gh" "$HOME/.local/bin/gh"`)
+    expect(harness.manager.getSnapshot().services.find((s) => s.service === "gh")!.installState).toBe("idle")
   })
 
   test("cursor update runs the CLI's own updater when installed", async () => {

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import {
   AgentCoordinator,
   buildAttachmentHintText,
@@ -6,6 +9,7 @@ import {
   buildPromptText,
   buildSteeredMessageContent,
   claudeToolset,
+  formatQuestionAnswersFollowUp,
   maxClaudeContextWindowFromModelUsage,
   normalizeClaudeContextUsage,
   normalizeClaudeStreamMessage,
@@ -13,6 +17,7 @@ import {
   RESUME_AFTER_RESTART_MESSAGE,
 } from "./agent"
 import type { HarnessTurn } from "./harness-types"
+import type { SubagentActivityUpdate } from "./background-tasks"
 import type { ChatAttachment, TranscriptEntry } from "../shared/types"
 import type { SessionArtifactStatus } from "./session-artifacts"
 import { timestamped } from "./transcript"
@@ -64,6 +69,26 @@ class AsyncEventQueue<T> implements AsyncIterable<T> {
     }
   }
 }
+
+describe("formatQuestionAnswersFollowUp", () => {
+  test("quotes each question with its answer, keyed by id or by text", () => {
+    const text = formatQuestionAnswersFollowUp(
+      [
+        { id: "db", question: "Which database?" },
+        { question: "Add tests?" },
+        { question: "Anything else?" },
+      ],
+      { answers: { db: ["Postgres"], "Add tests?": ["Yes", "Unit only"] } },
+    )
+    expect(text).toBe([
+      "Here are my answers to your questions:",
+      "",
+      "- Which database?\n  Postgres",
+      "- Add tests?\n  Yes, Unit only",
+      "- Anything else?\n  (no answer)",
+    ].join("\n"))
+  })
+})
 
 describe("normalizeClaudeStreamMessage", () => {
   test("normalizes assistant tool calls", () => {
@@ -1546,6 +1571,55 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a Claude turn the CLI started on its own does not end the user's turn", async () => {
+    const events = new AsyncEventQueue<any>()
+    const promptIds: string[] = []
+    const result = (text: string) => timestamped({
+      kind: "result",
+      subtype: "success",
+      isError: false,
+      durationMs: 0,
+      result: text,
+    })
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        echoesPromptIds: true,
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async (_content: string, promptId?: string) => {
+          promptIds.push(promptId!)
+          // A resumed session first runs the notification about background
+          // commands the previous process left behind. Its result echoes no id.
+          events.push({ type: "transcript" as const, entry: result("") })
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "widen the page",
+      model: "claude-opus-4-1",
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(store.turnFinishedCount).toBe(0)
+
+    events.push({ type: "transcript" as const, entry: result("done"), promptIds: [promptIds[0]!] })
+    await waitFor(() => store.turnFinishedCount === 1)
+
+    events.close()
+  })
+
   test("auto plan controls the EnterPlanMode tool and restarts the session when it changes", async () => {
     const queues: AsyncEventQueue<any>[] = []
     const startSessionCalls: Array<{ planMode: boolean; autoPlan: boolean }> = []
@@ -2183,7 +2257,7 @@ describe("concurrent agents notice injection", () => {
     await coordinator.send({ type: "chat.send", chatId: "chat-2", provider: "claude", content: "second prompt", model: "claude-opus-4-1" })
 
     expect(prompts).toHaveLength(2)
-    // chat-1 started alone — no notice.
+    // chat-1 started alone — nothing is appended.
     expect(prompts[0]).toBe("first prompt")
     // chat-2 started while chat-1 was running in the same directory.
     expect(prompts[1]?.startsWith("second prompt")).toBe(true)
@@ -2220,6 +2294,56 @@ describe("concurrent agents notice injection", () => {
     expect(prompts).toEqual(["first prompt", "second prompt"])
 
     close()
+  })
+})
+
+describe("skill mentions", () => {
+  test("claude expands the leading skill itself; later ones get the failsafe", async () => {
+    const projectDir = mkdtempSync(path.join(tmpdir(), "kanna-skill-mentions-"))
+    for (const name of ["review", "simplify"]) {
+      mkdirSync(path.join(projectDir, ".claude", "skills", name), { recursive: true })
+      writeFileSync(path.join(projectDir, ".claude", "skills", name, "SKILL.md"), `---\nname: ${name}\n---\n`)
+    }
+    const store = createFakeStore({
+      chats: [createFakeChat("chat-1", "project-1", "Chat One")],
+      projects: [{ id: "project-1", localPath: projectDir }],
+    })
+    const queues: AsyncEventQueue<any>[] = []
+    const prompts: string[] = []
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => {
+        const events = new AsyncEventQueue<any>()
+        queues.push(events)
+        return {
+          provider: "claude" as const,
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => {},
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async (content: string) => {
+            prompts.push(content)
+          },
+        }
+      },
+    })
+
+    const content = "/review this, then /simplify it and read /etc/hosts"
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content, model: "claude-opus-4-1" })
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.startsWith(content)).toBe(true)
+    const simplifyPath = path.join(projectDir, ".claude", "skills", "simplify", "SKILL.md")
+    expect(prompts[0]).toContain(
+      `<system-message>the user would like to use the skill available at ${simplifyPath}</system-message>`
+    )
+    expect(prompts[0]).not.toContain("skills/review/SKILL.md")
+
+    queues.forEach((queue) => queue.close())
+    rmSync(projectDir, { recursive: true, force: true })
   })
 })
 
@@ -2827,7 +2951,7 @@ function createFakeStore(options?: {
 
 describe("shared display tool lifecycle", () => {
   for (const provider of ["claude", "codex", "cursor", "pi"] as const) {
-    test(`${provider} displays charts and attachments through the shared host`, async () => {
+    test(`${provider} displays visualizations and attachments through the shared host`, async () => {
       const events = new AsyncEventQueue<any>()
       let host: import("./kanna-tools").KannaToolHost | undefined
       const capture = (args: { customTools?: import("./kanna-tools").KannaToolHost }) => { host = args.customTools }
@@ -2838,7 +2962,8 @@ describe("shared display tool lifecycle", () => {
           return { provider, stream: events, interrupt: async () => { events.close() }, close: () => { events.close() } }
         },
       }
-      const store = createFakeStore()
+      const dataDir = mkdtempSync(path.join(tmpdir(), "kanna-viz-host-"))
+      const store = Object.assign(createFakeStore(), { dataDir })
       const coordinator = new AgentCoordinator({
         store: store as never,
         onStateChange: () => {},
@@ -2859,10 +2984,10 @@ describe("shared display tool lifecycle", () => {
       await coordinator.send({ type: "chat.send", chatId: "chat-1", provider, content: "Test tools", model: "test-model" })
       expect(host).toBeDefined()
       try {
-        const chart = await host!.execute("show_chart", {
-          title: "Sales", description: "Sales by month", type: "bar", data: [{ month: "Jan", sales: 10 }],
+        const visualization = await host!.execute("show_visualization", {
+          title: "Sales", html: "<p>January sales: 10</p>",
         })
-        expect(chart).toMatchObject({ structuredContent: { displayed: true } })
+        expect(visualization).toMatchObject({ structuredContent: { displayed: true } })
         const attachments = await host!.execute("send_attachments", {
           attachments: [{ url: "https://example.com/report.pdf" }],
         })
@@ -2873,7 +2998,566 @@ describe("shared display tool lifecycle", () => {
       } finally {
         await coordinator.cancel("chat-1")
         events.close()
+        rmSync(dataDir, { recursive: true, force: true })
       }
     })
   }
+})
+
+describe("subagent activity", () => {
+  function coordinator() {
+    const store = createFakeStore()
+    return new AgentCoordinator({ store: store as never, onStateChange: () => {} })
+  }
+
+  test("tracks an agent from start to stop", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "code-reviewer" }, 1000)
+
+    expect(agent.getSubagents("chat-1")).toEqual([
+      { id: "a1", type: "subagent", label: "code-reviewer", status: "running", startedAt: 1000 },
+    ])
+    expect(agent.getSubagents("chat-1").some((a) => a.status === "running")).toBe(true)
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 4000)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "completed", endedAt: 4000 })
+    expect(agent.getSubagents("chat-1").some((a) => a.status === "running")).toBe(false)
+  })
+
+  test("the Stop sweep closes an agent whose stop hook never landed", () => {
+    // The whole feature rests on a count you can believe. A killed or crashed
+    // agent never fires SubagentStop, and without the sweep it would pin the
+    // chat in "waiting" forever — the stuck-spinner bug in a new costume.
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "gone", type: "subagent", label: "lost" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "live", type: "subagent", label: "still going" }, 1000)
+
+    agent.applySubagentActivity(
+      "chat-1",
+      { kind: "inFlight", ids: [{ id: "live", type: "subagent", label: "still going" }] },
+      5000
+    )
+
+    const byId = new Map(agent.getSubagents("chat-1").map((entry) => [entry.id, entry]))
+    expect(byId.get("gone")).toMatchObject({ status: "completed", endedAt: 5000 })
+    expect(byId.get("live")).toMatchObject({ status: "running" })
+    expect(agent.getSubagents("chat-1").some((a) => a.status === "running")).toBe(true)
+  })
+
+  test("the sweep discovers background work that never fired a start hook", () => {
+    // A backgrounded shell or a monitor is registered on the session without a
+    // SubagentStart, so Stop is the first time we hear of it. The turn is not
+    // done, and the count has to say so.
+    const agent = coordinator()
+    agent.applySubagentActivity(
+      "chat-1",
+      { kind: "inFlight", ids: [{ id: "sh1", type: "shell", label: "bun test" }] },
+      2000
+    )
+
+    expect(agent.getSubagents("chat-1")).toEqual([
+      { id: "sh1", type: "shell", label: "bun test", status: "running", startedAt: 2000 },
+    ])
+  })
+
+  test("an empty sweep ends the turn", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "x" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "inFlight", ids: [] }, 3000)
+
+    expect(agent.getSubagents("chat-1").some((a) => a.status === "running")).toBe(false)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "completed", endedAt: 3000 })
+  })
+
+  test("a late stop does not reopen or re-stamp a closed agent", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "x" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "inFlight", ids: [] }, 3000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: true }, 9000)
+
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "completed", endedAt: 3000 })
+  })
+
+  test("chats without delegated work stay empty", () => {
+    expect(coordinator().getSubagents("chat-1")).toEqual([])
+  })
+
+  test("a monitor shows the moment it starts, not at the next Stop", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", {
+      kind: "started", id: "m1", type: "monitor", label: "Watch deploy", toolUseId: "toolu_m", description: "Watch deploy", stoppable: true,
+    }, 1000)
+    expect(agent.getSubagents("chat-1")).toEqual([{
+      id: "m1", type: "monitor", label: "Watch deploy", status: "running", startedAt: 1000,
+      toolUseId: "toolu_m", description: "Watch deploy", stoppable: true,
+    }])
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "m1", failed: false, stopped: true }, 5000)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "stopped", endedAt: 5000 })
+  })
+
+  test("a workflow's progress replaces its agents, and ties its agents' own tasks to it", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "w1", type: "workflow", label: "review", workflowName: "review" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "agent-a", type: "subagent", label: "general-purpose" }, 1100)
+    agent.applySubagentActivity("chat-1", {
+      kind: "progress",
+      id: "w1",
+      usage: { totalTokens: 500, toolUses: 2 },
+      workflow: {
+        phases: [{ index: 1, title: "Review" }],
+        agents: [
+          { index: 1, label: "a", state: "running", agentId: "agent-a", phaseIndex: 1 },
+          { index: 2, label: "b", state: "queued", phaseIndex: 1 },
+        ],
+      },
+    }, 2000)
+
+    const byId = new Map(agent.getSubagents("chat-1").map((entry) => [entry.id, entry]))
+    expect(byId.get("w1")?.workflow).toEqual({
+      name: "review",
+      phases: [{ index: 1, title: "Review" }],
+      agents: [
+        { index: 1, label: "a", state: "running", agentId: "agent-a", phaseIndex: 1 },
+        { index: 2, label: "b", state: "queued", phaseIndex: 1 },
+      ],
+    })
+    expect(byId.get("w1")?.usage).toEqual({ totalTokens: 500, toolUses: 2 })
+    expect(byId.get("agent-a")?.workflowId).toBe("w1")
+
+    // An agent starting after the run named it is tied at once.
+    agent.applySubagentActivity("chat-1", {
+      kind: "progress",
+      id: "w1",
+      workflow: { phases: [], agents: [{ index: 2, label: "b", state: "running", agentId: "agent-b" }] },
+    }, 3000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "agent-b", type: "subagent", label: "x" }, 3100)
+    expect(agent.getSubagents("chat-1").find((entry) => entry.id === "agent-b")?.workflowId).toBe("w1")
+  })
+
+  test("a workflow first heard of mid-run is picked up from its progress", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", {
+      kind: "progress", id: "w1", workflow: { phases: [], agents: [{ index: 1, label: "a", state: "running" }] },
+    }, 1000)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ id: "w1", type: "workflow", status: "running", stoppable: true })
+  })
+
+  test("the notification's totals land even after task_updated closed it", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "w1", type: "workflow", label: "review" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "w1", failed: false }, 2000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "w1", failed: true, usage: { totalTokens: 9, toolUses: 1 }, summary: "all good" }, 3000)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({
+      status: "completed", endedAt: 2000, usage: { totalTokens: 9, toolUses: 1 }, summary: "all good",
+    })
+  })
+
+  test("the sweep keeps ambient tasks out", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "ambient", id: "watcher" }, 1000)
+    agent.applySubagentActivity("chat-1", {
+      kind: "inFlight", ids: [{ id: "watcher", type: "monitor", label: "live update" }, { id: "sh1", type: "shell", label: "bun test" }],
+    }, 2000)
+    expect(agent.getSubagents("chat-1").map((entry) => entry.id)).toEqual(["sh1"])
+  })
+
+  test("a start after the sweep found the task keeps when the sweep saw it start", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "inFlight", ids: [{ id: "sh1", type: "shell", label: "bun test" }] }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "sh1", type: "shell", label: "Run tests", toolUseId: "t1", stoppable: true }, 4000)
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ startedAt: 1000, label: "Run tests", toolUseId: "t1" })
+  })
+
+  test("a foreground shell gets no row unless it moves to the background", () => {
+    const agent = coordinator()
+    const task = { id: "sh1", type: "shell", label: "Find viewport meta tag", stoppable: true }
+    agent.applySubagentActivity("chat-1", { kind: "foreground", task }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "sh1", failed: false }, 2000)
+    expect(agent.getSubagents("chat-1")).toEqual([])
+    // Its end took it off the held list, so a stray move can't raise it.
+    agent.applySubagentActivity("chat-1", { kind: "backgrounded", id: "sh1" }, 2500)
+    expect(agent.getSubagents("chat-1")).toEqual([])
+
+    agent.applySubagentActivity("chat-1", { kind: "foreground", task: { ...task, id: "sh2" } }, 3000)
+    agent.applySubagentActivity("chat-1", { kind: "backgrounded", id: "sh2" }, 9000)
+    expect(agent.getSubagents("chat-1")).toEqual([
+      { id: "sh2", type: "shell", label: "Find viewport meta tag", status: "running", startedAt: 3000, stoppable: true },
+    ])
+  })
+
+  test("a Claude session's task reports reach the registry, and Stop reaches the CLI", async () => {
+    const events = new AsyncEventQueue<any>()
+    const stopped: string[] = []
+    let report: ((update: SubagentActivityUpdate) => void) | undefined
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async (args) => {
+        report = args.onSubagentActivity
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          stopTask: async (taskId: string) => { stopped.push(taskId) },
+          close: () => {},
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async () => {},
+        }
+      },
+    })
+    await coordinator.send({ type: "chat.send", projectId: "project-1", provider: "claude", content: "watch it" })
+    await waitFor(() => report !== undefined)
+
+    report!({ kind: "started", id: "m1", type: "monitor", label: "Watch deploy", stoppable: true })
+    expect(coordinator.getSubagents("chat-1")[0]).toMatchObject({ id: "m1", type: "monitor", status: "running" })
+
+    await coordinator.stopBackgroundTask("chat-1", "m1")
+    expect(stopped).toEqual(["m1"])
+    events.close()
+  })
+
+  test("stopping a task needs a live session that can", async () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "m1", type: "monitor", label: "Watch", stoppable: true }, 1000)
+    await expect(agent.stopBackgroundTask("chat-1", "m1")).rejects.toThrow("can't be stopped")
+    // Stopping something already over is a no-op, not an error.
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "m1", failed: false }, 2000)
+    await agent.stopBackgroundTask("chat-1", "m1")
+  })
+
+  test("interrupting the turn closes agents still marked running", async () => {
+    // An interrupt ends the turn without the Stop hook's sweep, so nothing
+    // else would ever close these. Grok here: Codex's agents report their own
+    // ends and are left to (see "waiting on a subagent").
+    let release!: () => void
+    const fakeGrokManager = {
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "grok",
+              model: "grok-4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+        return { provider: "grok", stream: stream(), interrupt: async () => release(), close: () => {} }
+      },
+    }
+    const agent = new AgentCoordinator({
+      store: createFakeStore() as never,
+      onStateChange: () => {},
+      grokManager: fakeGrokManager as never,
+    })
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "grok", content: "work" })
+    await waitFor(() => agent.getActiveStatuses().get("chat-1") === "running")
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "x" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a2", type: "subagent", label: "y" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a2", failed: false }, 2000)
+
+    await agent.cancel("chat-1")
+
+    const byId = new Map(agent.getSubagents("chat-1").map((entry) => [entry.id, entry]))
+    expect(byId.get("a1")).toMatchObject({ status: "failed" })
+    expect(byId.get("a1")?.endedAt).toBeDefined()
+    // Work that already finished keeps its outcome.
+    expect(byId.get("a2")).toMatchObject({ status: "completed", endedAt: 2000 })
+  })
+})
+
+describe("waiting on a subagent", () => {
+  function coordinator() {
+    return new AgentCoordinator({ store: createFakeStore() as never, onStateChange: () => {} })
+  }
+
+  test("a chat with no turn and a task still running is waiting on it", () => {
+    const agent = coordinator()
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "explore" }, 1000)
+    expect(agent.getChatStatuses().get("chat-1")).toBe("waiting_on_subagent")
+    // Not a turn: nothing to stop or queue behind.
+    expect(agent.getActiveStatuses().has("chat-1")).toBe(false)
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 2000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+  })
+
+  test("it ends the wait however the task ends", () => {
+    for (const end of [{ failed: true }, { failed: false, stopped: true }]) {
+      const agent = coordinator()
+      agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "explore" }, 1000)
+      expect(agent.getChatStatuses().get("chat-1")).toBe("waiting_on_subagent")
+      agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", ...end }, 2000)
+      expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    }
+    // A task killed with no end event is closed by the next sweep.
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "w1", type: "workflow", label: "review" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "inFlight", ids: [] }, 2000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+  })
+
+  test("a shell left running is not a wait, though the Tasks widget still lists it", () => {
+    // A dev server never ends. The chat that started one has finished.
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "sh1", type: "shell", label: "bun run dev", stoppable: true }, 1000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    expect(agent.hasDelegatedWork("chat-1")).toBe(false)
+    expect(agent.getSubagents("chat-1")).toMatchObject([{ id: "sh1", type: "shell", status: "running", stoppable: true }])
+    // It can still give the chat another turn, which is a different question.
+    expect(agent.getLeftRunning("chat-1")).toEqual(["shell"])
+  })
+
+  test("a shell beside a real subagent leaves the chat waiting on the subagent alone", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "sh1", type: "shell", label: "bun run dev" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "explore" }, 1000)
+    expect(agent.getChatStatuses().get("chat-1")).toBe("waiting_on_subagent")
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 2000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    expect(agent.getSubagents("chat-1").find((task) => task.id === "sh1")).toMatchObject({ status: "running" })
+  })
+
+  test("only work handed to another agent is a wait", () => {
+    const waits = (type: string) => {
+      const agent = coordinator()
+      agent.applySubagentActivity("chat-1", { kind: "started", id: "t1", type, label: type }, 1000)
+      return agent.getChatStatuses().get("chat-1") === "waiting_on_subagent"
+    }
+    for (const type of ["subagent", "workflow", "teammate", "cloud session"]) expect([type, waits(type)]).toEqual([type, true])
+    // Not an agent, or the CLI's own housekeeping, or a kind nothing here knows.
+    for (const type of ["shell", "monitor", "MCP task", "dream", "auto-mode scan", "task", "something_new"]) expect([type, waits(type)]).toEqual([type, false])
+  })
+
+  test("a monitor left running is not a wait either, though the Tasks widget still lists it", () => {
+    // It watches for something rather than works toward an end, and nobody
+    // handed it work that is coming back.
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "m1", type: "monitor", label: "Watch CI", stoppable: true }, 1000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    expect(agent.hasDelegatedWork("chat-1")).toBe(false)
+    expect(agent.getSubagents("chat-1")).toMatchObject([{ id: "m1", type: "monitor", status: "running", stoppable: true }])
+    expect(agent.getLeftRunning("chat-1")).toEqual(["monitor"])
+  })
+
+  test("a monitor beside a real subagent leaves the chat waiting on the subagent alone", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "m1", type: "monitor", label: "Watch CI" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "explore" }, 1000)
+    expect(agent.getChatStatuses().get("chat-1")).toBe("waiting_on_subagent")
+    // Only what it left running, not what it is waiting on.
+    expect(agent.getLeftRunning("chat-1")).toEqual(["monitor"])
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 2000)
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    expect(agent.getSubagents("chat-1").find((task) => task.id === "m1")).toMatchObject({ status: "running" })
+  })
+
+  test("a Claude turn that ends with a task in the background leaves the chat waiting", async () => {
+    const events = new AsyncEventQueue<any>()
+    let report: ((update: SubagentActivityUpdate) => void) | undefined
+    const settled: string[] = []
+    const store = createFakeStore()
+    const agent = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async (args) => {
+        report = args.onSubagentActivity
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => {},
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async () => {},
+        }
+      },
+    })
+    agent.onChatSettled = (chatId) => settled.push(chatId)
+    await agent.send({ type: "chat.send", projectId: "project-1", provider: "claude", content: "review this in the background" })
+    await waitFor(() => report !== undefined)
+
+    // While the turn runs the chat is running, whatever it has handed off.
+    report!({ kind: "started", id: "a1", type: "subagent", label: "code-reviewer" })
+    expect(agent.getChatStatuses().get("chat-1")).not.toBe("waiting_on_subagent")
+    expect(agent.getChatStatuses().has("chat-1")).toBe(true)
+
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "Started the review." }),
+    })
+    await waitFor(() => store.turnFinishedCount === 1)
+    await waitFor(() => agent.getChatStatuses().get("chat-1") === "waiting_on_subagent")
+
+    // The task's end is the only thing left to say the chat is finished.
+    const settledBefore = settled.length
+    report!({ kind: "stopped", id: "a1", failed: false })
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+    expect(settled.length).toBe(settledBefore + 1)
+    events.close()
+  })
+
+  test("a subagent the provider never closed does not outlive its stream", async () => {
+    // Grok reports a subagent as a tool call and its result. A stream that
+    // ends without the result would leave the chat waiting for good.
+    let release!: () => void
+    const fakeGrokManager = {
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "tool_call",
+              tool: {
+                kind: "tool",
+                toolKind: "subagent_task",
+                toolName: "Task",
+                toolId: "spawn-1",
+                input: { subagentType: "spawnAgent" },
+              },
+            }),
+          }
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "" }),
+          }
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+        return { provider: "grok", stream: stream(), interrupt: async () => release(), close: () => {} }
+      },
+    }
+    const agent = new AgentCoordinator({
+      store: createFakeStore() as never,
+      onStateChange: () => {},
+      grokManager: fakeGrokManager as never,
+    })
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "grok", content: "work" })
+    // The result is in and the stream is still open, with the subagent on it.
+    await waitFor(() => agent.getChatStatuses().get("chat-1") === "waiting_on_subagent")
+
+    release()
+    await waitFor(() => !agent.getChatStatuses().has("chat-1"))
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ id: "spawn-1", status: "failed" })
+  })
+
+  /** A Codex manager whose turn the test ends by hand, and that records what it is asked to stop. */
+  function codexWithAgents() {
+    const events = new AsyncEventQueue<any>()
+    let report: ((chatId: string, update: SubagentActivityUpdate) => void) | null = null
+    const stopped: string[] = []
+    const manager = {
+      setTaskActivityListener(listener: typeof report) { report = listener },
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        return { provider: "codex", stream: events, interrupt: async () => events.close(), close: () => {} }
+      },
+      async stopAgent(_chatId: string, threadId: string) {
+        stopped.push(threadId)
+        return true
+      },
+      async stopAgents() { stopped.push("all") },
+    }
+    const store = createFakeStore()
+    const agent = new AgentCoordinator({ store: store as never, onStateChange: () => {}, codexManager: manager as never })
+    const agentStarted = (id: string) => report!("chat-1", { kind: "started", id, type: "subagent", label: "audit parser", stoppable: true })
+    const finishTurn = () => {
+      events.push({
+        type: "transcript" as const,
+        entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "" }),
+      })
+      events.close()
+    }
+    return { agent, store, events, stopped, agentStarted, finishTurn, report: (update: SubagentActivityUpdate) => report!("chat-1", update) }
+  }
+
+  test("a Codex chat waits on the agents it spawned, past the end of its own turn", async () => {
+    const { agent, store, agentStarted, finishTurn, report } = codexWithAgents()
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "codex", content: "split this up" })
+    await waitFor(() => agent.getActiveStatuses().has("chat-1"))
+
+    agentStarted("agent-thread-1")
+    expect(agent.getChatStatuses().get("chat-1")).not.toBe("waiting_on_subagent")
+
+    // The turn's stream closes with the turn. The agent's row is not on it.
+    finishTurn()
+    await waitFor(() => store.turnFinishedCount === 1)
+    await waitFor(() => agent.getChatStatuses().get("chat-1") === "waiting_on_subagent")
+    expect(agent.getSubagents("chat-1")).toMatchObject([{ id: "agent-thread-1", status: "running", stoppable: true }])
+
+    report({ kind: "stopped", id: "agent-thread-1", failed: false })
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+  })
+
+  test("a Codex wait or close call is not an agent", async () => {
+    const { agent, events, finishTurn } = codexWithAgents()
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "codex", content: "wait for them" })
+    await waitFor(() => agent.getActiveStatuses().has("chat-1"))
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({
+        kind: "tool_call",
+        tool: { kind: "tool", toolKind: "subagent_task", toolName: "Task", toolId: "wait-1", input: { subagentType: "wait" } },
+      }),
+    })
+    finishTurn()
+    await waitFor(() => !agent.getActiveStatuses().has("chat-1"))
+    expect(agent.getSubagents("chat-1")).toEqual([])
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+  })
+
+  test("stopping a Codex chat stops its agents and leaves their rows for them to close", async () => {
+    const { agent, stopped, agentStarted, report } = codexWithAgents()
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "codex", content: "work" })
+    await waitFor(() => agent.getActiveStatuses().has("chat-1"))
+    agentStarted("agent-thread-1")
+
+    await agent.cancel("chat-1")
+    expect(stopped).toEqual(["all"])
+    // Still running until Codex says its turn was interrupted.
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "running" })
+    report({ kind: "stopped", id: "agent-thread-1", failed: false, stopped: true })
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "stopped" })
+    expect(agent.getChatStatuses().has("chat-1")).toBe(false)
+  })
+
+  test("steering a Codex chat leaves its agents running", async () => {
+    const { agent, stopped, agentStarted } = codexWithAgents()
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "codex", content: "work" })
+    await waitFor(() => agent.getActiveStatuses().has("chat-1"))
+    agentStarted("agent-thread-1")
+
+    await agent.cancel("chat-1", { hideInterrupted: true })
+    expect(stopped).toEqual([])
+    expect(agent.getSubagents("chat-1")[0]).toMatchObject({ status: "running" })
+  })
+
+  test("a Codex agent's row stops that agent's own turn, once the chat's turn is over", async () => {
+    const { agent, stopped, agentStarted, finishTurn } = codexWithAgents()
+    await agent.send({ type: "chat.send", chatId: "chat-1", provider: "codex", content: "work" })
+    await waitFor(() => agent.getActiveStatuses().has("chat-1"))
+    agentStarted("agent-thread-1")
+    // Not while the turn may be waiting on it: Codex would leave the turn
+    // waiting for an agent that is never going to finish.
+    await expect(agent.stopBackgroundTask("chat-1", "agent-thread-1")).rejects.toThrow("Stop the chat")
+    expect(stopped).toEqual([])
+    finishTurn()
+    await waitFor(() => agent.getChatStatuses().get("chat-1") === "waiting_on_subagent")
+
+    await agent.stopBackgroundTask("chat-1", "agent-thread-1")
+    expect(stopped).toEqual(["agent-thread-1"])
+  })
 })

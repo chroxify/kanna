@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import {
   DEFAULT_RIGHT_SIDEBAR_SIZE,
-  getDefaultRightSidebarVisibilityState,
   migrateRightSidebarStore,
+  RIGHT_SIDEBAR_MAX_WIDTH_PX,
   RIGHT_SIDEBAR_MIN_WIDTH_PX,
   useRightSidebarStore,
 } from "./rightSidebarStore"
@@ -11,195 +11,147 @@ const PROJECT_ID = "project-1"
 
 describe("rightSidebarStore", () => {
   beforeEach(() => {
-    useRightSidebarStore.setState({ size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, projectBrowser: {} })
+    useRightSidebarStore.setState({ size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, chatViewers: {} })
   })
 
-  test("defaults to a closed drawer", () => {
-    const visibility = useRightSidebarStore.getState().projects[PROJECT_ID] ?? getDefaultRightSidebarVisibilityState()
-    expect(visibility.rightPanel).toBe("hidden")
+  test("widgets start closed with the default size", () => {
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]?.widgetsOpen ?? false).toBe(false)
     expect(useRightSidebarStore.getState().size).toBe(DEFAULT_RIGHT_SIDEBAR_SIZE)
   })
 
-  test("exports the expected pixel min width", () => {
-    expect(RIGHT_SIDEBAR_MIN_WIDTH_PX).toBe(370)
-  })
-
-  test("keeps visibility isolated per project while sharing width", () => {
-    useRightSidebarStore.getState().togglePanel(PROJECT_ID, "git")
+  test("toggling is per project; size is shared", () => {
+    useRightSidebarStore.getState().toggleWidgets(PROJECT_ID)
     useRightSidebarStore.getState().setSize(430)
-    useRightSidebarStore.getState().togglePanel("project-2", "browser")
 
-    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({
-      rightPanel: "git",
-    })
-    expect(useRightSidebarStore.getState().projects["project-2"]).toEqual({
-      rightPanel: "browser",
-    })
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({ widgetsOpen: true })
+    expect(useRightSidebarStore.getState().projects["project-2"]).toBeUndefined()
     expect(useRightSidebarStore.getState().size).toBe(430)
+
+    useRightSidebarStore.getState().toggleWidgets(PROJECT_ID)
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({ widgetsOpen: false })
   })
 
-  test("only one right panel is active per project", () => {
-    useRightSidebarStore.getState().togglePanel(PROJECT_ID, "git")
-    expect(useRightSidebarStore.getState().projects[PROJECT_ID]?.rightPanel).toBe("git")
-
-    useRightSidebarStore.getState().togglePanel(PROJECT_ID, "browser")
-    expect(useRightSidebarStore.getState().projects[PROJECT_ID]?.rightPanel).toBe("browser")
-
-    useRightSidebarStore.getState().togglePanel(PROJECT_ID, "browser")
-    expect(useRightSidebarStore.getState().projects[PROJECT_ID]?.rightPanel).toBe("hidden")
+  test("open and hide are idempotent", () => {
+    const store = useRightSidebarStore.getState()
+    store.openWidgets(PROJECT_ID)
+    store.openWidgets(PROJECT_ID)
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({ widgetsOpen: true })
+    store.hideWidgets(PROJECT_ID)
+    store.hideWidgets(PROJECT_ID)
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({ widgetsOpen: false })
   })
 
-  test("clamps resized widths", () => {
+  test("a chat key keeps each chat's state apart from the project's and from other chats", () => {
+    const store = useRightSidebarStore.getState()
+    store.toggleWidgets(PROJECT_ID, "chat-a")
+
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({ widgetsOpen: false, chats: { "chat-a": true } })
+
+    store.toggleWidgets(PROJECT_ID)
+    store.hideWidgets(PROJECT_ID, "chat-a")
+    store.openWidgets(PROJECT_ID, "chat-b")
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toEqual({
+      widgetsOpen: true,
+      chats: { "chat-a": false, "chat-b": true },
+    })
+
+    store.clearProject(PROJECT_ID)
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toBeUndefined()
+  })
+
+  test("clamps the size between the minimum and the left sidebar's maximum", () => {
     useRightSidebarStore.getState().setSize(100)
     expect(useRightSidebarStore.getState().size).toBe(RIGHT_SIDEBAR_MIN_WIDTH_PX)
 
-    useRightSidebarStore.getState().setSize(560)
-    expect(useRightSidebarStore.getState().size).toBe(560)
+    useRightSidebarStore.getState().setSize(480)
+    expect(useRightSidebarStore.getState().size).toBe(480)
+
+    useRightSidebarStore.getState().setSize(900)
+    expect(useRightSidebarStore.getState().size).toBe(RIGHT_SIDEBAR_MAX_WIDTH_PX)
   })
 
-  test("clearing a project removes its saved drawer state without resetting global width", () => {
-    useRightSidebarStore.getState().togglePanel(PROJECT_ID, "git")
+  test("clearProject drops a project's state but keeps the shared size", () => {
+    useRightSidebarStore.getState().toggleWidgets(PROJECT_ID)
     useRightSidebarStore.getState().setSize(440)
-    useRightSidebarStore.getState().setViewMode(PROJECT_ID, "changes")
-    useRightSidebarStore.getState().navigateBrowser(PROJECT_ID, "localhost:3000")
+    useRightSidebarStore.getState().setWidgetExpanded(PROJECT_ID, "changes", true)
     useRightSidebarStore.getState().clearProject(PROJECT_ID)
 
-    const visibility = useRightSidebarStore.getState().projects[PROJECT_ID] ?? getDefaultRightSidebarVisibilityState()
-    expect(visibility.rightPanel).toBe("hidden")
-    expect(useRightSidebarStore.getState().size).toBe(440)
+    expect(useRightSidebarStore.getState().projects[PROJECT_ID]).toBeUndefined()
     expect(useRightSidebarStore.getState().projectUi[PROJECT_ID]).toBeUndefined()
-    expect(useRightSidebarStore.getState().projectBrowser[PROJECT_ID]).toBeUndefined()
+    expect(useRightSidebarStore.getState().size).toBe(440)
   })
 
-  test("migration preserves per-project visibility and resets width to the pixel default", async () => {
-    const migrated = await migrateRightSidebarStore({
-        projects: {
-          [PROJECT_ID]: {
-            isVisible: true,
-            size: 34,
-          },
-          "project-2": {
-            isVisible: false,
-            size: 26,
-          },
-        },
-      })
-
-    expect(migrated).toEqual({
-      size: DEFAULT_RIGHT_SIDEBAR_SIZE,
-      projects: {
-        [PROJECT_ID]: {
-          rightPanel: "git",
-        },
-        "project-2": {
-          rightPanel: "hidden",
-        },
-      },
-      projectUi: {},
-      projectBrowser: {},
-    })
-  })
-
-  test("migration preserves persisted right panel choices", async () => {
-    const migrated = await migrateRightSidebarStore({
-      projects: {
-        [PROJECT_ID]: {
-          rightPanel: "browser",
-        },
-      },
-    })
-
-    expect(migrated).toEqual({
-      size: DEFAULT_RIGHT_SIDEBAR_SIZE,
-      projects: {
-        [PROJECT_ID]: {
-          rightPanel: "browser",
-        },
-      },
-      projectUi: {},
-      projectBrowser: {},
-    })
-  })
-
-  test("keeps browser state isolated per project", () => {
-    useRightSidebarStore.getState().navigateBrowser(PROJECT_ID, "localhost:3000")
-    useRightSidebarStore.getState().navigateBrowser(PROJECT_ID, "http://localhost:3001")
-    useRightSidebarStore.getState().setBrowserZoom(PROJECT_ID, 1.25)
-
-    useRightSidebarStore.getState().navigateBrowser("project-2", "localhost:4000")
-
-    expect(useRightSidebarStore.getState().projectBrowser[PROJECT_ID]).toEqual({
-      address: "http://localhost:3001",
-      history: ["http://localhost:3000", "http://localhost:3001"],
-      historyIndex: 1,
-      zoom: 1.3,
-    })
-    expect(useRightSidebarStore.getState().projectBrowser["project-2"]).toEqual({
-      address: "http://localhost:4000",
-      history: ["http://localhost:4000"],
-      historyIndex: 0,
-      zoom: 1,
-    })
-  })
-
-  test("keeps sidebar ui state isolated per project", () => {
-    useRightSidebarStore.getState().setViewMode(PROJECT_ID, "changes")
+  test("keeps widget ui state isolated per project", () => {
+    useRightSidebarStore.getState().setWidgetExpanded(PROJECT_ID, "changes", true)
     useRightSidebarStore.getState().setCommitDraft(PROJECT_ID, { summary: "feat: one", description: "body" })
-    useRightSidebarStore.getState().reconcileCollapsedPaths(PROJECT_ID, ["a.ts"])
-    useRightSidebarStore.getState().toggleCollapsedPath(PROJECT_ID, "a.ts")
 
-    useRightSidebarStore.getState().setViewMode("project-2", "history")
     useRightSidebarStore.getState().setCommitDraft("project-2", { summary: "feat: two", description: "" })
 
     expect(useRightSidebarStore.getState().projectUi[PROJECT_ID]).toEqual({
-      viewMode: "changes",
+      expanded: { changes: true },
       summary: "feat: one",
       description: "body",
-      collapsedPaths: { "a.ts": false },
     })
     expect(useRightSidebarStore.getState().projectUi["project-2"]).toEqual({
-      viewMode: "history",
+      expanded: {},
       summary: "feat: two",
       description: "",
-      collapsedPaths: {},
     })
   })
 
-  test("migration resets persisted global size and preserves project ui", async () => {
-    const migrated = await migrateRightSidebarStore({
-      size: 44,
-      projects: {
-        [PROJECT_ID]: {
-          isVisible: true,
-          size: 34,
+  describe("migration to widgets (v8)", () => {
+    test("any open panel, or the legacy isVisible flag, means the widgets are open", () => {
+      const migrated = migrateRightSidebarStore({
+        projects: {
+          git: { rightPanel: "git" },
+          browser: { rightPanel: "browser" },
+          hidden: { rightPanel: "hidden" },
+          legacyOpen: { isVisible: true, size: 34 },
+          legacyClosed: { isVisible: false, size: 26 },
         },
-      },
-      projectUi: {
-        [PROJECT_ID]: {
-          viewMode: "changes",
-          collapsedPaths: { "a.ts": false },
-          summary: "feat: one",
-          description: "body",
-        },
-      },
+      }, 7)
+
+      expect(migrated.projects).toEqual({
+        git: { widgetsOpen: true },
+        browser: { widgetsOpen: true },
+        hidden: { widgetsOpen: false },
+        legacyOpen: { widgetsOpen: true },
+        legacyClosed: { widgetsOpen: false },
+      })
     })
 
-    expect(migrated).toEqual({
-      size: DEFAULT_RIGHT_SIDEBAR_SIZE,
-      projects: {
-        [PROJECT_ID]: {
-          rightPanel: "git",
+    test("keeps the commit draft; drops collapsed paths, the history picker and the browser", () => {
+      const migrated = migrateRightSidebarStore({
+        projects: {},
+        projectUi: {
+          [PROJECT_ID]: {
+            viewMode: "changes",
+            collapsedPaths: { "a.ts": false },
+            summary: "feat: one",
+            description: "body",
+          },
         },
-      },
-      projectUi: {
-        [PROJECT_ID]: {
-          viewMode: "changes",
-          collapsedPaths: { "a.ts": false },
-          summary: "feat: one",
-          description: "body",
+        projectBrowser: { [PROJECT_ID]: { address: "http://localhost:3000" } },
+      }, 7)
+
+      expect(migrated).toEqual({
+        size: DEFAULT_RIGHT_SIDEBAR_SIZE,
+        projects: {},
+        projectUi: {
+          [PROJECT_ID]: {
+            expanded: {},
+            summary: "feat: one",
+            description: "body",
+          },
         },
-      },
-      projectBrowser: {},
+        chatViewers: {},
+      })
+    })
+
+    test("keeps a v7 pixel width but resets an older percentage", () => {
+      expect(migrateRightSidebarStore({ size: 520 }, 7).size).toBe(520)
+      expect(migrateRightSidebarStore({ size: 44 }, 6).size).toBe(DEFAULT_RIGHT_SIDEBAR_SIZE)
+      expect(migrateRightSidebarStore(null).size).toBe(DEFAULT_RIGHT_SIDEBAR_SIZE)
     })
   })
 })

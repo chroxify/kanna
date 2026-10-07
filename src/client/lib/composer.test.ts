@@ -150,10 +150,43 @@ describe("applyModelToComposerState", () => {
     // Effort is clamped/normalized for the selected model rather than kept blindly.
     expect(typeof (next.modelOptions as { reasoningEffort: string }).reasoningEffort).toBe("string")
   })
+
+  test("codex model change clamps effort to a runtime-discovered model's own list", () => {
+    const state: ComposerState = {
+      provider: "codex",
+      model: providerDefaults.codex.model,
+      modelOptions: { ...providerDefaults.codex.modelOptions, reasoningEffort: "ultra" },
+      planMode: false,
+      autoPlan: false,
+    }
+    const staticCodex = PROVIDERS.find((provider) => provider.id === "codex")!
+    // A model the static catalog has no row for, as the app-server reports it.
+    const liveCodex = {
+      ...staticCodex,
+      models: [
+        ...staticCodex.models,
+        {
+          id: "gpt-6-luna",
+          label: "GPT-6 Luna",
+          supportsEffort: true,
+          supportedReasoningEfforts: [
+            { id: "low", label: "Low" },
+            { id: "max", label: "Max" },
+          ],
+          defaultReasoningEffort: "low",
+        },
+      ],
+    }
+
+    // Without the live entry the static fallback list lets "ultra" through.
+    expect(applyModelToComposerState(state, "gpt-6-luna").modelOptions).toMatchObject({ reasoningEffort: "ultra" })
+    expect(applyModelToComposerState(state, "gpt-6-luna", liveCodex).modelOptions).toMatchObject({ reasoningEffort: "max" })
+  })
 })
 
 describe("deriveComposerOptionControls", () => {
   const claudeConfig = PROVIDERS.find((provider) => provider.id === "claude")!
+  const grokConfig = PROVIDERS.find((provider) => provider.id === "grok")!
   const cursorConfig = PROVIDERS.find((provider) => provider.id === "cursor")!
   const codexConfig = PROVIDERS.find((provider) => provider.id === "codex")!
 
@@ -171,6 +204,24 @@ describe("deriveComposerOptionControls", () => {
     // "Max" reasoning is disabled unless the model supports it.
     const max = controls.reasoning?.options.find((option) => option.id === "max")
     expect(max?.disabled).toBe(!supportsClaudeMaxReasoningEffort(modelWithWindow.id))
+  })
+
+  test("grok exposes reasoning and plan mode, not auto-plan or fast mode", () => {
+    const grokModel = grokConfig.models[0]!
+    const controls = deriveComposerOptionControls(
+      {
+        provider: "grok",
+        model: grokModel.id,
+        modelOptions: { reasoningEffort: "high" },
+        planMode: false,
+        autoPlan: false,
+      } as ComposerState,
+      grokConfig,
+    )
+    expect(controls.reasoning?.options.map((option) => option.id)).toEqual(["low", "medium", "high"])
+    expect(controls.mode?.options).toEqual(["full-access", "plan"])
+    expect(controls.fastMode).toBeNull()
+    expect(controls.contextWindow).toBeNull()
   })
 
   test("cursor has no reasoning selector", () => {

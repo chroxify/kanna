@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties } from "react"
 import {
   MessageScroller,
   MessageScrollerContent,
@@ -10,15 +10,20 @@ import {
 import { ArrowDown, Flower, Upload } from "lucide-react"
 import { DrainingIndicator } from "../../components/messages/DrainingIndicator"
 import { QueuedUserMessage } from "../../components/messages/QueuedUserMessage"
+import { delegationsFor, noteDelegation } from "../../components/messages/SourcedMessage"
+import { messageNamingParent, ParentChatLink } from "../../components/messages/ParentChatLink"
+import { ReplyQuoteProjectContext } from "../../components/messages/ChatToolMessage"
+import { useParentChatId, useProjectIdForChat } from "../../stores/sidebarStore"
+import type { ChatToolCall } from "../../components/messages/ChatToolMessage"
 import { OpenLocalLinkProvider, type OpenLocalLinkTarget } from "../../components/messages/shared"
 import { ProcessingMessage } from "../../components/messages/ProcessingMessage"
 import { ContextMenu, ContextMenuTrigger } from "../../components/ui/context-menu"
-import { OpenExternalContextMenuContent, openContextMenuFromButton } from "../../components/open-external-menu"
+import { OpenExternalContextMenuContent } from "../../components/open-external-menu"
 import { TRANSCRIPT_PADDING_BOTTOM_OFFSET } from "../kannaStateHelpers"
 import { useScrollbarGutterVar } from "../../hooks/useScrollbarGutterVar"
 import { cn } from "../../lib/utils"
 import type { ChatJumpRole } from "../../lib/chat-navigation"
-import { formatPathWithTilde, shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
+import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
 import {
   buildResolvedTranscriptRows,
   KannaTranscriptRow,
@@ -44,6 +49,7 @@ import { TranscriptMinimap } from "./TranscriptMinimap"
 import { buildTranscriptTurns, type TranscriptTurn } from "./transcriptTurns"
 import { EmptyStateAuthCards } from "./EmptyStateAuthCards"
 import { EmptyStateUsageCards } from "./EmptyStateUsageCards"
+import { EmptyStateProjectChats, EmptyStateProjectPicker } from "./EmptyStateProject"
 import {
   CHAT_NAVBAR_OFFSET_PX,
   EMPTY_STATE_TEXT,
@@ -270,6 +276,10 @@ interface ChatTranscriptViewportProps {
   /** When provided, the empty state shows live harness usage cards. */
   socket?: KannaSocket
   emptyStateProjectPath?: string | null
+  /** The empty state lists this project's recent chats. */
+  emptyStateProjectId?: string | null
+  /** The empty state shows harness usage cards. */
+  showEmptyStateUsage?: boolean
   onOpenProjectExternal?: (action: OpenExternalAction, editor?: EditorOpenSettings, terminal?: TerminalPreset) => void
   editorPreset?: EditorPreset
   editorCommandTemplate?: string
@@ -475,6 +485,8 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   showEmptyState,
   socket,
   emptyStateProjectPath,
+  emptyStateProjectId,
+  showEmptyStateUsage = false,
   onOpenProjectExternal,
   editorPreset = "cursor",
   editorCommandTemplate,
@@ -501,6 +513,14 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   const [toolGroupExpanded, setToolGroupExpanded] = useState<Record<string, boolean>>({})
   const [localLinkMenuTarget, setLocalLinkMenuTarget] = useState<OpenLocalLinkTarget | null>(null)
   const isMac = platform === "darwin"
+  // Whether the empty state plays its entrance, fixed when it first shows in
+  // this viewport. The viewport is keyed per chat, so one new chat after
+  // another remounts it; typing already done then means it was on screen a
+  // moment ago, and it appears in place instead of fading in again.
+  const emptyStateAnimatesInRef = useRef<boolean | null>(null)
+  if (!showEmptyState) emptyStateAnimatesInRef.current = null
+  else if (emptyStateAnimatesInRef.current === null) emptyStateAnimatesInRef.current = !isEmptyStateTypingComplete
+  const emptyStateAnimatesIn = emptyStateAnimatesInRef.current ?? false
 
   const rawRows = useMemo(() => buildResolvedTranscriptRows(messages, {
     isLoading: isProcessing,
@@ -508,6 +528,15 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     latestToolIds,
   }), [isProcessing, latestToolIds, localPath, messages])
   const resolvedRows = useStableResolvedRows(rawRows)
+
+  // The calls a queued report answers, for the quote in its bubble. The queue
+  // comes after everything loaded, so the newest call to each chat is the one.
+  const queuedDelegations = useMemo(() => {
+    if (!queuedMessages.some((message) => message.source?.kind === "report")) return null
+    const latest = new Map<string, ChatToolCall>()
+    for (const message of messages) noteDelegation(latest, message)
+    return latest
+  }, [messages, queuedMessages])
 
   useEffect(() => {
     setToolGroupExpanded({})
@@ -729,7 +758,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     if (!jumpRequest || handledJumpRequestIdRef.current === jumpRequest.requestId) return null
     handledJumpRequestIdRef.current = jumpRequest.requestId
     onJumpRequestHandled?.(jumpRequest.requestId)
-    const target = resolveJumpTarget(resolvedRows, jumpRequest.role)
+    const target = resolveJumpTarget(resolvedRows, jumpRequest.target)
     return target?.kind === "pin" ? prepareJumpToRow(target.rowId) : target
   }, [jumpRequest, onJumpRequestHandled, prepareJumpToRow, resolvedRows])
 
@@ -837,6 +866,64 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     onReportReadAnchor(messageId, isAtEnd, () => measureReadAnchorLayout(viewportRef.current, row.id, headerOffsetPx))
   }, [headerOffsetPx, onReportReadAnchor])
 
+  /**
+   * The first loaded row and where it sat when older rows were asked for.
+   *
+   * The scroller keeps its position across prepends by watching its first
+   * child, but the first child here is the list header (which holds the
+   * button), so from its point of view nothing was prepended. The
+   * correction is done here instead: once older rows land, the row that was
+   * first is moved back to the same offset it had, in the same frame.
+   */
+  const prependAnchorRef = useRef<{ rowId: string; top: number } | null>(null)
+
+  const captureFirstRow = useCallback(() => {
+    const first = resolvedRowsRef.current[0]
+    const viewport = viewportRef.current
+    const row = first && viewport?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`)
+    if (!first || !viewport || !row) return
+    prependAnchorRef.current = { rowId: first.id, top: row.getBoundingClientRect().top - viewport.getBoundingClientRect().top }
+  }, [])
+
+  // Read from refs so the scroll listener is not re-attached every time a
+  // load starts or finishes.
+  const hasOlderMessagesRef = useRef(hasOlderMessages)
+  hasOlderMessagesRef.current = hasOlderMessages
+  const isLoadingOlderMessagesRef = useRef(isLoadingOlderMessages)
+  isLoadingOlderMessagesRef.current = isLoadingOlderMessages
+  const onLoadOlderMessagesRef = useRef(onLoadOlderMessages)
+  onLoadOlderMessagesRef.current = onLoadOlderMessages
+  /**
+   * The first row when the last automatic load was asked for.
+   *
+   * The older slice is pushed on the subscription, apart from the command's
+   * ack, so "not loading" does not yet mean the rows have landed. Until the
+   * first row changes, the reader is still at the same top and another scroll
+   * event would ask for the same page again. A load that fails or brings
+   * nothing leaves this set, so a failure is not retried on every scroll; the
+   * Load More button still works.
+   */
+  const autoLoadFirstRowIdRef = useRef<string | null>(null)
+
+  /**
+   * Load the page before the window once the reader nears the top.
+   *
+   * Half a screen early rather than at the very edge, so the page is usually
+   * in before the reader runs out of rows. Only the reader's own scrolling
+   * triggers it: a restore or jump that lands near the top did not ask for
+   * more history.
+   */
+  const maybeLoadOlderOnScroll = useCallback((scrollNode: HTMLElement) => {
+    if (!hasUserScrolledRef.current) return
+    if (!hasOlderMessagesRef.current || isLoadingOlderMessagesRef.current) return
+    if (scrollNode.scrollTop > scrollNode.clientHeight / 2) return
+    const firstRowId = resolvedRowsRef.current[0]?.id
+    if (!firstRowId || autoLoadFirstRowIdRef.current === firstRowId) return
+    autoLoadFirstRowIdRef.current = firstRowId
+    captureFirstRow()
+    void onLoadOlderMessagesRef.current?.()
+  }, [captureFirstRow])
+
   const handleScroll = useCallback(() => {
     const scrollNode = viewportRef.current
     if (!scrollNode) return
@@ -845,7 +932,8 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     onIsAtEndChange(isAtEnd)
     reportTopVisibleMessage(isAtEnd)
     setTranscriptOverflows(scrollNode.scrollHeight - scrollNode.clientHeight > OVERFLOW_EPSILON_PX)
-  }, [onIsAtEndChange, reportTopVisibleMessage])
+    maybeLoadOlderOnScroll(scrollNode)
+  }, [maybeLoadOlderOnScroll, onIsAtEndChange, reportTopVisibleMessage])
 
   useEffect(() => {
     const scrollNode = viewportRef.current
@@ -940,25 +1028,6 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     applyScrollTarget(prepareJumpToRow(rowId))
   }, [applyScrollTarget, prepareJumpToRow, resolvedRows, rowIndexByMessageId])
 
-  /**
-   * The first loaded row and where it sat when "Load More" was clicked.
-   *
-   * The scroller keeps its position across prepends by watching its first
-   * child, but the first child here is the list header (which holds the
-   * button), so from its point of view nothing was prepended. The
-   * correction is done here instead: once older rows land, the row that was
-   * first is moved back to the same offset it had, in the same frame.
-   */
-  const prependAnchorRef = useRef<{ rowId: string; top: number } | null>(null)
-
-  const captureFirstRow = useCallback(() => {
-    const first = resolvedRows[0]
-    const viewport = viewportRef.current
-    const row = first && viewport?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`)
-    if (!first || !viewport || !row) return
-    prependAnchorRef.current = { rowId: first.id, top: row.getBoundingClientRect().top - viewport.getBoundingClientRect().top }
-  }, [resolvedRows])
-
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current
     if (!anchor) return
@@ -1009,8 +1078,28 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     [transcriptPaddingBottom]
   )
 
+  // A sub-chat's way back to its parent is the quote on its opening message.
+  // Where that message is not on screen to carry it, the same quote stands
+  // alone as the first item. See ParentChatLink.
+  const parentChatId = useParentChatId(activeChatId)
+  // For a quote of another chat to say when that chat is in another project.
+  const currentProjectId = useProjectIdForChat(activeChatId)
+  const showsParentLink = useMemo(
+    () => parentChatId !== null && messageNamingParent(messages, parentChatId, hasOlderMessages) === null,
+    [hasOlderMessages, messages, parentChatId],
+  )
+
   const listHeader = (
-    <div className="mx-auto w-full max-w-[800px]" style={{ paddingTop: `${headerOffsetPx}px` }}>
+    <div style={{ paddingTop: `${headerOffsetPx}px` }}>
+      {parentChatId && showsParentLink ? (
+        // Above Load More, so it is the first thing however much is loaded.
+        // A row's box, and 20px clear of the row under it, as rows are of
+        // each other. From the left edge, as wide as what it says.
+        <div className="mx-auto flex w-full max-w-[816px] justify-start px-2 pb-3 pt-1">
+          <ParentChatLink parentChatId={parentChatId} />
+        </div>
+      ) : null}
+      <div className="mx-auto w-full max-w-[800px]">
       {hasOlderMessages ? (
         // Same box as a transcript row so the button lines up with the
         // column below it. The scroller treats what lands above the first
@@ -1020,12 +1109,13 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
             type="button"
             onClick={handleLoadOlderClick}
             disabled={isLoadingOlderMessages}
-            className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+            className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
           >
             {isLoadingOlderMessages ? "Loading…" : "Load More"}
           </button>
         </div>
       ) : null}
+      </div>
     </div>
   )
 
@@ -1036,13 +1126,19 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   // would sit 8px left of every tool icon above it.
   const listFooter = (
     <div className="mx-auto w-full max-w-[816px] px-2">
-      {isProcessing ? <ProcessingMessage status={runtimeStatus ?? undefined} /> : null}
+      {/* A chat waiting on a subagent has no turn to stop or queue behind, so
+          it is not processing. It is not finished either, and this line is
+          what says so here. A draining stream says it with its own, below. */}
+      {isProcessing || (runtimeStatus === "waiting_on_subagent" && !isDraining)
+        ? <ProcessingMessage status={runtimeStatus ?? undefined} />
+        : null}
       {queuedMessages.map((message) => (
         <QueuedUserMessage
           key={message.id}
           message={message}
-          onRemove={() => void onRemoveQueuedMessage(message.id)}
-          onSendNow={() => void onSteerQueuedMessage(message.id)}
+          delegations={queuedDelegations ? delegationsFor(queuedDelegations, message.source) : undefined}
+          onRemove={() => onRemoveQueuedMessage(message.id)}
+          onSendNow={() => onSteerQueuedMessage(message.id)}
         />
       ))}
       {!isProcessing && isDraining ? (
@@ -1059,10 +1155,12 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   return (
     <>
       <OpenLocalLinkProvider onOpenLocalLink={handleOpenLocalLinkClick}>
+        <ReplyQuoteProjectContext.Provider value={currentProjectId}>
         <MessageScroller className="h-full flex-1">
           <MessageScrollerViewport
             ref={viewportRef}
-            className="h-full overflow-x-hidden overscroll-y-contain px-3"
+            data-navbar-scroller
+            className="h-full overflow-x-hidden overscroll-y-contain px-3 scrollbar-hide"
             style={{ scrollPaddingTop: headerOffsetPx }}
           >
             <MessageScrollerContent style={contentContainerStyle}>
@@ -1083,6 +1181,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
             </MessageScrollerContent>
           </MessageScrollerViewport>
         </MessageScroller>
+        </ReplyQuoteProjectContext.Provider>
       </OpenLocalLinkProvider>
 
       {showEmptyState ? null : (
@@ -1134,25 +1233,42 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
 
       {showEmptyState ? (
         <div
-          className="pointer-events-none absolute inset-x-4 animate-fade-in"
+          className={cn("pointer-events-none absolute inset-x-4", emptyStateAnimatesIn && "animate-fade-in")}
           style={{
-            top: headerOffsetPx,
+            // To the window's top, not the header's bottom: scrolled, the
+            // content passes under the header and its fade, like the
+            // transcript does, instead of being cut off at a hard edge.
+            top: 0,
             // Align the scroll area's bottom to the top of the chat input.
             // transcriptPaddingBottom carries an extra clearance offset the
             // message list needs; the empty state shouldn't include it.
             bottom: Math.max(0, transcriptPaddingBottom - TRANSCRIPT_PADDING_BOTTOM_OFFSET),
           }}
         >
-          <div className="pointer-events-auto mx-auto flex h-full max-w-[740px] flex-col items-center overflow-y-auto">
+          {/* The composer's width, so the project card lines up with it. The
+              offset rides along as a variable for what sticks (the chat
+              search), which pins at the header's bottom edge. */}
+          <div
+            data-empty-state-scroller
+            className="pointer-events-auto mx-auto flex h-full max-w-[840px] flex-col items-center overflow-y-auto scrollbar-hide"
+            style={{ "--empty-state-header-offset": `${headerOffsetPx ?? 0}px` } as CSSProperties}
+          >
+            {/* The header's height as a spacer, not as the scroller's
+                padding: the resting layout still centres below the header,
+                but a sticky child's `top` then counts from the scroller's
+                edge alone. Browsers also inset sticky by the scroller's
+                padding, which pinned the search twice as far down. */}
+            <div aria-hidden className="w-full shrink-0" style={{ height: headerOffsetPx ?? 0 }} />
             {/* Flexbox-only center-or-scroll: my-auto centers the group when
                 there's room, but its auto margins collapse once the content
                 outgrows the container, so overflow-y-auto scrolls it from the
                 top instead of clipping — no height measurement. */}
             <div className="my-auto flex w-full flex-col items-center gap-[6vh] py-6">
+            <div className="flex w-full flex-col items-center gap-4">
             <div className="flex flex-col items-center justify-center gap-4 text-muted-foreground opacity-70">
-              <Flower strokeWidth={1.5} className="kanna-empty-state-flower size-8 text-muted-foreground" />
+              <Flower strokeWidth={1.5} className={cn("size-8 text-muted-foreground", emptyStateAnimatesIn && "kanna-empty-state-flower")} />
               <div
-                className="kanna-empty-state-text flex max-w-xs items-center text-center text-base font-normal text-muted-foreground"
+                className={cn(emptyStateAnimatesIn && "kanna-empty-state-text", "flex max-w-xs items-center text-center text-base font-normal text-muted-foreground")}
                 aria-label={EMPTY_STATE_TEXT}
               >
                 <span className="relative inline-grid place-items-start">
@@ -1171,38 +1287,29 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
                   </span>
                 </span>
               </div>
-              {emptyStateProjectPath && onOpenProjectExternal ? (
-                <ContextMenu>
-                  <ContextMenuTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={openContextMenuFromButton}
-                      title={emptyStateProjectPath}
-                      className={cn(
-                        "max-w-xs truncate rounded-md px-2 py-1 font-mono text-xs text-muted-foreground/80 transition-all duration-300 hover:bg-muted hover:text-foreground",
-                        isEmptyStateTypingComplete
-                          ? "pointer-events-auto opacity-100"
-                          : "pointer-events-none opacity-0",
-                      )}
-                    >
-                      {formatPathWithTilde(emptyStateProjectPath)}
-                    </button>
-                  </ContextMenuTrigger>
-                  <OpenExternalContextMenuContent
-                    isMac={isMac}
-                    editorPreset={editorPreset}
-                    editorCommandTemplate={editorCommandTemplate}
-                    includeFinder
-                    includeTerminal
-                    onOpenExternal={onOpenProjectExternal}
-                  />
-                </ContextMenu>
-              ) : null}
             </div>
+            {/* Where the chat will start, under the line that asks what to
+                build. Outside the dimmed group so it reads as a control. */}
+            {emptyStateProjectId && emptyStateProjectPath ? (
+              <div
+                className={cn(
+                  "flex max-w-full justify-center transition-opacity duration-300",
+                  isEmptyStateTypingComplete
+                    ? "pointer-events-auto opacity-100"
+                    : "pointer-events-none opacity-0",
+                )}
+              >
+                <EmptyStateProjectPicker localPath={emptyStateProjectPath} />
+              </div>
+            ) : null}
+            </div>
+            {/* Everything below sits on the page background, like the
+                sidebars' lists: onboarding first while it applies, then the
+                project's chats. */}
             {socket ? (
               <div
                 className={cn(
-                  "mt-8 flex w-full justify-center transition-opacity duration-500",
+                  "flex w-full justify-center transition-opacity duration-500",
                   isEmptyStateTypingComplete
                     ? "pointer-events-auto opacity-100"
                     : "pointer-events-none opacity-0",
@@ -1210,7 +1317,18 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
               >
                 <div className="w-full space-y-3">
                   <EmptyStateAuthCards />
-                  <EmptyStateUsageCards socket={socket} activeChatId={activeChatId} />
+                  {/* On desktop usage lives in the widget column, which a new
+                      chat opens; a phone's column is a closed sheet. */}
+                  {showEmptyStateUsage ? <EmptyStateUsageCards socket={socket} activeChatId={activeChatId} /> : null}
+                  {emptyStateProjectId ? (
+                    <EmptyStateProjectChats
+                      projectId={emptyStateProjectId}
+                      activeChatId={activeChatId}
+                      // Only on the entrance that types the hero line out;
+                      // a page that opens already typed shows the list as is.
+                      cascadeIn={emptyStateAnimatesIn && isEmptyStateTypingComplete}
+                    />
+                  ) : null}
                 </div>
               </div>
             ) : null}

@@ -3,7 +3,16 @@ import { DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../../shared/type
 import { Input } from "../../components/ui/input"
 import { KEYBINDING_ACTION_LABELS, formatKeybindingInput, getResolvedKeybindings, parseKeybindingInput } from "../../lib/keybindings"
 import type { KannaState } from "../useKannaState"
-import { handleSettingsInputKeyDown, SettingsErrorBanner, SettingsRow } from "./shared"
+import { cn } from "../../lib/utils"
+import {
+  handleSettingsInputKeyDown,
+  SETTINGS_CONTROL_CLASS,
+  SETTINGS_INLINE_ACTION_CLASS,
+  SettingsErrorBanner,
+  SettingsGroup,
+  SettingsNotice,
+  SettingsRow,
+} from "./shared"
 
 const KEYBINDING_ACTIONS = Object.keys(KEYBINDING_ACTION_LABELS) as KeybindingAction[]
 
@@ -71,44 +80,42 @@ export function KeybindingsSection({
   }
 
   return (
-    <div className="border-b border-border">
+    <>
       {keybindingsError ? <SettingsErrorBanner message={keybindingsError} /> : null}
       {resolvedKeybindings.warning ? (
-        <div className="mb-4 rounded-lg border border-border bg-card/30 px-4 py-3 text-sm text-muted-foreground">
-          {resolvedKeybindings.warning}
-        </div>
+        <SettingsNotice tone="warning" className="mb-6">{resolvedKeybindings.warning}</SettingsNotice>
       ) : null}
-      {KEYBINDING_ACTIONS.map((action, index) => {
-        const defaultValue = formatKeybindingInput(DEFAULT_KEYBINDINGS[action])
-        const currentValue = keybindingDrafts[action] ?? ""
-        const showRestore = currentValue !== defaultValue
+      <SettingsGroup>
+        {KEYBINDING_ACTIONS.map((action) => {
+          const defaultValue = formatKeybindingInput(DEFAULT_KEYBINDINGS[action])
+          const currentValue = keybindingDrafts[action] ?? ""
+          const showRestore = currentValue !== defaultValue
 
-        return (
-          <SettingsRow
-            key={action}
-            title={KEYBINDING_ACTION_LABELS[action]}
-            description={(
-              <>
-                <span>Comma-separated shortcuts.</span>
-                {showRestore ? (
-                  <>
-                    <span> </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void restoreDefaultKeybinding(action)
-                      }}
-                      className="inline rounded text-foreground hover:text-foreground/80"
-                    >
-                      Restore: {defaultValue}
-                    </button>
-                  </>
-                ) : null}
-              </>
-            )}
-            bordered={index !== 0}
-          >
-            <div className="flex min-w-0 max-w-[420px] flex-1 flex-col items-stretch gap-2">
+          return (
+            <SettingsRow
+              key={action}
+              wideControl
+              title={KEYBINDING_ACTION_LABELS[action]}
+              description={(
+                <>
+                  <span>Comma-separated shortcuts.</span>
+                  {showRestore ? (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void restoreDefaultKeybinding(action)
+                        }}
+                        className={SETTINGS_INLINE_ACTION_CLASS}
+                      >
+                        Reset to {defaultValue}
+                      </button>
+                    </>
+                  ) : null}
+                </>
+              )}
+            >
               <Input
                 type="text"
                 value={currentValue}
@@ -122,12 +129,14 @@ export function KeybindingsSection({
                 onKeyDown={(event) => handleSettingsInputKeyDown(event, () => {
                   void commitKeybindings()
                 })}
-                className="font-mono"
+                spellCheck={false}
+                autoComplete="off"
+                className={cn(SETTINGS_CONTROL_CLASS, "font-mono")}
               />
-            </div>
-          </SettingsRow>
-        )
-      })}
-    </div>
+            </SettingsRow>
+          )
+        })}
+      </SettingsGroup>
+    </>
   )
 }

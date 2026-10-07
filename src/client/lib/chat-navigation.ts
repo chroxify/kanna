@@ -25,22 +25,32 @@ import { generateUUID } from "./utils"
  */
 export type ChatJumpRole = "prompt" | "reply"
 
+/**
+ * Where to land: an end of the last exchange, or a named tool call (the
+ * Agents widget's rows, which know the call that spawned each agent).
+ */
+export type ChatJumpTarget = ChatJumpRole | { toolId: string }
+
 export interface ChatJumpLocationState {
-  jumpToRole: ChatJumpRole
+  jumpToRole?: ChatJumpRole
+  jumpToToolId?: string
   jumpRequestId: string
 }
 
-export function buildChatJumpLocationState(role: ChatJumpRole): ChatJumpLocationState {
+export function buildChatJumpLocationState(target: ChatJumpTarget): ChatJumpLocationState {
   // generateUUID, not crypto.randomUUID: the latter is secure-context only and
   // is undefined over plain http on a LAN/Tailscale hostname.
-  return { jumpToRole: role, jumpRequestId: generateUUID() }
+  return typeof target === "string"
+    ? { jumpToRole: target, jumpRequestId: generateUUID() }
+    : { jumpToToolId: target.toolId, jumpRequestId: generateUUID() }
 }
 
 /** Reads the jump out of an opaque `useLocation().state`, or null if absent. */
-export function readChatJumpLocationState(state: unknown): ChatJumpLocationState | null {
+export function readChatJumpLocationState(state: unknown): { target: ChatJumpTarget; requestId: string } | null {
   if (!state || typeof state !== "object") return null
-  const { jumpToRole, jumpRequestId } = state as Partial<ChatJumpLocationState>
-  if (jumpToRole !== "prompt" && jumpToRole !== "reply") return null
+  const { jumpToRole, jumpToToolId, jumpRequestId } = state as Partial<ChatJumpLocationState>
   if (typeof jumpRequestId !== "string" || !jumpRequestId) return null
-  return { jumpToRole, jumpRequestId }
+  if (jumpToRole === "prompt" || jumpToRole === "reply") return { target: jumpToRole, requestId: jumpRequestId }
+  if (typeof jumpToToolId === "string" && jumpToToolId) return { target: { toolId: jumpToToolId }, requestId: jumpRequestId }
+  return null
 }

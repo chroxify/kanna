@@ -1,14 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Download, Maximize2 } from "lucide-react"
+import { ChartColumn, Download, Maximize2 } from "lucide-react"
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, Pie, PieChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import type { ChartToolPayload } from "../../../shared/display-tools"
 import { CHART_COLORS, resolveChartKeys } from "../../../shared/display-tools"
 import { Button } from "../ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from "../ui/dialog"
+import { openViewer } from "../../stores/viewerStore"
+import { ViewerIconButton, ViewerSurface } from "../viewer/ViewerSurface"
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectItem } from "../ui/select"
 import "./chart-tool.css"
 
@@ -327,8 +324,13 @@ function ChartDataTable({
   )
 }
 
-export function ChartTool({ payload }: { payload: ChartToolPayload }) {
-  const [expanded, setExpanded] = useState(false)
+/**
+ * Everything a chart view needs from its payload: series, colors, the data
+ * table, legend state and CSV downloads. The inline card and the viewer's
+ * full-size chart each hold their own (hiding a series in one doesn't hide it
+ * in the other), but they draw from this one definition.
+ */
+function useChartModel(payload: ChartToolPayload) {
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set())
   const [activeLegendKey, setActiveLegendKey] = useState<string | null>(null)
   const [rowAggregateMode, setRowAggregateMode] = useState<AggregateMode>("avg")
@@ -371,15 +373,6 @@ export function ChartTool({ payload }: { payload: ChartToolPayload }) {
       }),
     }
   }, [config, data, firstRow, keys, payload.type, xKey])
-
-  useEffect(() => {
-    if (!expanded) return
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = "hidden"
-    return () => {
-      document.body.style.overflow = previousOverflow
-    }
-  }, [expanded])
 
   function toggleLegendKey(key: string) {
     setHiddenKeys((current) => {
@@ -470,6 +463,24 @@ export function ChartTool({ payload }: { payload: ChartToolPayload }) {
     </div>
   )
 
+  return {
+    keys,
+    chartTable,
+    chartFigure,
+    downloadCsv,
+    downloadTableCsv,
+    hiddenKeys,
+    toggleLegendKey,
+    setActiveLegendKey,
+    rowAggregateMode,
+    setRowAggregateMode,
+    columnAggregateMode,
+    setColumnAggregateMode,
+  }
+}
+
+export function ChartTool({ payload }: { payload: ChartToolPayload }) {
+  const { chartFigure, downloadCsv } = useChartModel(payload)
   return (
     <div className="chart-card">
       <div className="chart-card-header">
@@ -492,7 +503,9 @@ export function ChartTool({ payload }: { payload: ChartToolPayload }) {
             variant="ghost"
             size="icon-sm"
             type="button"
-            onClick={() => setExpanded(true)}
+            // Full size opens in the viewer, the same surface as a diff or an
+            // attachment, rather than a modal of the chart's own.
+            onClick={() => openViewer({ kind: "chart", payload })}
             title="Expand chart"
             className="text-muted-foreground hover:text-muted-foreground"
           >
@@ -501,45 +514,38 @@ export function ChartTool({ payload }: { payload: ChartToolPayload }) {
         </div>
       </div>
       {chartFigure("chart-body")}
-      <Dialog open={expanded} onOpenChange={setExpanded}>
-        <DialogContent
-          data-state={expanded ? "open" : undefined}
-          className="h-[90vh] w-[95vw] max-w-[1200px] gap-0 overflow-auto p-0"
-        >
-          <div className="flex items-start justify-between gap-4 border-b border-border p-4 pr-12">
-            <div>
-              <DialogTitle>{payload.title || "Chart"}</DialogTitle>
-              {payload.description ? <p className="mt-0.5 text-sm text-muted-foreground">{payload.description}</p> : null}
-            </div>
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                type="button"
-                onClick={downloadTableCsv}
-                title="Download CSV"
-                className="text-muted-foreground hover:text-muted-foreground"
-              >
-                <Download size={14} />
-              </Button>
-
-            </div>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-4 p-4">
-            {chartFigure("flex shrink-0 flex-col bg-card text-xs text-muted-foreground [&_.recharts-text]:fill-muted-foreground [&_.recharts-text]:text-xs")}
-            <ChartDataTable
-              table={chartTable}
-              rowAggregateMode={rowAggregateMode}
-              columnAggregateMode={columnAggregateMode}
-              hiddenKeys={hiddenKeys}
-              onRowAggregateModeChange={setRowAggregateMode}
-              onColumnAggregateModeChange={setColumnAggregateMode}
-              onToggleKey={toggleLegendKey}
-              onHoverKey={setActiveLegendKey}
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
+  )
+}
+
+/** A chart at full size in the viewer: the chart, its legend, and the data table under it. */
+export function ChartFullView({ payload, onClose }: { payload: ChartToolPayload; onClose: () => void }) {
+  const model = useChartModel(payload)
+  return (
+    <ViewerSurface
+      label={`Chart: ${payload.title || "Chart"}`}
+      icon={<ChartColumn />}
+      title={payload.title || "Chart"}
+      subtitle={payload.description}
+      onClose={onClose}
+      toolbar={<ViewerIconButton label="Download table as CSV" onClick={model.downloadTableCsv}><Download /></ViewerIconButton>}
+    >
+      <div className="flex min-h-full flex-col gap-4 p-4">
+        {/* Full width, but not full proportion: at the inline card's 3:2 a
+            wide viewer makes the chart ~800px tall and pushes its table off
+            screen. The cap keeps both in view; the chart widens, not grows. */}
+        {model.chartFigure("flex shrink-0 flex-col text-xs text-muted-foreground [&_.chart-render-area]:max-h-[min(55vh,460px)] [&_.recharts-text]:fill-muted-foreground [&_.recharts-text]:text-xs")}
+        <ChartDataTable
+          table={model.chartTable}
+          rowAggregateMode={model.rowAggregateMode}
+          columnAggregateMode={model.columnAggregateMode}
+          hiddenKeys={model.hiddenKeys}
+          onRowAggregateModeChange={model.setRowAggregateMode}
+          onColumnAggregateModeChange={model.setColumnAggregateMode}
+          onToggleKey={model.toggleLegendKey}
+          onHoverKey={model.setActiveLegendKey}
+        />
+      </div>
+    </ViewerSurface>
   )
 }

@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { EditorOpenSettings, OpenExternalAction } from "../../../shared/protocol"
 import type {
   BranchActionFailure,
   BranchActionSuccess,
   ChatBranchListEntry,
   ChatBranchListResult,
   ChatCheckoutBranchResult,
+  ChatCommitDetails,
+  ChatBranchDetails,
   ChatCreateBranchResult,
   ChatMergeBranchResult,
   ChatMergePreviewResult,
@@ -83,10 +86,13 @@ export function useChatPageSidebarActions({
     }, 1_000)
   }, [refreshDiffs, showRightSidebar])
 
-  const handleOpenDiffFile = useCallback((filePath: string) => {
+  const handleOpenDiffFile = useCallback((
+    filePath: string,
+    options: { line?: number; action?: OpenExternalAction; editor?: EditorOpenSettings } = {},
+  ) => {
     const projectPath = projectPathRef.current
     const resolvedPath = resolveDiffFilePath(projectPath, filePath)
-    void state.handleOpenLocalLink({ path: resolvedPath }, "open_editor")
+    void state.handleOpenLocalLink({ path: resolvedPath, line: options.line }, options.action ?? "open_editor", options.editor)
   }, [state.handleOpenLocalLink])
 
   const handleCopyDiffFilePath = useCallback((filePath: string) => {
@@ -98,7 +104,25 @@ export function useChatPageSidebarActions({
     void state.handleCopyPath(filePath)
   }, [state.handleCopyPath])
 
-  const handleLoadDiffPatch = useCallback(async (filePath: string) => {
+  const handleReadBranch = useCallback(async (branch: ChatBranchListEntry) => {
+    if (!projectId) {
+      throw new Error("Project not found")
+    }
+    return await state.socket.command<ChatBranchDetails>({
+      type: "project.readBranch",
+      projectId,
+      branch: serializeBranchSelection(branch),
+    })
+  }, [projectId, state.socket])
+
+  const handleReadCommit = useCallback(async (sha: string) => {
+    if (!projectId) {
+      throw new Error("Project not found")
+    }
+    return await state.socket.command<ChatCommitDetails>({ type: "project.readCommit", projectId, sha })
+  }, [projectId, state.socket])
+
+  const handleLoadDiffPatch = useCallback(async (filePath: string, options?: { fullContext?: boolean }) => {
     if (!projectId) {
       throw new Error("Project not found")
     }
@@ -106,6 +130,7 @@ export function useChatPageSidebarActions({
       type: "project.readDiffPatch",
       projectId,
       path: filePath,
+      ...(options?.fullContext ? { fullContext: true } : {}),
     })
     return result.patch
   }, [projectId, state.socket])
@@ -521,35 +546,12 @@ export function useChatPageSidebarActions({
     }
   }, [dialog, refreshDiffs, state.socket])
 
-  const handleCreateBranch = useCallback(async () => {
+  // The branch picker names the branch and its base (its "Create x from y"
+  // rows), so there is nothing left to ask here.
+  const handleCreateBranch = useCallback(async ({ name, baseBranchName }: { name: string; baseBranchName?: string }) => {
     const chatId = activeChatIdRef.current
     if (!chatId) {
       return
-    }
-
-    const name = await dialog.prompt({
-      title: "New Branch",
-      description: "Enter a branch name.",
-      placeholder: "feature/my-branch",
-      confirmLabel: "Create",
-    })
-    if (!name) {
-      return
-    }
-
-    const branchList = await handleListBranches()
-    const currentBranchName = branchList.currentBranchName
-    const defaultBranchName = branchList.defaultBranchName
-
-    let baseBranchName = defaultBranchName
-    if (defaultBranchName && currentBranchName && defaultBranchName !== currentBranchName) {
-      const createFromCurrent = await dialog.confirm({
-        title: "Branch Base",
-        description: `Create "${name}" from ${currentBranchName} instead of ${defaultBranchName}?`,
-        confirmLabel: `From ${currentBranchName}`,
-        cancelLabel: `From ${defaultBranchName}`,
-      })
-      baseBranchName = createFromCurrent ? currentBranchName : defaultBranchName
     }
 
     try {
@@ -577,7 +579,7 @@ export function useChatPageSidebarActions({
         closeLabel: "OK",
       })
     }
-  }, [dialog, handleListBranches, refreshDiffs, state.socket])
+  }, [dialog, refreshDiffs, state.socket])
 
   useEffect(() => {
     if (!projectId || !showRightSidebar) {
@@ -684,5 +686,7 @@ export function useChatPageSidebarActions({
     handlePreviewMergeBranch,
     handleMergeBranch,
     handleCreateBranch,
+    handleReadCommit,
+    handleReadBranch,
   }
 }

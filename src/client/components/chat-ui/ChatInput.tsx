@@ -23,6 +23,8 @@ import { useShallow } from "zustand/react/shallow"
 import { useChatInputStore } from "../../stores/chatInputStore"
 import { NEW_CHAT_COMPOSER_ID, type ComposerState, useChatPreferencesStore } from "../../stores/chatPreferencesStore"
 import { CHAT_INPUT_ATTRIBUTE, focusNextChatInput, REQUEST_ATTACH_FILES_EVENT } from "../../app/chatFocusPolicy"
+import { isEscapeClaimed, isViewerPaneOpen, resolveEscapePress } from "../../lib/escape-key"
+import { HoldToStopHint, HoldToStopRing, useHoldToStop } from "./HoldToStop"
 import { abbreviatePathHead, formatPathWithTilde } from "../../lib/pathUtils"
 import { copyTextToClipboard } from "../../lib/clipboard"
 import { buildUploadErrorReport, simpleUploadError, type UploadErrorReport } from "../../lib/uploadError"
@@ -33,16 +35,26 @@ import { SignInDialog } from "../auth/SignInDialog"
 import { ChatPreferenceControls } from "./ChatPreferenceControls"
 import { ContextWindowMeter } from "./ContextWindowMeter"
 import { AttachmentFileCard, AttachmentImageCard } from "../messages/AttachmentCard"
-import { AttachmentPreviewModal } from "../messages/AttachmentPreviewModal"
 import { classifyAttachmentPreview } from "../messages/attachmentPreview"
+import { getChatViewer, openViewer, useViewerStore, viewerAttachmentFromChat } from "../../stores/viewerStore"
 import { overrideContextWindowMaxTokens, type ContextWindowSnapshot } from "../../lib/contextWindow"
 import {
   applySkillCompletion,
   CODEX_SKILL_MENU_TRIGGERS,
   DEFAULT_SKILL_MENU_TRIGGERS,
   filterSkillMenuItems,
-  getActiveSlashQuery,
+  getActiveSkillMention,
 } from "../../lib/skill-menu"
+import {
+  applyProjectMention,
+  filterProjectMentionItems,
+  getActiveProjectMention,
+  projectMentionCandidates,
+  type ProjectMentionItem,
+} from "../../lib/project-mention"
+import { useSidebarStore } from "../../stores/sidebarStore"
+
+/** Stable default, so a chat with no delegated work doesn't re-render on it. */
 
 const MAX_FILES_PER_DROP = 50
 const MAX_CONCURRENT_UPLOADS = 3
@@ -194,10 +206,29 @@ interface Props {
   onEditModels?: () => void
   /** Enumerates the selected harness's invocable skills for the "/" menu. */
   onListSkills?: (provider: AgentProvider) => Promise<ChatSkillsSnapshot>
+  /** Said in place of "Build in <project>": whose composer this is, when the page has two. */
+  placeholder?: string
+  /**
+   * A second composer on the page, beside the main one: the previewed
+   * chat's. It does not take focus when it mounts, so what you type next
+   * still goes where it was going, and it leaves page-wide requests (the
+   * command palette's "Attach Files") to the main one.
+   */
+  secondary?: boolean
 }
 
 export interface ChatInputHandle {
   enqueueFiles: (files: File[]) => void
+  /**
+   * Puts text in the composer and the caret at its end, for something
+   * outside it that starts a message for you to finish (a schedule's Edit).
+   * Text already there is kept, with the new text on a line of its own after
+   * it: a draft is not something a click elsewhere should throw away.
+   *
+   * A method because the composer owns its text. Writing to the draft store
+   * from outside changes nothing here.
+   */
+  prefill: (text: string) => void
 }
 
 const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
@@ -217,6 +248,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   previousPrompt = null,
   onEditModels,
   onListSkills,
+  placeholder: placeholderOverride,
+  secondary = false,
 }, forwardedRef) {
   // Actions only. Selecting the whole store re-rendered this component on
   // every keystroke in any composer, and on every attachment change anywhere.
@@ -267,7 +300,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // net inset the old wrapper produced (20px padding + 12px spacer).
   const controlsScrollSpacer = cn("min-w-3", isStandalone && "min-w-8")
   const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => hydrateComposerAttachments(chatId ? getAttachmentDrafts(chatId) : []))
-  const [selectedAttachmentId, setSelectedAttachmentId] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<UploadErrorReport | null>(null)
   const uploadQueueRef = useRef<File[]>([])
   const activeUploadsRef = useRef(0)
@@ -286,12 +318,16 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skillMenuOffset, setSkillMenuOffset] = useState(0)
   const skillsFetchRef = useRef<{ provider: AgentProvider | null; pending: boolean }>({ provider: null, pending: false })
   const selectedSkillItemRef = useRef<HTMLButtonElement | null>(null)
+  // "@" project menu state, the same shape as the skill menu's.
+  const [projectMenuDismissed, setProjectMenuDismissed] = useState(false)
+  const [projectMenuOffset, setProjectMenuOffset] = useState(0)
+  const selectedProjectItemRef = useRef<HTMLButtonElement | null>(null)
 
   // The label goes into a textarea placeholder, which browsers do not clip
   // or ellipsize the way a span would: a long path runs past the pill. Keep
   // the path short enough to fit the narrowest composer (a phone) instead.
   const projectLabel = projectRepoLabel ?? (projectPath ? abbreviatePathHead(formatPathWithTilde(projectPath), 40) : null)
-  const placeholder = projectLabel ? `Build in ${projectLabel}` : "Build something..."
+  const placeholder = placeholderOverride ?? (projectLabel ? `Build in ${projectLabel}` : "Build something...")
 
   const activeContextWindow = useMemo(() => {
     if (providerPrefs.provider !== "claude") {
@@ -305,13 +341,14 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     )
     return overrideContextWindowMaxTokens(contextWindowSnapshot, stagedMaxTokens)
   }, [contextWindowSnapshot, providerPrefs.model, providerPrefs.modelOptions, providerPrefs.provider])
-  // "/" skill menu derivations. The query is non-null only while the caret is
-  // inside a leading "/token" ("$token" also opens it on codex, whose native
-  // sigil is "$" — accepting still completes to the canonical "/" form); menu
-  // items render in ascending match quality so the best match sits at the
-  // bottom, next to the input.
+  // "/" skill menu derivations. The mention is non-null only while the caret
+  // is inside a "/token" anywhere in the prompt ("$token" also opens it on
+  // codex, whose native sigil is "$" — accepting still completes to the
+  // canonical "/" form); menu items render in ascending match quality so the
+  // best match sits at the bottom, next to the input.
   const skillMenuTriggers = selectedProvider === "codex" ? CODEX_SKILL_MENU_TRIGGERS : DEFAULT_SKILL_MENU_TRIGGERS
-  const slashQuery = onListSkills && !disabled ? getActiveSlashQuery(value, caretPosition, skillMenuTriggers) : null
+  const skillMention = onListSkills && !disabled ? getActiveSkillMention(value, caretPosition, skillMenuTriggers) : null
+  const slashQuery = skillMention?.query ?? null
   const slashActive = slashQuery !== null
   const skillMenuItems = useMemo(
     () => (slashQuery !== null && availableSkills ? filterSkillMenuItems(availableSkills, slashQuery) : []),
@@ -365,11 +402,18 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     selectedSkillItemRef.current?.scrollIntoView({ block: "nearest" })
   }, [selectedSkillIndex, skillMenuOpen])
 
+  // Escape closes the menu for the token it was pressed in; the next token
+  // (a second skill later in the prompt) opens it again.
+  const skillMentionStart = skillMention?.start ?? null
+  useEffect(() => {
+    setSkillMenuDismissed(false)
+  }, [skillMentionStart])
+
   const acceptSkill = useCallback((skill: HarnessSkill) => {
-    const nextValue = applySkillCompletion(value, skill.name)
+    if (!skillMention) return
+    const { value: nextValue, caret: nextCaret } = applySkillCompletion(value, skillMention, skill.name)
     setValue(nextValue)
     if (chatId) setDraft(chatId, nextValue)
-    const nextCaret = skill.name.length + 2
     setCaretPosition(nextCaret)
     requestAnimationFrame(() => {
       const element = textareaRef.current
@@ -378,11 +422,78 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       element.selectionStart = nextCaret
       element.selectionEnd = nextCaret
     })
-  }, [value, chatId, setDraft])
+  }, [value, skillMention, chatId, setDraft])
+
+  // "@" project menu derivations. The project list is read from the store
+  // when the menu opens rather than subscribed to: the sidebar changes on
+  // every chat update, and a subscription would re-render the composer each time.
+  const projectMention = !disabled ? getActiveProjectMention(value, caretPosition) : null
+  const projectMentionActive = projectMention !== null
+  const projectMentionCandidateList = useMemo(
+    () => (projectMentionActive ? projectMentionCandidates(useSidebarStore.getState().data.projectGroups, projectPath ?? null) : []),
+    [projectMentionActive, projectPath]
+  )
+  const projectMenuItems = useMemo(
+    () => (projectMention ? filterProjectMentionItems(projectMentionCandidateList, projectMention.query) : []),
+    [projectMention?.query, projectMentionCandidateList]
+  )
+  const projectMenuOpen = projectMentionActive && !projectMenuDismissed && projectMenuItems.length > 0
+  const selectedProjectIndex = projectMenuItems.length > 0
+    ? projectMenuItems.length - 1 - Math.min(projectMenuOffset, projectMenuItems.length - 1)
+    : -1
+
+  useEffect(() => {
+    if (!projectMentionActive) setProjectMenuDismissed(false)
+  }, [projectMentionActive])
+
+  useEffect(() => {
+    setProjectMenuOffset(0)
+  }, [projectMention?.query])
+
+  useEffect(() => {
+    selectedProjectItemRef.current?.scrollIntoView({ block: "nearest" })
+  }, [selectedProjectIndex, projectMenuOpen])
+
+  const acceptProject = useCallback((project: ProjectMentionItem) => {
+    const mention = getActiveProjectMention(value, caretPosition)
+    if (!mention) return
+    const next = applyProjectMention(value, mention, project.localPath)
+    setValue(next.value)
+    if (chatId) setDraft(chatId, next.value)
+    setCaretPosition(next.caret)
+    requestAnimationFrame(() => {
+      const element = textareaRef.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = next.caret
+      element.selectionEnd = next.caret
+    })
+  }, [value, caretPosition, chatId, setDraft])
 
   const uploadedAttachments = attachments.filter((attachment) => attachment.status === "uploaded")
   const hasPendingUploads = attachments.some((attachment) => attachment.status === "uploading")
   const canSubmit = value.trim().length > 0 || uploadedAttachments.length > 0
+  // Escape, held, stops the turn. See HoldToStop.
+  const holdToStop = useHoldToStop({ enabled: Boolean(canCancel), onConfirm: () => onCancel?.() })
+  // The round button is Send while there is something to send and Stop
+  // otherwise. Under a hold it is Stop either way: the ring is drawn round
+  // it, and it has to say what the ring is counting down to.
+  const showStop = Boolean(canCancel) && (!canSubmit || holdToStop.engaged)
+  /** What the round button does. Stop is immediate here; only the key is held. */
+  function runPrimaryAction(withModifier: boolean) {
+    // Under a hold the button reads Stop, so that is what a click on it does.
+    if (holdToStop.engaged && canCancel) {
+      onCancel?.()
+      return
+    }
+    // Anything sendable (text or attachments alone) wins over cancel, so a
+    // file-only message queues instead of stopping the running turn.
+    if (!disabled && canSubmit && !hasPendingUploads) {
+      void handleSubmit({ withModifier })
+    } else if (canCancel) {
+      onCancel?.()
+    }
+  }
   const recorder = useVoiceRecorder()
   const [transcribing, setTranscribing] = useState(false)
   const recording = recorder.isRecording
@@ -394,7 +505,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (left.kind === right.kind) return 0
     return left.kind === "image" ? -1 : 1
   })
-  const selectedAttachment = attachments.find((attachment) => attachment.id === selectedAttachmentId) ?? null
 
   const cleanupAttachmentPreview = useCallback((attachment: ComposerAttachment) => {
     if (attachment.previewUrl) {
@@ -414,7 +524,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     })
     uploadQueueRef.current = []
     activeUploadsRef.current = 0
-    setSelectedAttachmentId(null)
     setUploadError(null)
   }, [cleanupAttachmentPreview])
 
@@ -461,8 +570,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [attachments.length, onLayoutChange, uploadError])
 
   useEffect(() => {
-    textareaRef.current?.focus()
-  }, [chatId])
+    if (!secondary) textareaRef.current?.focus()
+  }, [chatId, secondary])
 
   useEffect(() => {
     latestChatIdRef.current = chatId ?? null
@@ -492,7 +601,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     uploadQueueRef.current = []
     activeUploadsRef.current = 0
     removedAttachmentIdsRef.current.clear()
-    setSelectedAttachmentId(null)
     setUploadError(null)
     setAttachments((current) => {
       current.forEach(cleanupAttachmentPreview)
@@ -681,19 +789,36 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     processUploadQueue()
   }, [processUploadQueue, projectId])
 
+  const prefill = useCallback((text: string) => {
+    const existing = (textareaRef.current?.value ?? "").trimEnd()
+    const next = existing ? `${existing}\n\n${text}` : text
+    setValue(next)
+    if (chatId) setDraft(chatId, next)
+    setCaretPosition(next.length)
+    requestAnimationFrame(() => {
+      const element = textareaRef.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = next.length
+      element.selectionEnd = next.length
+    })
+  }, [chatId, setDraft])
+
   useImperativeHandle(forwardedRef, () => ({
     enqueueFiles,
-  }), [enqueueFiles])
+    prefill,
+  }), [enqueueFiles, prefill])
 
   // The command palette's "Attach Files" action opens the hidden picker.
   useEffect(() => {
+    if (secondary) return
     function handleAttachRequest() {
       paletteFileInputRef.current?.click()
     }
 
     window.addEventListener(REQUEST_ATTACH_FILES_EVENT, handleAttachRequest)
     return () => window.removeEventListener(REQUEST_ATTACH_FILES_EVENT, handleAttachRequest)
-  }, [])
+  }, [secondary])
 
   /** The composer's current prefs, the way a send carries them. */
   function buildSubmitOptions(attachmentsForSubmit: ChatAttachment[], steer = shouldSteerSubmit(submitWhileRunning, false)) {
@@ -702,6 +827,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       modelOptions = { claude: { ...providerPrefs.modelOptions } }
     } else if (providerPrefs.provider === "cursor") {
       modelOptions = { cursor: { ...providerPrefs.modelOptions } }
+    } else if (providerPrefs.provider === "grok") {
+      modelOptions = { grok: { ...providerPrefs.modelOptions } }
     } else if (providerPrefs.provider === "pi") {
       modelOptions = { pi: { ...providerPrefs.modelOptions } }
     } else {
@@ -723,7 +850,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
     const nextValue = value
     const previousAttachments = attachmentsRef.current
-    const previousSelectedAttachmentId = selectedAttachmentId
     const previousUploadError = uploadError
     const attachmentsForSubmit = uploadedAttachments.map(({ previewUrl: _previewUrl, status: _status, ...attachment }) => attachment)
     const submitOptions = buildSubmitOptions(
@@ -746,7 +872,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setValue(nextValue)
       if (chatId) setDraft(chatId, nextValue)
       setAttachments(previousAttachments)
-      setSelectedAttachmentId(previousSelectedAttachmentId)
       setUploadError(previousUploadError)
     }
   }
@@ -819,6 +944,32 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
 
+    if (projectMenuOpen) {
+      if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        setProjectMenuOffset((offset) => Math.min(offset + 1, projectMenuItems.length - 1))
+        return
+      }
+      if (event.key === "ArrowDown" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault()
+        setProjectMenuOffset((offset) => Math.max(offset - 1, 0))
+        return
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+        const selected = projectMenuItems[selectedProjectIndex]
+        if (selected) {
+          event.preventDefault()
+          acceptProject(selected)
+          return
+        }
+      }
+      if (event.key === "Escape") {
+        event.preventDefault()
+        setProjectMenuDismissed(true)
+        return
+      }
+    }
+
     if (event.key === "Tab" && !event.shiftKey) {
       event.preventDefault()
       focusNextChatInput(textareaRef.current, document)
@@ -833,10 +984,28 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return
     }
 
-    if (event.key === "Escape" && canCancel) {
-      event.preventDefault()
-      onCancel?.()
-      return
+    // Escape stops the turn only when held, and only once nothing nearer has
+    // a use for the key (`resolveEscapePress`). With the viewer's pane open
+    // the key never gets here: the pane hears it first and closes. A repeat
+    // is swallowed, so a key still down from closing the pane, from the hold
+    // running, or from a hold whose turn has just stopped, neither starts
+    // one nor leaks to what is behind.
+    if (event.key === "Escape") {
+      const action = resolveEscapePress({
+        repeat: event.repeat,
+        claimed: isEscapeClaimed(event.nativeEvent),
+        paneOpen: isViewerPaneOpen(),
+        canInterrupt: Boolean(canCancel),
+      })
+      if (action === "hold-to-interrupt") {
+        event.preventDefault()
+        holdToStop.press(event.currentTarget as HTMLElement)
+        return
+      }
+      if (action === "ignore") {
+        event.preventDefault()
+        return
+      }
     }
 
     if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && value.length === 0 && previousPrompt) {
@@ -898,7 +1067,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return
     }
 
-    setSelectedAttachmentId(attachment.id)
+    openViewer({ kind: "attachment", attachment: viewerAttachmentFromChat(attachment) })
   }
 
   function removeAttachment(attachment: ComposerAttachment) {
@@ -908,8 +1077,10 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (removed) cleanupAttachmentPreview(removed)
       return current.filter((item) => item.id !== attachment.id)
     })
-    if (selectedAttachmentId === attachment.id) {
-      setSelectedAttachmentId(null)
+    // Removed while it's open in the viewer: its URL is about to go away.
+    const viewing = getChatViewer()?.item
+    if (viewing?.kind === "attachment" && viewing.attachment.url === attachment.contentUrl) {
+      useViewerStore.getState().close()
     }
 
     if (attachment.status === "uploaded") {
@@ -927,6 +1098,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
               className="absolute bottom-full left-0 right-0 mb-2 z-30 max-h-64 overflow-y-auto rounded-2xl border border-border bg-popover/95 backdrop-blur-lg shadow-lg py-1"
               role="listbox"
               aria-label="Skills"
+              // Counted as an open layer by everything that asks whether
+              // Escape is spoken for (`hasOpenLayer`): it closes this first.
+              data-state="open"
             >
               {skillMenuItems.map((skill, index) => (
                 <button
@@ -953,6 +1127,37 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   {skill.description ? (
                     <span className="min-w-0 truncate text-xs text-muted-foreground">{skill.description}</span>
                   ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {projectMenuOpen ? (
+            <div
+              className="absolute bottom-full left-0 right-0 mb-2 z-30 max-h-64 overflow-y-auto rounded-2xl border border-border bg-popover/95 backdrop-blur-lg shadow-lg py-1"
+              role="listbox"
+              aria-label="Projects"
+              data-state="open"
+            >
+              {projectMenuItems.map((project, index) => (
+                <button
+                  key={project.projectId}
+                  ref={index === selectedProjectIndex ? selectedProjectItemRef : undefined}
+                  type="button"
+                  role="option"
+                  aria-selected={index === selectedProjectIndex}
+                  className={cn(
+                    "flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                    index === selectedProjectIndex ? "bg-accent text-accent-foreground" : "text-foreground"
+                  )}
+                  onMouseEnter={() => setProjectMenuOffset(projectMenuItems.length - 1 - index)}
+                  onMouseDown={(event) => {
+                    // mousedown (not click) so the textarea never loses focus.
+                    event.preventDefault()
+                    acceptProject(project)
+                  }}
+                >
+                  <span className="shrink-0 text-[13px]">@{project.title}</span>
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{formatPathWithTilde(project.localPath)}</span>
                 </button>
               ))}
             </div>
@@ -1004,7 +1209,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
               ref={setTextareaRefs}
               placeholder={placeholder}
               value={value}
-              autoFocus
+              autoFocus={!secondary}
               {...{ [CHAT_INPUT_ATTRIBUTE]: "" }}
               rows={1}
               onChange={(event) => {
@@ -1069,31 +1274,36 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </Button>
             ) : null}
             {recording || transcribing || (showMic && !canCancel) ? null : (
+            // A box that hugs the button and carries its margins, for the
+            // hold's ring and hint to be placed against.
+            <span className="relative flex flex-shrink-0 mb-1 -mr-0.5 md:mr-0 md:mb-1.5">
             <Button
               type="button"
+              aria-label={showStop ? "Stop" : "Send message"}
+              title={showStop ? "Stop (hold Esc)" : undefined}
               onPointerDown={(event) => {
                 event.preventDefault()
-                // Anything sendable (text or attachments alone) wins over
-                // cancel, so a file-only message queues instead of stopping
-                // the running turn.
-                if (!disabled && canSubmit && !hasPendingUploads) {
-                  void handleSubmit({ withModifier: event.metaKey || event.ctrlKey })
-                } else if (canCancel) {
-                  onCancel?.()
-                }
+                runPrimaryAction(event.metaKey || event.ctrlKey)
+              }}
+              // The pointer acts on the way down, above. This is for a click
+              // that no pointer made: Enter or Space on the button, and a
+              // screen reader's activation. Stop stays one press there.
+              onClick={(event) => {
+                if (event.detail === 0) runPrimaryAction(event.metaKey || event.ctrlKey)
               }}
               disabled={disabled || (!canCancel && !canSubmit) || hasPendingUploads}
               size="icon"
-              className="flex-shrink-0 bg-slate-600 text-white dark:bg-white dark:text-slate-900 rounded-full cursor-pointer h-10 w-10 md:h-11 md:w-11 mb-1 -mr-0.5 md:mr-0 md:mb-1.5 touch-manipulation disabled:bg-white/60 disabled:text-slate-700"
+              className="flex-shrink-0 bg-slate-600 text-white dark:bg-white dark:text-slate-900 rounded-full cursor-pointer h-10 w-10 md:h-11 md:w-11 touch-manipulation disabled:bg-white/60 disabled:text-slate-700"
             >
-              {canSubmit ? (
-                <ArrowUp className="h-5 w-5 md:h-6 md:w-6" />
-              ) : canCancel ? (
+              {showStop ? (
                 <div className="w-3 h-3 md:w-4 md:h-4 rounded-xs bg-current" />
               ) : (
                 <ArrowUp className="h-5 w-5 md:h-6 md:w-6" />
               )}
             </Button>
+            <HoldToStopRing arcRef={holdToStop.arcRef} shown={holdToStop.ringShown} />
+            <HoldToStopHint shown={holdToStop.hintShown} />
+            </span>
             )}
           </div>
         </div>
@@ -1189,24 +1399,34 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
             mode={chatModeFromFlags(providerPrefs.planMode, providerPrefs.autoPlan)}
             onModeChange={setEffectiveMode}
             includeMode={showModePicker}
+            hideDefaults
             className="max-w-[840px] mx-auto"
           />
           {activeContextWindow ? (
-            <div className="flex items-center md:hidden mx-[13px]">
+            <div className="mx-[13px] flex items-center gap-2 md:hidden">
               <ContextWindowMeter usage={activeContextWindow} />
             </div>
           ) : null}
           <div className={controlsScrollSpacer} />
         </div>
 
+        {/* right-[17px] is where the dial has always sat: right-[29px]
+            pulled back by translate-x-1/2 of its own 24px. */}
         {activeContextWindow ? (
-          <div className="absolute right-[29px] top-1/2 translate-x-1/2 -translate-y-1/2 hidden md:block">
+          <div className={cn(
+            "absolute inset-y-0 right-[17px] hidden items-center gap-2 md:flex",
+            // Mirror the parent's own padding so this spans its *content* box.
+            // top-1/2 centred on the padded box instead, and the padding is
+            // asymmetric when standalone (pt-3 pb-5) — which put the dial 4px
+            // below the controls it sits beside. Matching the padding centres
+            // on the row itself, in both modes.
+            isStandalone ? "pt-3 pb-5" : "py-3"
+          )}>
             <ContextWindowMeter usage={activeContextWindow} />
           </div>
         ) : null}
       </div>
 
-      <AttachmentPreviewModal attachment={selectedAttachment} onOpenChange={(open) => !open && setSelectedAttachmentId(null)} />
       <SignInDialog
         provider={pendingSignInProvider}
         onOpenChange={(open) => {

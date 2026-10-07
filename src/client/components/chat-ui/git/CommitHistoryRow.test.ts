@@ -19,7 +19,7 @@ function render(entry: ChatBranchHistoryEntry) {
 }
 
 describe("CommitHistoryRow", () => {
-  test("shows the check count and links the Actions run", () => {
+  test("shows checks as one icon under the age, named with its count, linking the Actions run", () => {
     const markup = render({
       ...BASE_ENTRY,
       checks: {
@@ -31,7 +31,8 @@ describe("CommitHistoryRow", () => {
     })
 
     expect(markup).toContain("3 of 4 checks passed")
-    expect(markup).toContain("3 / 4")
+    expect(markup).toContain('<button type="button" title="3 of 4 checks passed"')
+    expect(markup).toContain(">3/4<")
   })
 
   test("marks a running rollup as pending", () => {
@@ -41,7 +42,7 @@ describe("CommitHistoryRow", () => {
     })
 
     expect(markup).toContain("Checks running")
-    expect(markup).toContain("1 / 3")
+    expect(markup).toContain("1 of 3 finished")
   })
 
   test("omits the badge when the commit has no checks", () => {

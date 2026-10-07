@@ -10,12 +10,14 @@ import type {
   SidebarChatRow,
   SidebarData,
   SidebarProjectGroup,
+  SubagentActivity,
 } from "../shared/types"
 import type { WorkingTreeProbe } from "./diff-store"
 import type { ProjectRepoLabel } from "./worktree-probe"
 import type { ChatRecord, StoreState, TouchedFile } from "./events"
 import { resolveLocalPath } from "./paths"
 import { SERVER_PROVIDERS } from "./provider-catalog"
+import { isSubChat } from "../shared/sub-chat"
 import { buildTranscriptOutline } from "../shared/transcript-window"
 import type { TranscriptOutlineEntry } from "../shared/types"
 
@@ -31,6 +33,10 @@ function getFolderModifiedAt(localPath: string) {
 }
 
 export function deriveStatus(chat: ChatRecord, activeStatus?: KannaStatus): KannaStatus {
+  // A failed turn outranks the wait. What it handed off may still be going,
+  // but the failure is the user's to look at now, and a chat that reads as
+  // waiting is one they leave alone.
+  if (activeStatus === "waiting_on_subagent" && chat.lastTurnOutcome === "failed") return "failed"
   if (activeStatus) return activeStatus
   if (chat.lastTurnOutcome === "failed") return "failed"
   return "idle"
@@ -204,6 +210,8 @@ export function deriveSidebarData(
      * — see `SidebarProjectGroup.hasGitRepo`.
      */
     projectsWithoutRepo?: ReadonlySet<string>
+    /** Icon URL per project path, from `ProjectIcons.getUrls()`. */
+    projectIcons?: ReadonlyMap<string, string>
   }
 ): SidebarData {
   const nowMs = options?.nowMs ?? Date.now()
@@ -283,21 +291,27 @@ export function deriveSidebarData(
           ...(chat.pinnedAt ? { pinnedAt: chat.pinnedAt } : {}),
           hasAutomation: false,
           canFork: canForkChat(chat, activeStatuses, drainingChatIds) || undefined,
+          ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
+          ...(chat.parentChatId && chat.adopted ? { adopted: true as const } : {}),
         }
       })
   }
 
   const projectGroups: SidebarProjectGroup[] = projects.map((project) => {
     const repoLabel = options?.repoLabels?.get(project.id)
+    const iconUrl = options?.projectIcons?.get(project.localPath)
     const chats = toSidebarChatRows(project, chatsByProjectId.get(project.id) ?? [])
     const archivedChats = toSidebarChatRows(project, archivedChatsByProjectId.get(project.id) ?? [])
-    const { previewChats, olderChats } = getSidebarChatBuckets(chats, nowMs)
+    // The lists a project shows leave sub-chats out; `chats` keeps them for lookups.
+    const listedChats = chats.filter((chat) => !isSubChat(chat))
+    const { previewChats, olderChats } = getSidebarChatBuckets(listedChats, nowMs)
 
     return {
       groupKey: project.id,
       title: project.sidebarTitle ?? project.title,
       realTitle: project.title,
       ...(project.sidebarTitle ? { sidebarTitle: project.sidebarTitle } : {}),
+      ...(project.pinnedAt ? { pinnedAt: project.pinnedAt } : {}),
       ...(repoLabel ? { repoName: repoLabel.repoName } : {}),
       // Only ever stated when known. A label answers it outright; otherwise the
       // probe has to have looked and come back empty-handed.
@@ -309,12 +323,13 @@ export function deriveSidebarData(
       ...(repoLabel?.branchName ? { branchName: repoLabel.branchName } : {}),
       ...(repoLabel?.repoOwner ? { repoOwner: repoLabel.repoOwner } : {}),
       ...(repoLabel?.repoUrl ? { repoUrl: repoLabel.repoUrl } : {}),
+      ...(iconUrl ? { iconUrl } : {}),
       localPath: project.localPath,
       chats,
       previewChats,
       olderChats,
       ...(archivedChats.length ? { archivedChats } : {}),
-      defaultCollapsed: chats.every((chat) => !isSidebarChatPreviewed(chat, nowMs)),
+      defaultCollapsed: listedChats.every((chat) => !isSidebarChatPreviewed(chat, nowMs)),
     }
   })
 
@@ -415,12 +430,21 @@ export function deriveChatSnapshot(
   activeStatuses: Map<string, KannaStatus>,
   drainingChatIds: Set<string>,
   chatId: string,
-  getMessages: (chatId: string) => Pick<ChatSnapshot, "messages" | "startIndex" | "readAnchor"> & { outline?: TranscriptOutlineEntry[] }
+  getMessages: (chatId: string) => Pick<ChatSnapshot, "messages" | "startIndex" | "readAnchor"> & { outline?: TranscriptOutlineEntry[] },
+  subagents?: readonly SubagentActivity[]
 ): ChatSnapshot | null {
   const chat = state.chatsById.get(chatId)
   if (!chat || chat.deletedAt) return null
   const project = state.projectsById.get(chat.projectId)
   if (!project || project.deletedAt) return null
+
+  const schedules = [...(state.schedulesById?.values() ?? [])]
+    .filter((schedule) => (
+      (schedule.target.kind === "chat" && schedule.target.chatId === chat.id)
+      || schedule.createdByChatId === chat.id
+      || schedule.lastRunChatId === chat.id
+    ))
+    .sort((a, b) => a.createdAt - b.createdAt)
 
   const runtime: ChatRuntime = {
     chatId: chat.id,
@@ -433,6 +457,10 @@ export function deriveChatSnapshot(
     planMode: chat.planMode,
     autoPlan: chat.autoPlan,
     sessionToken: chat.sessionToken,
+    ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
+    ...(chat.parentChatId && chat.adopted ? { adopted: true as const } : {}),
+    ...(subagents?.length ? { subagents: [...subagents] } : {}),
+    ...(schedules.length ? { schedules } : {}),
   }
 
   const transcript = getMessages(chat.id)
