@@ -3,6 +3,7 @@ import { isSubChat } from "../../shared/sub-chat"
 import { stripSystemMessages } from "../../shared/message-preview"
 import type { ComposerState } from "../stores/chatPreferencesStore"
 import { processTranscriptMessages } from "../lib/parseTranscript"
+import { hasNoTurnStatus } from "./derived"
 
 // Pure helpers backing useKannaState. Everything here is stateless and unit
 // testable; the hook composes these with socket subscriptions and React state.
@@ -46,11 +47,13 @@ export interface OptimisticProcessingState {
  * reporting the turn. It has to be retired eventually, or a send that started
  * no turn — one that queued behind a running turn, say — would spin forever.
  *
- * Retirement waits for the server to actually say "idle". A missing snapshot
- * is not that statement: on a chat whose subscription hasn't delivered yet — a
- * brand new chat above all — `runtimeStatus` is null simply because nothing
- * has arrived. Reading that as idle is what made a chat go quiet mid-send: no
- * spinner and no rows, until the reply appeared all at once.
+ * Retirement waits for the server to actually report no turn of its own
+ * (`hasNoTurnStatus`: idle, or waiting on a subagent, whose work is not this
+ * chat's turn). A missing snapshot is not that statement: on a chat whose
+ * subscription hasn't delivered yet — a brand new chat above all —
+ * `runtimeStatus` is null simply because nothing has arrived. Reading that as
+ * idle is what made a chat go quiet mid-send: no spinner and no rows, until
+ * the reply appeared all at once.
  */
 export function shouldRetireOptimisticProcessing(
   processing: OptimisticProcessingState | null,
@@ -60,7 +63,7 @@ export function shouldRetireOptimisticProcessing(
 ): boolean {
   if (!processing?.ackedAt || processing.scopeId !== scopeId) return false
   if (runtimeStatus === null) return false
-  return runtimeStatus === "idle"
+  return hasNoTurnStatus(runtimeStatus)
 }
 
 function serializeAttachmentSignature(attachment: ChatAttachment) {
