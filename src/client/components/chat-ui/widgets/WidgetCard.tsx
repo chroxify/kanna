@@ -2,6 +2,7 @@ import { ChevronRight } from "lucide-react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "../../../lib/utils"
 import { useRightSidebarStore, type WidgetDisclosureId } from "../../../stores/rightSidebarStore"
+import { StillTooltips } from "../../ui/tooltip"
 
 /**
  * Widgets in the right sidebar's column.
@@ -18,8 +19,9 @@ import { useRightSidebarStore, type WidgetDisclosureId } from "../../../stores/r
  * The grammar every widget follows, so the column reads as one design:
  * - Count: a bare number ("5"). A subset of it is "N of M" ("3 of 5"). A state
  *   word goes after the number ("3 of 5 running", "2 unpushed").
- * - Running: the red `text-logo` spinner the left sidebar shows for a busy
- *   chat. Done is `text-success`, failed is `text-destructive`.
+ * - Running: a grey (`text-muted-foreground`) spinner. Red reads as an alarm,
+ *   and in progress is the column's normal state. Done is `text-success`,
+ *   failed is `text-destructive`.
  * - Bodies are built from the parts in parts.tsx (Strip, List of Rows,
  *   Static, Footer), never from ad hoc padding, dividers or hover classes.
  *   Rows sit 1px apart and no more, so a highlight never visibly drops out.
@@ -28,8 +30,9 @@ import { useRightSidebarStore, type WidgetDisclosureId } from "../../../stores/r
  * - Disclosures start open when they hold a few rows and closed when they
  *   hold many (defaultWidgetExpanded). Once toggled, they remember it per project.
  * - Status changes (spinner to check, a label that swaps) cross-fade through
- *   SwapIn. Nothing else in the column animates except cards entering and
- *   leaving (WidgetPresence): the column is opened too often for more.
+ *   SwapIn, and so does a body a disclosure swaps (`collapsedBody`). Nothing
+ *   else in the column animates except cards entering and leaving
+ *   (WidgetPresence): the column is opened too often for more.
  */
 
 export interface WidgetSectionProps {
@@ -45,6 +48,18 @@ export interface WidgetSectionProps {
   onToggle?: () => void
   /** The body. Omit for a header-only section. */
   children?: ReactNode
+  /**
+   * What the body shows while the disclosure is closed, for a section whose
+   * disclosure swaps its body rather than hiding it: the Branch card lists
+   * the branch's commits, and opens into the branch picker in their place.
+   */
+  collapsedBody?: ReactNode
+  /**
+   * Off when the body draws its own dividers: a body whose parts come and go
+   * (the Branch card's PR and changes) folds each part away with its rule,
+   * where a divider on the body itself would stay behind as a stray line.
+   */
+  bodyDivider?: boolean
   /** Always visible below the body, even while a disclosure is collapsed. */
   footer?: ReactNode
 }
@@ -58,8 +73,18 @@ export function WidgetSection({
   expanded,
   onToggle,
   children,
+  collapsedBody,
+  bodyDivider = true,
   footer,
 }: WidgetSectionProps) {
+  const open = !onToggle || Boolean(expanded)
+  const body = open ? children : collapsedBody
+  // A swapped body cross-fades in, as SwapIn does a status: the card is
+  // changing what it shows, not gaining or losing a part. Only after a real
+  // swap, so opening the column doesn't fade every card's body in.
+  const [initialOpen] = useState(open)
+  const swappedRef = useRef(false)
+  if (collapsedBody !== undefined && open !== initialOpen) swappedRef.current = true
   // One header grammar for every widget: icon, title, then the count set like
   // the Branch header's branch name (same size, muted, on the title's
   // baseline), then the chevron tucked 4px after, as the left sidebar's
@@ -100,17 +125,35 @@ export function WidgetSection({
       {/* Uncapped: a widget is as tall as its content and the column scrolls.
           Two bodies cap themselves and scroll inside: Changes, which can list
           thousands of files, and Attachments. */}
-      {children && (!onToggle || expanded) ? <div className="border-t border-border">{children}</div> : null}
+      {body ? (
+        <div
+          key={open ? "open" : "closed"}
+          className={cn(
+            bodyDivider && "border-t border-border",
+            swappedRef.current && "transition-[opacity,filter] duration-150 ease-snappy starting:opacity-0 starting:blur-[2px] motion-reduce:transition-opacity",
+          )}
+        >
+          {body}
+        </div>
+      ) : null}
       {footer ? <div className="border-t border-border">{footer}</div> : null}
     </div>
   )
 }
 
-/** The card surface that holds a widget's sections, divided from each other. */
+/**
+ * The card surface that holds a widget's sections, divided from each other.
+ *
+ * In the Mac app it takes the left sidebar's radius, so the cards on both
+ * sides of the chat have the same corners.
+ */
 export function WidgetGroup({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn("divide-y divide-border overflow-hidden rounded-2xl border border-border bg-background dark:bg-card", className)}>
-      {children}
+    // Lifted off whatever is under it while the column is a slideover (the
+    // desktop peek, the phone's sheet); beside the chat it sits flat.
+    <section className={cn("divide-y divide-border overflow-hidden rounded-2xl border border-border bg-background dark:bg-card mac-app:rounded-[calc(var(--mac-window-radius)-8px)] transition-shadow duration-200 ease-out group-data-[slideover]/widgets:shadow-md", className)}>
+      {/* The right sidebar is scanned like the left one; see StillTooltips. */}
+      <StillTooltips>{children}</StillTooltips>
     </section>
   )
 }
@@ -143,10 +186,20 @@ const PRESENCE_EXIT_MS = 180
  * A card present when the slot mounts shows at once: opening the column is
  * not a change to announce, and it happens far too often to animate.
  *
- * The slot also owns the column's spacing (pt-2 inside the collapsing part),
- * so a card's gap folds away with it instead of snapping shut at the end.
+ * The slot also owns the column's spacing (pt-2 inside the collapsing part,
+ * 1px for the first), so a card's gap folds away with it instead of snapping
+ * shut at the end.
  */
-export function WidgetPresence({ show, children }: { show: boolean; children: ReactNode }) {
+export function WidgetPresence({ show, spaced = true, children }: {
+  show: boolean
+  /**
+   * The column's gap above the card. Off for a section coming and going
+   * inside a WidgetGroup (Changes in the Branch card), where the group's
+   * divider is the only separation, and folds away with the section.
+   */
+  spaced?: boolean
+  children: ReactNode
+}) {
   const [phase, setPhase] = useState<PresencePhase>(show ? "shown" : "hidden")
   const rootRef = useRef<HTMLDivElement | null>(null)
   // While leaving, the card keeps its last content. What the caller renders
@@ -182,12 +235,14 @@ export function WidgetPresence({ show, children }: { show: boolean; children: Re
       ref={rootRef}
       inert={!open}
       className={cn(
-        "grid transition-[grid-template-rows,opacity] ease-snappy motion-reduce:transition-opacity",
+        "group/widget-slot grid transition-[grid-template-rows,opacity] ease-snappy motion-reduce:transition-opacity",
         open ? "grid-rows-[1fr] opacity-100 duration-200" : "grid-rows-[0fr] opacity-0 duration-150",
       )}
     >
       <div className="min-h-0 overflow-hidden">
-        <div className="pt-2">{show ? children : lastChildrenRef.current}</div>
+        {/* The top card sits right under the navbar: 1px, not a gap, so the
+            slot's overflow-hidden doesn't clip the card's top border. */}
+        <div className={spaced ? "pt-2 group-first/widget-slot:pt-[1px]" : undefined}>{show ? children : lastChildrenRef.current}</div>
       </div>
     </div>
   )
@@ -232,7 +287,9 @@ export function defaultWidgetExpanded(rowCount: number) {
 /**
  * A disclosure's open state, remembered per project once toggled.
  *
- * Until then it follows defaultWidgetExpanded. That default is fixed at the
+ * Until then it follows defaultWidgetExpanded, or `defaultOpen` for a
+ * disclosure that pages its own rows (the changed files show five, then
+ * more) and so is never too long to start open. That default is fixed at the
  * first non-zero count the project shows. A default that tracked the count
  * would fold the card shut under you the moment a fourth file changed.
  */
@@ -240,12 +297,13 @@ export function useWidgetExpanded(
   projectId: string | null,
   id: WidgetDisclosureId,
   rowCount: number,
+  defaultOpen?: boolean,
 ): [expanded: boolean, setExpanded: (expanded: boolean) => void] {
   const stored = useRightSidebarStore((store) => (projectId ? store.projectUi[projectId]?.expanded?.[id] : undefined))
   const setWidgetExpanded = useRightSidebarStore((store) => store.setWidgetExpanded)
   const defaultsRef = useRef(new Map<string, boolean>())
   const key = projectId ?? ""
-  if (!defaultsRef.current.has(key) && rowCount > 0) defaultsRef.current.set(key, defaultWidgetExpanded(rowCount))
+  if (!defaultsRef.current.has(key) && rowCount > 0) defaultsRef.current.set(key, defaultOpen ?? defaultWidgetExpanded(rowCount))
   const expanded = stored ?? defaultsRef.current.get(key) ?? false
   const setExpanded = useCallback((next: boolean) => {
     if (projectId) setWidgetExpanded(projectId, id, next)

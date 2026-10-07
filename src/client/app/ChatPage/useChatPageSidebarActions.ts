@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { EditorOpenSettings, OpenExternalAction } from "../../../shared/protocol"
 import type {
   BranchActionFailure,
   BranchActionSuccess,
@@ -85,10 +86,13 @@ export function useChatPageSidebarActions({
     }, 1_000)
   }, [refreshDiffs, showRightSidebar])
 
-  const handleOpenDiffFile = useCallback((filePath: string) => {
+  const handleOpenDiffFile = useCallback((
+    filePath: string,
+    options: { line?: number; action?: OpenExternalAction; editor?: EditorOpenSettings } = {},
+  ) => {
     const projectPath = projectPathRef.current
     const resolvedPath = resolveDiffFilePath(projectPath, filePath)
-    void state.handleOpenLocalLink({ path: resolvedPath }, "open_editor")
+    void state.handleOpenLocalLink({ path: resolvedPath, line: options.line }, options.action ?? "open_editor", options.editor)
   }, [state.handleOpenLocalLink])
 
   const handleCopyDiffFilePath = useCallback((filePath: string) => {
@@ -118,7 +122,7 @@ export function useChatPageSidebarActions({
     return await state.socket.command<ChatCommitDetails>({ type: "project.readCommit", projectId, sha })
   }, [projectId, state.socket])
 
-  const handleLoadDiffPatch = useCallback(async (filePath: string) => {
+  const handleLoadDiffPatch = useCallback(async (filePath: string, options?: { fullContext?: boolean }) => {
     if (!projectId) {
       throw new Error("Project not found")
     }
@@ -126,6 +130,7 @@ export function useChatPageSidebarActions({
       type: "project.readDiffPatch",
       projectId,
       path: filePath,
+      ...(options?.fullContext ? { fullContext: true } : {}),
     })
     return result.patch
   }, [projectId, state.socket])

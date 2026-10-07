@@ -26,6 +26,7 @@ import {
   type ChatSoundPreference,
   type DefaultProviderPreference,
   type EditorPreset,
+  type PaneVisibilityScope,
   type SubmitWhileRunning,
   type TerminalPreset,
 } from "../shared/types"
@@ -51,6 +52,10 @@ interface AppSettingsFile {
   transcript?: {
     windowAssistantMessages?: unknown
   }
+  paneVisibility?: {
+    widgets?: unknown
+    terminal?: unknown
+  }
   defaultProvider?: unknown
   providerDefaults?: {
     claude?: ProviderPreferenceInput
@@ -60,6 +65,9 @@ interface AppSettingsFile {
     pi?: ProviderPreferenceInput
   }
   newSidebarEnabled?: unknown
+  projectIconsInChats?: unknown
+  chatTabsEnabled?: unknown
+  widgetsPeekEnabled?: unknown
   newProjectsDirectory?: unknown
   setupShown?: unknown
   setupCompleted?: unknown
@@ -144,6 +152,12 @@ function normalizeSubmitWhileRunning(value: unknown): SubmitWhileRunning {
   return value === "steer" ? "steer" : DEFAULT_SUBMIT_WHILE_RUNNING
 }
 
+// Per chat by default: a pane you opened for one chat's work shouldn't follow
+// you into every other chat in the project.
+function normalizePaneVisibilityScope(value: unknown): PaneVisibilityScope {
+  return value === "project" ? "project" : "chat"
+}
+
 function normalizeDefaultProvider(value: unknown): DefaultProviderPreference {
   return value === "claude" || value === "codex" || value === "cursor" || value === "grok" || value === "pi" || value === "last_used"
     ? value
@@ -172,9 +186,13 @@ function toFilePayload(state: AppSettingsState) {
     terminal: state.terminal,
     editor: state.editor,
     transcript: state.transcript,
+    paneVisibility: state.paneVisibility,
     defaultProvider: state.defaultProvider,
     providerDefaults: state.providerDefaults,
     newSidebarEnabled: state.newSidebarEnabled,
+    ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
     newProjectsDirectory: state.newProjectsDirectory,
     setupShown: state.setupShown,
     setupCompleted: state.setupCompleted,
@@ -200,9 +218,13 @@ function toSnapshot(
     terminal: state.terminal,
     editor: state.editor,
     transcript: state.transcript,
+    paneVisibility: state.paneVisibility,
     defaultProvider: state.defaultProvider,
     providerDefaults: state.providerDefaults,
     newSidebarEnabled: state.newSidebarEnabled,
+    ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
     newProjectsDirectory: state.newProjectsDirectory,
     setupShown: state.setupShown,
     setupCompleted: state.setupCompleted,
@@ -282,9 +304,16 @@ function normalizeAppSettings(
         MAX_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES
       ),
     },
+    paneVisibility: {
+      widgets: normalizePaneVisibilityScope(source?.paneVisibility?.widgets),
+      terminal: normalizePaneVisibilityScope(source?.paneVisibility?.terminal),
+    },
     defaultProvider: normalizeDefaultProvider(source?.defaultProvider),
     providerDefaults: normalizeProviderDefaults(source?.providerDefaults),
     newSidebarEnabled,
+    ...(source?.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(source?.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(source?.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
     newProjectsDirectory,
     // Onboarding markers default to false so a machine that has never run the
     // wizard still gets it; once set they stay set for every browser.
@@ -320,9 +349,13 @@ function toComparablePayload(source: AppSettingsFile) {
     terminal: source.terminal,
     editor: source.editor,
     transcript: source.transcript,
+    paneVisibility: source.paneVisibility,
     defaultProvider: source.defaultProvider,
     providerDefaults: source.providerDefaults,
     newSidebarEnabled: source.newSidebarEnabled,
+    projectIconsInChats: source.projectIconsInChats,
+    chatTabsEnabled: source.chatTabsEnabled,
+    widgetsPeekEnabled: source.widgetsPeekEnabled,
     newProjectsDirectory: typeof source.newProjectsDirectory === "string"
       ? source.newProjectsDirectory.trim()
       : source.newProjectsDirectory,
@@ -347,6 +380,10 @@ function applyPatch(state: AppSettingsState, patch: AppSettingsPatch): AppSettin
     transcript: {
       ...state.transcript,
       ...patch.transcript,
+    },
+    paneVisibility: {
+      ...state.paneVisibility,
+      ...patch.paneVisibility,
     },
     providerDefaults: mergeProviderDefaultsPatch(state.providerDefaults, patch.providerDefaults),
   }, state.filePathDisplay).payload

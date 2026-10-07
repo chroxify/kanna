@@ -47,6 +47,16 @@ function sameSubagents(left: ChatRuntime["subagents"], right: ChatRuntime["subag
       && agent.type === other.type
       && agent.startedAt === other.startedAt
       && agent.endedAt === other.endedAt
+      && agent.toolUseId === other.toolUseId
+      && agent.description === other.description
+      && agent.summary === other.summary
+      && agent.workflowId === other.workflowId
+      && agent.stoppable === other.stoppable
+      && agent.usage?.totalTokens === other.usage?.totalTokens
+      && agent.usage?.toolUses === other.usage?.toolUses
+      // A workflow's progress is most of what changes while one runs, and a
+      // few KB at most: whole, rather than a field list that could miss one.
+      && (agent.workflow === other.workflow || JSON.stringify(agent.workflow) === JSON.stringify(other.workflow))
   })
 }
 
@@ -111,6 +121,14 @@ export function sameDiffs(left: ChatDiffSnapshot | null | undefined, right: Chat
   if (left.aheadCount !== right.aheadCount) return false
   if (left.behindCount !== right.behindCount) return false
   if (left.lastFetchedAt !== right.lastFetchedAt) return false
+  const leftPr = left.branchPullRequest
+  const rightPr = right.branchPullRequest
+  if (leftPr !== rightPr && (!leftPr || !rightPr
+    || leftPr.number !== rightPr.number
+    || leftPr.title !== rightPr.title
+    || leftPr.url !== rightPr.url
+    || leftPr.isDraft !== rightPr.isDraft
+    || leftPr.updatedAt !== rightPr.updatedAt)) return false
   const leftHistory = left.branchHistory?.entries ?? []
   const rightHistory = right.branchHistory?.entries ?? []
   if (leftHistory.length !== rightHistory.length) return false

@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, File, FileImage, FileJson, FileText, FileVideo, Link2, Sheet } from "lucide-react"
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { memo, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { cn } from "../../lib/utils"
 import { formatAttachmentSize } from "../messages/AttachmentCard"
 import {
@@ -15,7 +15,7 @@ import { FileContentView } from "../messages/FileContentView"
 import { TranscriptMarkdown } from "../messages/shared"
 import { Skeleton } from "../ui/skeleton"
 import type { ViewerAttachment } from "../../stores/viewerStore"
-import { ViewerIconButton, ViewerSurface, ViewerToggle } from "./ViewerSurface"
+import { ViewerIconButton, ViewerPanes, ViewerSurface, ViewerToggle } from "./ViewerSurface"
 
 /** Rows and columns the table view reads: the viewer has the room, and a sort wants the rows. */
 const VIEWER_TABLE_LIMITS = { rows: 1_000, columns: 50 }
@@ -140,19 +140,37 @@ export function AttachmentViewer({ attachment, onClose }: { attachment: ViewerAt
       )}
       bodyClassName={kind === "image" || kind === "video" ? "bg-muted/30" : undefined}
     >
-      <AttachmentBody attachment={attachment} kind={kind} content={content} view={view} />
+      {hasRenderedView(attachment) ? (
+        <ViewerPanes
+          value={view}
+          panes={{
+            rendered: () => <AttachmentBody attachment={attachment} kind={kind} content={content} view="rendered" />,
+            original: () => <AttachmentBody attachment={attachment} kind={kind} content={content} view="original" />,
+          }}
+        />
+      ) : (
+        <AttachmentBody attachment={attachment} kind={kind} content={content} view={view} />
+      )}
     </ViewerSurface>
   )
 }
 
 /**
  * A file's rendered view on its own, for a viewer body that isn't an
- * attachment's: a changed markdown or CSV file, previewed from its diff.
+ * attachment's: a changed markdown or CSV file, previewed in the diff list.
+ * Markdown flows at its length like the diffs around it; a table gets a box
+ * of its own to scroll, so its header can stick and it doesn't run for a
+ * thousand rows between two files.
  */
-export function RenderedFilePreview({ attachment }: { attachment: ViewerAttachment }) {
+export function RenderedFilePreview({ attachment, fill = false }: {
+  attachment: ViewerAttachment
+  /** The preview is the viewer's whole body (a file opened on its own): a table scrolls with it. */
+  fill?: boolean
+}) {
   const kind = previewKind(attachment)
   const content = useTextContent(attachment, kind)
-  return <AttachmentBody attachment={attachment} kind={kind} content={content} view="rendered" />
+  const body = <AttachmentBody attachment={attachment} kind={kind} content={content} view="rendered" />
+  return kind === "table" && !fill ? <div className="max-h-[70vh] overflow-auto">{body}</div> : body
 }
 
 function AttachmentBody({ attachment, kind, content, view }: {
@@ -193,7 +211,7 @@ function AttachmentBody({ attachment, kind, content, view }: {
       </div>
     )
   }
-  if (!content || content.status === "loading") return <TextSkeleton />
+  if (!content || content.status === "loading") return kind === "table" && view === "rendered" ? <TableSkeleton /> : <TextSkeleton />
   if (content.status === "error") {
     return <div className="flex min-h-full items-center justify-center p-6 text-sm text-destructive">{content.message}</div>
   }
@@ -227,6 +245,65 @@ function TextSkeleton() {
     <div className="mx-auto max-w-[72ch] space-y-3 px-6 py-8" aria-busy aria-label="Loading preview">
       {SKELETON_LINES.map((width, index) => <Skeleton key={index} className="h-3.5" style={{ width }} />)}
     </div>
+  )
+}
+
+// Column widths and, per cell, how full its bar runs: uneven, like data, and
+// the same every time, so the grid doesn't reshuffle between loads.
+const SKELETON_COLUMN_WIDTHS = [72, 148, 112, 188, 96, 136, 120, 164, 104, 140, 128, 176, 92, 152]
+const SKELETON_FILLS = [0.72, 0.48, 0.86, 0.58, 0.4, 0.94, 0.64, 0.52, 0.78, 0.44, 0.68, 0.9]
+const SKELETON_ROWS = 40
+
+/**
+ * A table on its way: the viewer's grid, header and all, in the table's own
+ * cell geometry so nothing moves when the rows land, with a band of light
+ * running through it corner to corner. Each cell's delay is its diagonal
+ * (row + column), so the band sweeps from the top left to the bottom right.
+ * More than the card holds; the scroller clips it. Still under reduced
+ * motion.
+ */
+function TableSkeleton() {
+  return (
+    <div className="h-full overflow-hidden" aria-busy aria-label="Loading table">
+      <table className="table-fixed border-collapse text-xs" style={{ width: SKELETON_COLUMN_WIDTHS.reduce((sum, width) => sum + width, 0) }}>
+        <colgroup>
+          {SKELETON_COLUMN_WIDTHS.map((width, column) => <col key={column} style={{ width }} />)}
+        </colgroup>
+        <thead>
+          <tr>
+            {SKELETON_COLUMN_WIDTHS.map((_, column) => (
+              <th key={column} className="px-3 py-2 shadow-[inset_0_-1px_0_hsl(var(--border)),inset_-1px_0_0_hsl(var(--border))]">
+                <div className="flex h-4 items-center">
+                  <SkeletonBar diagonal={column} fill={0.55 + (column % 3) * 0.12} strong />
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: SKELETON_ROWS }, (_, row) => (
+            <tr key={row}>
+              {SKELETON_COLUMN_WIDTHS.map((_, column) => (
+                <td key={column} className="border-b border-r border-border/60 px-3 py-1.5">
+                  <div className="flex h-4 items-center">
+                    <SkeletonBar diagonal={row + 1 + column} fill={SKELETON_FILLS[(row * 5 + column * 7) % SKELETON_FILLS.length]!} />
+                  </div>
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function SkeletonBar({ diagonal, fill, strong = false }: { diagonal: number; fill: number; strong?: boolean }) {
+  return (
+    <div
+      className={cn("kanna-table-wave h-2 rounded-full", strong ? "bg-foreground/15" : "bg-foreground/10")}
+      style={{ width: `${fill * 100}%`, animationDelay: `${diagonal * 40}ms` }}
+    />
   )
 }
 
@@ -273,24 +350,131 @@ function numericValue(cell: string): number | null {
   return Number(cleaned)
 }
 
+const cellCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+
 /**
- * Sorts rows by one column. Numbers as numbers when both cells are numeric,
- * text otherwise (with digits in order: "item 2" before "item 10"). Empty
- * cells always sink to the bottom, whichever direction.
+ * The rows' indices in sorted order, by one column. Numbers as numbers when
+ * both cells are numeric, text otherwise (with digits in order: "item 2"
+ * before "item 10"). Empty cells always sink to the bottom, whichever
+ * direction. Each cell is read once up front, not once per comparison: the
+ * numeric check is a regex, and a thousand rows compare ten thousand times.
  */
-export function sortTableRows(rows: readonly string[][], sort: SortState): string[][] {
-  if (!sort) return [...rows]
-  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
-  const factor = sort.direction === "asc" ? 1 : -1
-  return [...rows].sort((left, right) => {
-    const a = left[sort.column] ?? ""
-    const b = right[sort.column] ?? ""
-    if (!a.trim() || !b.trim()) return (a.trim() ? 0 : 1) - (b.trim() ? 0 : 1)
-    const numberA = numericValue(a)
-    const numberB = numericValue(b)
-    if (numberA !== null && numberB !== null) return (numberA - numberB) * factor
-    return collator.compare(a, b) * factor
+export function sortedRowOrder(rows: readonly string[][], sort: SortState): number[] {
+  const order = rows.map((_, index) => index)
+  if (!sort) return order
+  const keys = rows.map((row) => {
+    const text = row[sort.column] ?? ""
+    const empty = !text.trim()
+    return { text, empty, number: empty ? null : numericValue(text) }
   })
+  const factor = sort.direction === "asc" ? 1 : -1
+  return order.sort((left, right) => {
+    const a = keys[left]!
+    const b = keys[right]!
+    if (a.empty || b.empty) return (a.empty ? 1 : 0) - (b.empty ? 1 : 0)
+    if (a.number !== null && b.number !== null) return (a.number - b.number) * factor
+    return cellCollator.compare(a.text, b.text) * factor
+  })
+}
+
+export function sortTableRows(rows: readonly string[][], sort: SortState): string[][] {
+  return sortedRowOrder(rows, sort).map((index) => rows[index]!)
+}
+
+const EMPTY_ROW: string[] = []
+
+/** Rows in the first paint (a tall screen's worth), then in each chunk after. */
+const FIRST_ROW_CHUNK = 60
+const ROW_CHUNK = 100
+
+/** A column's widest, as a cell: 28rem. Longer text wraps inside it. */
+const MAX_COLUMN_WIDTH = 448
+const MIN_COLUMN_WIDTH = 48
+/** px-3 either side, the rule, and a pixel of slack against rounding into a wrap. */
+const CELL_CHROME = 24 + 1 + 2
+/** The header's sort arrow and the gap before it. */
+const HEADER_ICON = 12 + 4
+/** Cells measured per column: the longest by characters, which are near enough the widest. */
+const MEASURED_CELLS = 8
+
+let measureContext: CanvasRenderingContext2D | null | undefined
+
+/**
+ * Each column's width, from its header and its longest cells, measured in
+ * the table's font (text-xs). What an auto table would settle on, without
+ * laying out every row to find it.
+ */
+function measureColumnWidths(header: string[], body: string[][], columnCount: number, numericColumns: boolean[]): number[] {
+  measureContext ??= typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d")
+  const context = measureContext
+  const family = typeof document === "undefined" ? "sans-serif" : getComputedStyle(document.body).fontFamily
+  const textWidth = (text: string, weight: number) => {
+    if (!context) return text.length * 7
+    context.font = `${weight} 12px ${family}`
+    return Math.max(...text.split("\n").map((line) => context.measureText(line).width))
+  }
+  const digitWidth = textWidth("0", 400)
+  return Array.from({ length: columnCount }, (_, column) => {
+    const longest: string[] = []
+    for (const row of body) {
+      const cell = row[column]
+      if (!cell) continue
+      if (longest.length < MEASURED_CELLS) {
+        longest.push(cell)
+        longest.sort((a, b) => b.length - a.length)
+      } else if (cell.length > longest[MEASURED_CELLS - 1]!.length) {
+        longest[MEASURED_CELLS - 1] = cell
+        longest.sort((a, b) => b.length - a.length)
+      }
+    }
+    const cellWidth = Math.max(0, ...longest.map((cell) => (
+      // Numbers are tabular: every digit as wide as a zero.
+      numericColumns[column] ? Math.max(textWidth(cell, 400), cell.length * digitWidth) : textWidth(cell, 400)
+    )))
+    const headerWidth = textWidth(header[column] || `Column ${column + 1}`, 500) + HEADER_ICON
+    return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, Math.ceil(Math.max(cellWidth, headerWidth) + CELL_CHROME)))
+  })
+}
+
+/**
+ * One body row. Memoized and keyed by its place in the file, so a sort moves
+ * the rows' DOM rather than re-rendering every cell into a new position.
+ */
+const TableRow = memo(function TableRow({ row, columnCount, numericColumns, fillColumns }: {
+  row: string[]
+  columnCount: number
+  numericColumns: boolean[]
+  fillColumns: number
+}) {
+  return (
+    <tr className="hover:bg-muted/40">
+      {Array.from({ length: columnCount }, (_, column) => (
+        <td
+          key={column}
+          className={cn(
+            // A full grid: row and column rules alike, in the body's
+            // softer tone, closed on the right like the header.
+            "border-b border-r border-border/60 px-3 py-1.5 align-top text-foreground",
+            numericColumns[column] && "text-right tabular-nums",
+          )}
+        >
+          <div className="whitespace-pre-wrap break-words">{row[column] ? <CellText text={row[column]!} /> : " "}</div>
+        </td>
+      ))}
+      <FillerCells count={fillColumns} />
+    </tr>
+  )
+})
+
+function FillerCells({ count }: { count: number }) {
+  return Array.from({ length: count }, (_, column) => (
+    <td
+      key={`filler-${column}`}
+      aria-hidden
+      className="border-b border-r border-border/60 p-0"
+      style={{ width: FILLER_COLUMN_WIDTH, minWidth: FILLER_COLUMN_WIDTH }}
+    />
+  ))
 }
 
 /**
@@ -299,9 +483,12 @@ export function sortTableRows(rows: readonly string[][], sort: SortState): strin
  */
 function SortableTable({ table }: { table: TablePreviewData }) {
   const [sort, setSort] = useState<SortState>(null)
-  const [header = [], ...body] = table.rows
-  const columnCount = Math.max(header.length, ...body.map((row) => row.length))
-  const sorted = useMemo(() => sortTableRows(body, sort), [body, sort])
+  // Derived once per table: a fresh `body` each render would redo the sort
+  // and the numeric scan (every cell) on every render, sorts included.
+  const header = table.rows[0] ?? EMPTY_ROW
+  const body = useMemo(() => table.rows.slice(1), [table.rows])
+  const columnCount = useMemo(() => body.reduce((max, row) => Math.max(max, row.length), header.length), [body, header])
+  const order = useMemo(() => sortedRowOrder(body, sort), [body, sort])
   const numericColumns = useMemo(() => Array.from({ length: columnCount }, (_, column) => {
     // The first column is the row's label, whatever it holds (an id, a
     // year): it reads left, where the eye starts each row.
@@ -309,6 +496,23 @@ function SortableTable({ table }: { table: TablePreviewData }) {
     const cells = body.map((row) => row[column] ?? "").filter((cell) => cell.trim())
     return cells.length > 0 && cells.every((cell) => numericValue(cell) !== null)
   }), [body, columnCount])
+  const columnWidths = useMemo(() => measureColumnWidths(header, body, columnCount, numericColumns), [body, columnCount, header, numericColumns])
+
+  // The first screen of rows paints at once, the rest follow a chunk at a
+  // time in transitions: all of them in one go is tens of thousands of cells,
+  // and the viewer froze while they built. A click on a header still lands
+  // between chunks. Starts over for a new table.
+  const [renderedRows, setRenderedRows] = useState({ body, count: FIRST_ROW_CHUNK })
+  const renderedCount = renderedRows.body === body ? renderedRows.count : FIRST_ROW_CHUNK
+  if (renderedRows.body !== body) setRenderedRows({ body, count: FIRST_ROW_CHUNK })
+  useEffect(() => {
+    if (renderedCount >= body.length) return
+    const frame = requestAnimationFrame(() => {
+      startTransition(() => setRenderedRows((current) => ({ body: current.body, count: current.count + ROW_CHUNK })))
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [body.length, renderedCount])
+  const pendingRows = Math.max(0, body.length - renderedCount)
 
   function cycle(column: number) {
     setSort((current) => {
@@ -339,6 +543,9 @@ function SortableTable({ table }: { table: TablePreviewData }) {
       const lastHeader = lastHeaderRef.current
       const tbody = bodyRef.current
       if (!scroller || !tableElement || !lastHeader || !tbody) return
+      // Kept but hidden behind "Original": nothing to measure, and a
+      // measurement of nothing would re-render every row for it.
+      if (tableElement.checkVisibility?.() === false) return
       const top = tableElement.getBoundingClientRect()
       const spareWidth = scroller.clientWidth - (lastHeader.getBoundingClientRect().right - top.left)
       const spareHeight = scroller.clientHeight - (tbody.getBoundingClientRect().bottom - top.top)
@@ -360,15 +567,6 @@ function SortableTable({ table }: { table: TablePreviewData }) {
     return () => observer.disconnect()
   }, [])
 
-  const fillerCells = Array.from({ length: fill.columns }, (_, column) => (
-    <td
-      key={`filler-${column}`}
-      aria-hidden
-      className="border-b border-r border-border/60 p-0"
-      style={{ width: FILLER_COLUMN_WIDTH, minWidth: FILLER_COLUMN_WIDTH }}
-    />
-  ))
-
   return (
     <div
       ref={wrapperRef}
@@ -385,7 +583,18 @@ function SortableTable({ table }: { table: TablePreviewData }) {
         maxHeight: fill.rows > 0 ? fill.height : undefined,
       }}
     >
-      <table ref={tableRef} className="w-auto border-collapse text-xs">
+      {/* Fixed layout, with widths measured up front: an auto table sizes its
+          columns from every cell, so each chunk of rows would lay out the
+          whole table again (and shift the columns under you). */}
+      <table
+        ref={tableRef}
+        className="table-fixed border-collapse text-xs"
+        style={{ width: columnWidths.reduce((sum, width) => sum + width, 0) + fill.columns * FILLER_COLUMN_WIDTH }}
+      >
+        <colgroup>
+          {columnWidths.map((width, column) => <col key={column} style={{ width }} />)}
+          {Array.from({ length: fill.columns }, (_, column) => <col key={`filler-${column}`} style={{ width: FILLER_COLUMN_WIDTH }} />)}
+        </colgroup>
         <thead className="sticky top-0 z-10 bg-background dark:bg-card">
           <tr>
             {Array.from({ length: columnCount }, (_, column) => {
@@ -430,24 +639,16 @@ function SortableTable({ table }: { table: TablePreviewData }) {
           </tr>
         </thead>
         <tbody ref={bodyRef}>
-          {sorted.map((row, rowIndex) => (
-            <tr key={rowIndex} className="hover:bg-muted/40">
-              {Array.from({ length: columnCount }, (_, column) => (
-                <td
-                  key={column}
-                  className={cn(
-                    // A full grid: row and column rules alike, in the body's
-                    // softer tone, closed on the right like the header.
-                    "max-w-[28rem] border-b border-r border-border/60 px-3 py-1.5 align-top text-foreground",
-                    numericColumns[column] && "text-right tabular-nums",
-                  )}
-                >
-                  <div className="whitespace-pre-wrap break-words">{row[column] ? <CellText text={row[column]!} /> : "\u00A0"}</div>
-                </td>
-              ))}
-              {fillerCells}
-            </tr>
+          {order.slice(0, renderedCount).map((index) => (
+            <TableRow key={index} row={body[index]!} columnCount={columnCount} numericColumns={numericColumns} fillColumns={fill.columns} />
           ))}
+          {/* Holds the rows still to come, so the scrollbar is the table's
+              length from the start rather than growing under the thumb. */}
+          {pendingRows > 0 ? (
+            <tr aria-hidden>
+              <td colSpan={columnCount + fill.columns} className="p-0" style={{ height: pendingRows * FILLER_ROW_HEIGHT }} />
+            </tr>
+          ) : null}
         </tbody>
         {fill.rows > 0 ? (
           <tbody aria-hidden>
@@ -458,7 +659,7 @@ function SortableTable({ table }: { table: TablePreviewData }) {
                     <div>{"\u00A0"}</div>
                   </td>
                 ))}
-                {fillerCells}
+                <FillerCells count={fill.columns} />
               </tr>
             ))}
           </tbody>

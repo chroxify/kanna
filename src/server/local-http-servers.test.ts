@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { extractHtmlTitle, filterLocalHttpServers, isDescendantPid, isPathWithin, parseLsofListeningEntries } from "./local-http-servers"
+import { extractHtmlTitle, filterLocalHttpServers, isDescendantPid, isPathWithin, parseLsofCwdOutput, parseLsofListeningEntries } from "./local-http-servers"
 
 describe("local http servers", () => {
   test("extracts html titles", () => {
@@ -21,6 +21,27 @@ other   12347 jake   23u  IPv4 123458      0t0  TCP 127.0.0.1:8080 (LISTEN)
       { port: 5174, owners: [{ command: "node", pid: 12345 }] },
       { port: 8080, owners: [{ command: "other", pid: 12347 }] },
     ])
+  })
+
+  test("parses batched process cwds from lsof field output", () => {
+    const output = [
+      "p8418",
+      "fcwd",
+      "n/Users/jake/app",
+      "p9562",
+      "fcwd",
+      "p15565",
+      "fcwd",
+      "n/tmp/other project",
+      "",
+    ].join("\n")
+
+    expect(parseLsofCwdOutput(output)).toEqual(new Map([
+      [8418, "/Users/jake/app"],
+      [15565, "/tmp/other project"],
+    ]))
+    expect(parseLsofCwdOutput(output).has(9562)).toBe(false)
+    expect(parseLsofCwdOutput("").size).toBe(0)
   })
 
   test("detects project paths", () => {

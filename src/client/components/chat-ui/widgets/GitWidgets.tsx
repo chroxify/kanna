@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Check, FileDiff, GitBranch, GitBranchPlus, GitMerge, Github, GitPullRequest, History, LoaderCircle, Pencil, PenLine, RefreshCw, Sparkles, Upload } from "lucide-react"
+import { ArrowDown, ArrowUp, Check, Eye, Search, GitBranch, GitBranchPlus, GitMerge, Github, GitPullRequest, History, LoaderCircle, Pencil, PenLine, RefreshCw, Sparkles, Upload } from "lucide-react"
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import type {
   ChatBranchDetails,
@@ -23,21 +23,25 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { Input } from "../../ui/input"
 import { Textarea } from "../../ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip"
+import { BranchHoverCard } from "../git/BranchHoverCard"
 import { BranchPicker } from "../git/BranchPicker"
+import { BranchPullRequestRow, branchPullRequestEntry } from "../git/BranchPullRequestRow"
 import { CommitHistoryRow } from "../git/CommitHistoryRow"
 import { CommitHoverCard } from "../git/CommitHoverCard"
 import { DiffFileHoverCard } from "../git/DiffFileHoverCard"
 import { DiffFileRow, type DiffFileActions } from "../git/DiffFileRow"
 import { GitHubPublishModal } from "../git/GitHubPublishModal"
 import { MergeBranchModal } from "../git/MergeBranchModal"
-import { DiffFileStat, StageCheckbox } from "../git/shared"
+import { DiffFileStat, sortByPath, StageCheckbox } from "../git/shared"
 import {
   WIDGET_FOOTER_BUTTON_CLASS,
   WIDGET_FOOTER_ICON_BUTTON_CLASS,
   WIDGET_ROW_REVEAL_CLASS,
+  WIDGET_STRIP_INPUT_CLASS,
   WidgetFooter,
   WidgetList,
   WidgetMoreRow,
+  WidgetRow,
   WidgetStatic,
   WidgetStrip,
 } from "./parts"
@@ -48,7 +52,21 @@ export type { DiffFileActions } from "../git/DiffFileRow"
 
 // The Changes list opens on a screenful and pages on from there: the card is
 // an index, and thousands of rows at once make the whole app sluggish.
-export const INITIAL_VISIBLE_DIFF_FILE_COUNT = 12
+/**
+ * The Changes search: every word of the query in the file's path, in any
+ * order, ignoring case ("widget card" finds widgets/WidgetCard.tsx). Keeps
+ * the list's order.
+ */
+export function filterFilesByQuery<T extends { path: string }>(files: readonly T[], query: string): readonly T[] {
+  const words = query.toLowerCase().split(/\s+/u).filter(Boolean)
+  if (words.length === 0) return files
+  return files.filter((file) => {
+    const path = file.path.toLowerCase()
+    return words.every((word) => path.includes(word))
+  })
+}
+
+export const INITIAL_VISIBLE_DIFF_FILE_COUNT = 5
 export const VISIBLE_DIFF_FILE_INCREMENT = 200
 // History opens on the latest few commits; "Show more" reveals the rest of
 // what the server sends, which is 25 (diff-store's BRANCH_HISTORY_LIMIT).
@@ -138,14 +156,21 @@ function formatFetchTooltip(isoTimestamp?: string) {
 }
 
 /**
- * The git part of the widget column, three cards.
+ * The git part of the widget column, split by time: the present in one card,
+ * the past in another.
  *
- * Branch names the current branch and carries the sync controls (fetch, and
- * ↓/↑ counts to pull and push). It expands into the branch picker (find,
- * switch or create a branch), with Merge and PR in its footer. Changes is an
- * "N files changed" disclosure over the file list, an index: each row opens
- * its diff in the viewer over the chat, and the commit box stays in
- * view below. History lists recent commits.
+ * Branch is the present: where you are and what you're doing there, under
+ * one header. The header names the branch and carries the sync controls
+ * (fetch, and ↓/↑ counts to pull and push). The body is the branch's open PR,
+ * then, while the tree is dirty, the changes: a strip that counts and
+ * searches them, the file list (an index where each row opens its diff in
+ * the viewer over the chat) and the commit box. The header opens the branch
+ * picker (find, switch or create a branch) in place of the whole body, with
+ * Merge and PR in its footer. The branch stays on top and your changes right
+ * under it, the two things you look at every turn.
+ *
+ * Commits is the past: what's incoming, then the branch's recent commits. A
+ * record you glance at, so it folds away when long.
  */
 function GitWidgetsImpl({
   projectId,
@@ -194,15 +219,21 @@ function GitWidgetsImpl({
   const [mergeBranchList, setMergeBranchList] = useState<ChatBranchListResult | null>(null)
   const [isGitHubPublishModalOpen, setIsGitHubPublishModalOpen] = useState(false)
   const [visibleFileCount, setVisibleFileCount] = useState(INITIAL_VISIBLE_DIFF_FILE_COUNT)
+  const [fileQuery, setFileQuery] = useState("")
   const filePaths = useMemo(() => diffs.files.map((file) => file.path), [diffs.files])
   const filePathsKey = useMemo(() => filePaths.join("\u0000"), [filePaths])
   // Local, not persisted: the picker is a place you visit, not a view to keep open.
   const [branchesExpanded, setBranchesExpanded] = useState(false)
   const [showAllHistory, setShowAllHistory] = useState(false)
   const historyListRef = useRef<HTMLDivElement | null>(null)
+  const pullRequestListRef = useRef<HTMLDivElement | null>(null)
   const changesListRef = useRef<HTMLDivElement | null>(null)
-  const [changesExpanded, setChangesExpanded] = useWidgetExpanded(projectId, "changes", diffs.files.length)
-  const [historyExpanded, setHistoryExpanded] = useWidgetExpanded(projectId, "history", diffs.branchHistory?.entries.length ?? 0)
+  // Tree order, here and in the viewer, as GitHub and VS Code list changes:
+  // related files sit together and the order doesn't move as edits grow.
+  const filesInOrder = useMemo(() => sortByPath(diffs.files), [diffs.files])
+  // Starts open whatever the count: it shows five commits, then "Show more",
+  // so it's never too long to open with (the changed files' reason too).
+  const [historyExpanded, setHistoryExpanded] = useWidgetExpanded(projectId, "history", diffs.branchHistory?.entries.length ?? 0, true)
   const summary = useRightSidebarStore((store) => (projectId ? (store.projectUi[projectId]?.summary ?? "") : ""))
   const description = useRightSidebarStore((store) => (projectId ? (store.projectUi[projectId]?.description ?? "") : ""))
   // The message and description fields stay hidden behind the pencil: the
@@ -212,6 +243,21 @@ function GitWidgetsImpl({
   const [commitEditorOpen, setCommitEditorOpen] = useState(() => summary.trim().length > 0 || description.trim().length > 0)
   const commitMessageInputRef = useRef<HTMLInputElement | null>(null)
   const reviewedPath = useReviewedPath(projectId)
+
+  // The row the viewer is on stays in sight: scrolling the diff list moves
+  // the highlight here, so the list shows that row, past the first five if
+  // it must be, and scrolls just far enough to show it.
+  useEffect(() => {
+    if (!reviewedPath) return
+    const index = filterFilesByQuery(filesInOrder, fileQuery).findIndex((file) => file.path === reviewedPath)
+    if (index === -1) return
+    setVisibleFileCount((count) => Math.max(count, index + 1))
+    requestAnimationFrame(() => {
+      changesListRef.current
+        ?.querySelector(`[data-row-key="${CSS.escape(reviewedPath)}"]`)
+        ?.scrollIntoView({ block: "nearest" })
+    })
+  }, [fileQuery, filesInOrder, reviewedPath])
   const setCommitDraft = useRightSidebarStore((store) => store.setCommitDraft)
   const clearCommitDraft = useRightSidebarStore((store) => store.clearCommitDraft)
   const diffCommitSelection = useDiffCommitStore((store) => (projectId ? store.selectionsByProjectId[projectId] : undefined))
@@ -221,6 +267,7 @@ function GitWidgetsImpl({
 
   useEffect(() => {
     setVisibleFileCount(INITIAL_VISIBLE_DIFF_FILE_COUNT)
+    setFileQuery("")
     setShowAllHistory(false)
   }, [projectId])
 
@@ -236,6 +283,7 @@ function GitWidgetsImpl({
   const selectedCount = selectedPaths.length
   const allSelected = diffs.files.length > 0 && selectedCount === diffs.files.length
   const someSelected = selectedCount > 0 && selectedCount < diffs.files.length
+  const reviewLabel = allSelected ? "Review all" : someSelected ? `Review ${selectedCount}` : "Review"
   const trimmedSummary = summary.trim()
   const hasSummary = trimmedSummary.length > 0
   const isCommitting = commitModeInFlight !== null
@@ -488,10 +536,13 @@ function GitWidgetsImpl({
     </WidgetFooter>
   ) : null
 
-  // The message fields, over the commit buttons while the pencil is on.
+  // The message fields, over the commit buttons while the pencil is on. They
+  // are the footer's surface, as the buttons are: borderless, edge to edge,
+  // one rule between each, and the sparkle an accessory at the message's end
+  // like the pencil at the button's, so the two icons stack in one column.
   const commitFields = (
     <div>
-      <div className="relative">
+      <div className="flex h-10 min-w-0 items-stretch border-b border-border">
         <Input
           ref={commitMessageInputRef}
           value={summary}
@@ -501,7 +552,7 @@ function GitWidgetsImpl({
           }}
           onKeyDown={handleCommitKeyDown}
           placeholder="Commit message"
-          className="rounded-t-xl rounded-b-none px-3 pr-10"
+          className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 py-0"
           disabled={isBusy}
         />
         <Tooltip delayDuration={0}>
@@ -509,7 +560,7 @@ function GitWidgetsImpl({
             <button
               type="button"
               aria-label="Generate commit message"
-              className="absolute right-1.5 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              className="flex h-full w-10 shrink-0 items-center justify-center border-l border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
               disabled={!canGenerate}
               onClick={() => void handleGenerate()}
             >
@@ -530,9 +581,7 @@ function GitWidgetsImpl({
         onKeyDown={handleCommitKeyDown}
         placeholder="Description"
         rows={3}
-        // No ring (it would clash with the input's edge above), but the
-        // border still says which of the two fields has focus.
-        className="-mt-px rounded-t-none rounded-b-xl px-3 outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:border-ring"
+        className="resize-none rounded-none border-0 bg-transparent px-3 py-2.5 outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0"
         disabled={isBusy}
       />
     </div>
@@ -540,13 +589,12 @@ function GitWidgetsImpl({
 
   const commitBox = hasChanges && diffs.status === "ready" ? (
     <WidgetFooter above={commitEditorOpen ? commitFields : undefined}>
-      {/* A split button: one outline surface, the commit taking the width and
-          the pencil an accessory at its end, like a split button's dropdown
-          half. They're one control (commit, optionally with your own message),
-          so one surface; each half still lights on its own under the pointer.
-          The divider runs the full height, so each half's hover fill meets
-          it edge to edge. */}
-      <div className="flex h-10 min-w-0 flex-1 items-stretch overflow-hidden rounded-xl border border-border bg-card">
+      {/* A split button, as the footer itself: the commit taking the width
+          and the pencil an accessory at its end, like a split button's
+          dropdown half. Each half lights on its own under the pointer, and
+          the rule between them runs the full height, so each half's hover
+          fill meets it edge to edge. */}
+      <div className="flex h-full min-w-0 flex-1 items-stretch">
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <button
@@ -628,11 +676,74 @@ function GitWidgetsImpl({
     </WidgetFooter>
   ) : null
 
+  // The branch's open PR, first under the header: it is about the branch as
+  // a whole. It lands from a background read, so it grows in.
+  const branchPullRequest = diffs.branchName && diffs.branchPullRequest
+    ? { pr: diffs.branchPullRequest, entry: branchPullRequestEntry(diffs.branchName, diffs.branchPullRequest) }
+    : null
+  const branchPullRequestBlock = branchPullRequest ? (
+    <div className="border-t border-border">
+      <WidgetList listRef={pullRequestListRef}>
+        <BranchPullRequestRow entry={branchPullRequest.entry} pr={branchPullRequest.pr} onReadBranch={onReadBranch} />
+      </WidgetList>
+      <BranchHoverCard
+        containerRef={pullRequestListRef}
+        entries={new Map([[branchPullRequest.entry.id, branchPullRequest.entry]])}
+        onReadBranch={onReadBranch}
+        repoSlug={diffs.originRepoSlug}
+      />
+    </div>
+  ) : null
+
+  // The Commits card: what's on the remote and not here yet, which pulls,
+  // then the commits, ↑ on the ones not pushed. So the Branch header's ↓ and
+  // ↑ counts each stand over the rows they would move.
+  const hasIncoming = isPublishedBranch && behindCount > 0
+  const commitList = (
+    <>
+      <WidgetList listRef={historyListRef}>
+        {hasIncoming ? (
+          <WidgetRow
+            icon={isSyncing ? <LoaderCircle className="animate-spin" /> : <ArrowDown className="text-foreground" />}
+            title={`${behindCount} incoming ${behindCount === 1 ? "commit" : "commits"}`}
+            subtitle="On the remote, not here yet"
+            disabled={isSyncing}
+            onActivate={() => void handleSync("pull")}
+            aria-label={`Pull ${behindCount} ${behindCount === 1 ? "commit" : "commits"}`}
+          />
+        ) : null}
+        {visibleHistory.shown.map((entry, index) => (
+          <CommitHistoryRow
+            key={entry.sha}
+            entry={entry}
+            isPendingPush={index < aheadCount}
+            className={index >= INITIAL_VISIBLE_HISTORY_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
+          />
+        ))}
+        {branchHistory.length > INITIAL_VISIBLE_HISTORY_COUNT ? (
+          <WidgetMoreRow
+            count={visibleHistory.hiddenCount}
+            shown={showAllHistory}
+            onShow={() => setShowAllHistory(true)}
+            onHide={() => setShowAllHistory(false)}
+          />
+        ) : null}
+      </WidgetList>
+      <CommitHoverCard containerRef={historyListRef} entries={visibleHistory.shown} onReadCommit={onReadCommit} />
+    </>
+  )
+
   const openFileReview = (path: string) => {
     if (projectId) openViewer({ kind: "diff", projectId, path })
   }
-  const visibleFiles = visibleFileCount < diffs.files.length ? diffs.files.slice(0, visibleFileCount) : diffs.files
-  const hiddenFileCount = diffs.files.length - visibleFiles.length
+  const firstCheckedPath = filesInOrder.find((file) => isDiffPathChecked(diffCommitSelection, file.path))?.path ?? null
+  // A search shows what it finds, a page at once rather than five: you typed
+  // to get to a file, not to page through for it.
+  const matchingFiles = filterFilesByQuery(filesInOrder, fileQuery)
+  const searching = fileQuery.trim().length > 0
+  const pageSize = searching ? Math.max(visibleFileCount, VISIBLE_DIFF_FILE_INCREMENT) : visibleFileCount
+  const visibleFiles = pageSize < matchingFiles.length ? matchingFiles.slice(0, pageSize) : matchingFiles
+  const hiddenFileCount = matchingFiles.length - visibleFiles.length
   // A page at a time (the count says what this click shows, and "left" what
   // remains), then "Show less" back to the first screenful.
   const filesMore = hiddenFileCount > 0 ? (
@@ -641,44 +752,109 @@ function GitWidgetsImpl({
       detail={hiddenFileCount > VISIBLE_DIFF_FILE_INCREMENT ? `${hiddenFileCount.toLocaleString()} left` : undefined}
       onShow={() => setVisibleFileCount((count) => count + VISIBLE_DIFF_FILE_INCREMENT)}
     />
-  ) : diffs.files.length > INITIAL_VISIBLE_DIFF_FILE_COUNT ? (
+  ) : !searching && diffs.files.length > INITIAL_VISIBLE_DIFF_FILE_COUNT ? (
     <WidgetMoreRow count={0} shown onHide={() => setVisibleFileCount(INITIAL_VISIBLE_DIFF_FILE_COUNT)} />
   ) : null
 
-  // A Strip for what acts on the whole list (include every file, review from
-  // the top), then the files. The list is an index: a row opens its diff in
+  // A Strip for what acts on the whole list (include every file, find one,
+  // review the checked ones), then the files. The list is an index: a row opens its diff in
   // the viewer over the chat, never inside this card.
   const fileList = hasChanges ? (
     <>
       <WidgetStrip
+        field
         leading={(
-          <StageCheckbox
-            checked={allSelected}
-            mixed={someSelected}
-            label={allSelected ? "Unselect all files from commit" : "Select all files for commit"}
-            className="size-4"
-            onClick={() => {
-              if (!projectId) return
-              setAllCheckedPaths(projectId, filePaths, someSelected ? true : !allSelected)
-            }}
-          />
+          // Everything checked is the resting state, and a full check says
+          // nothing, so the strip shows what it is at rest: a search. The
+          // check swaps in on hover or keyboard focus (the rows' idle-glyph
+          // swap: shrink, 1px blur, fade), and always on devices that can't
+          // hover. Partial or none is news, so that check shows as is.
+          <span className="group/lead relative flex size-4 items-center justify-center">
+            {allSelected ? (
+              <Search
+                aria-hidden
+                className="size-3.5 transition-[opacity,scale,filter] duration-150 ease-snappy group-hover/lead:scale-75 group-hover/lead:opacity-0 group-hover/lead:blur-[1px] group-focus-within/lead:scale-75 group-focus-within/lead:opacity-0 group-focus-within/lead:blur-[1px] [@media(hover:none)]:hidden"
+              />
+            ) : null}
+            <span
+              className={cn(
+                "flex items-center justify-center",
+                allSelected && "absolute inset-0 scale-75 opacity-0 blur-[1px] transition-[opacity,scale,filter] duration-150 ease-snappy group-hover/lead:scale-100 group-hover/lead:opacity-100 group-hover/lead:blur-none group-focus-within/lead:scale-100 group-focus-within/lead:opacity-100 group-focus-within/lead:blur-none [@media(hover:none)]:scale-100 [@media(hover:none)]:opacity-100 [@media(hover:none)]:blur-none",
+              )}
+            >
+              <StageCheckbox
+                checked={allSelected}
+                mixed={someSelected}
+                label={allSelected ? "Unselect all files from commit" : "Select all files for commit"}
+                className="size-4"
+                onClick={() => {
+                  if (!projectId) return
+                  setAllCheckedPaths(projectId, filePaths, someSelected ? true : !allSelected)
+                }}
+              />
+            </span>
+          </span>
         )}
         trailing={(
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => openFileReview(reviewedPath ?? diffs.files[0]!.path)}
-            className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:text-foreground hover:!bg-transparent hover:!border-border/0"
-          >
-            {/* Words, not an eye: it opens the first file and steps through
-                them all, which a glyph can't say. */}
-            <span>Review all</span>
-          </Button>
+          <>
+            {/* The totals of what will be committed, in each file row's +/-
+                typography; the old section header's words on hover. */}
+            <span title={changesSummary.title} className="flex">
+              <DiffFileStat additions={changesSummary.additions} deletions={changesSummary.deletions} />
+            </span>
+            {/* The eye the rows' own Review item uses, set in the rows' status
+                column: 24px wide, 8px in from the card's edge (the field's
+                6px inset and 2px padding), puts
+                its centre 20px in, where every row's M / A letter centres
+                (16px slot, 1px border + 5px padding + the list's 6px inset).
+                How many it opens moves to the label and tooltip. */}
+            <Tooltip delayDuration={0}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="none"
+                  disabled={!firstCheckedPath}
+                  aria-label={reviewLabel}
+                  onClick={() => {
+                    // Opens on a checked file, so the review is the checked files
+                    // and nothing else (the viewer adds an unchecked file only when
+                    // you open that file itself).
+                    const reviewedIsChecked = reviewedPath !== null && isDiffPathChecked(diffCommitSelection, reviewedPath)
+                    const target = reviewedIsChecked ? reviewedPath : firstCheckedPath
+                    if (target) openFileReview(target)
+                  }}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center p-0 text-muted-foreground hover:text-foreground hover:!bg-transparent hover:!border-border/0"
+                >
+                  <Eye className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{reviewLabel}</TooltipContent>
+            </Tooltip>
+          </>
         )}
       >
-        <span className="truncate text-xs text-muted-foreground">
-          {allSelected ? "All files in the commit" : someSelected ? `${selectedCount} of ${diffs.files.length} in the commit` : "No files in the commit"}
-        </span>
+        {/* The count lives here, in the search, rather than in a header of
+            its own: the Branch card has one header, and this line is where
+            the list is described. What's in the commit is said by the
+            checkbox, the +/- and Review. */}
+        <input
+          value={fileQuery}
+          onChange={(event) => setFileQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && fileQuery) {
+              event.preventDefault()
+              event.stopPropagation()
+              setFileQuery("")
+            }
+          }}
+          placeholder={`Search ${diffs.files.length.toLocaleString()} ${diffs.files.length === 1 ? "change" : "changes"}`}
+          aria-label="Search changes"
+          type="search"
+          autoComplete="off"
+          spellCheck={false}
+          data-1p-ignore
+          className={cn(WIDGET_STRIP_INPUT_CLASS, "[&::-webkit-search-cancel-button]:hidden")}
+        />
       </WidgetStrip>
       <WidgetList listRef={changesListRef}>
         {visibleFiles.map((file, index) => {
@@ -696,10 +872,13 @@ function GitWidgetsImpl({
                 setCheckedPath(projectId, file.path, !isChecked)
               }}
               onReview={() => openFileReview(file.path)}
-              className={index >= INITIAL_VISIBLE_DIFF_FILE_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
+              className={!searching && index >= INITIAL_VISIBLE_DIFF_FILE_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
             />
           )
         })}
+        {searching && matchingFiles.length === 0 ? (
+          <div className="truncate px-2 py-1.5 text-xs text-muted-foreground">No files match “{fileQuery.trim()}”</div>
+        ) : null}
         {filesMore}
       </WidgetList>
       <DiffFileHoverCard
@@ -731,6 +910,10 @@ function GitWidgetsImpl({
         </WidgetCard>
       </WidgetPresence>
       <WidgetPresence show={diffs.status === "ready"}>
+        {/* The present: where you are, and what you're doing there. One
+            header, the branch; the PR and the changes are its body, not
+            sections with headers of their own, and the picker takes the
+            whole body while it's open. */}
         <WidgetCard
           icon={<GitBranch />}
           title={(
@@ -743,70 +926,51 @@ function GitWidgetsImpl({
           onToggle={() => setBranchesExpanded((current) => !current)}
           actions={remoteSyncActions}
           footer={branchesExpanded ? branchActions : undefined}
+          bodyDivider={false}
+          collapsedBody={(
+            <>
+              <WidgetPresence show={branchPullRequestBlock !== null} spaced={false}>
+                {branchPullRequestBlock}
+              </WidgetPresence>
+              {/* A clean tree folds the changes away, commit box and all,
+                  rather than saying so; the header holds still. */}
+              <WidgetPresence show={hasChanges} spaced={false}>
+                <div className="border-t border-border">
+                  {fileList}
+                  {commitBox ? <div className="border-t border-border">{commitBox}</div> : null}
+                </div>
+              </WidgetPresence>
+            </>
+          )}
         >
-          <BranchPicker
-            currentBranchName={diffs.branchName}
-            onListBranches={onListBranches}
-            onCheckoutBranch={onCheckoutBranch}
-            onCreateBranch={onCreateBranch}
-            onDone={() => setBranchesExpanded(false)}
-            repoSlug={diffs.originRepoSlug}
-            onReadBranch={onReadBranch}
-          />
+          <div className="border-t border-border">
+            <BranchPicker
+              currentBranchName={diffs.branchName}
+              onListBranches={onListBranches}
+              onCheckoutBranch={onCheckoutBranch}
+              onCreateBranch={onCreateBranch}
+              onDone={() => setBranchesExpanded(false)}
+              repoSlug={diffs.originRepoSlug}
+              onReadBranch={onReadBranch}
+            />
+          </div>
         </WidgetCard>
       </WidgetPresence>
-      {/* A clean working tree drops the card rather than saying so. */}
-      <WidgetPresence show={diffs.status === "ready" && hasChanges}>
-        <WidgetCard
-          icon={<FileDiff />}
-          title={changesSummary.title}
-          expanded={changesExpanded}
-          onToggle={() => setChangesExpanded(!changesExpanded)}
-          // Totals of what will be committed, in the same +/- typography as each file row.
-          actions={<DiffFileStat additions={changesSummary.additions} deletions={changesSummary.deletions} className="pr-1" />}
-          footer={commitBox}
-        >
-          {fileList}
-        </WidgetCard>
-      </WidgetPresence>
-      <WidgetPresence show={diffs.status === "ready" && branchHistory.length > 0}>
+      {/* The past, in its own card: glanced at, where the card above is used
+          every turn, so it can stay folded out of the way. */}
+      <WidgetPresence show={diffs.status === "ready" && (branchHistory.length > 0 || hasIncoming)}>
         <WidgetCard
           icon={<History />}
-          title="History"
+          title="Commits"
           // Not the length: that is the server's cap (25) on any real repo.
           // What is worth a glance is what hasn't reached the remote yet.
           count={isPublishedBranch && aheadCount > 0 ? `${aheadCount} unpushed` : undefined}
           expanded={historyExpanded}
           onToggle={() => setHistoryExpanded(!historyExpanded)}
         >
-          <WidgetList listRef={historyListRef}>
-            {visibleHistory.shown.map((entry, index) => (
-              <CommitHistoryRow
-                key={entry.sha}
-                entry={entry}
-                isPendingPush={index < aheadCount}
-                className={index >= INITIAL_VISIBLE_HISTORY_COUNT ? WIDGET_ROW_REVEAL_CLASS : undefined}
-              />
-            ))}
-            {branchHistory.length > INITIAL_VISIBLE_HISTORY_COUNT ? (
-              <WidgetMoreRow
-                count={visibleHistory.hiddenCount}
-                shown={showAllHistory}
-                onShow={() => setShowAllHistory(true)}
-                onHide={() => setShowAllHistory(false)}
-              />
-            ) : null}
-          </WidgetList>
-          <CommitHoverCard
-            containerRef={historyListRef}
-            entries={visibleHistory.shown}
-            aheadCount={aheadCount}
-            onReadCommit={onReadCommit}
-            onOpenFile={onOpenFile}
-          />
+          {commitList}
         </WidgetCard>
       </WidgetPresence>
-
       <MergeBranchModal
         open={mergeModalOpen}
         onOpenChange={setMergeModalOpen}

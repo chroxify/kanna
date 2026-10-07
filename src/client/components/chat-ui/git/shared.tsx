@@ -121,6 +121,72 @@ export function diffStatus(file: DiffFile): { letter: string; label: string; cla
   return { letter: "M", label: "Modified", className: "text-muted-foreground" }
 }
 
+/**
+ * Files GitHub (through linguist) treats as generated and doesn't render by
+ * default: lockfiles, minified bundles, source maps, Xcode project files,
+ * protobuf output. Nobody reads them line by line, and they're often long
+ * enough to stall the diffs around them.
+ */
+const GENERATED_FILE_NAMES = new Set([
+  "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "deno.lock",
+  "Cargo.lock", "Gemfile.lock", "composer.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "go.sum", "go.work.sum",
+  "Podfile.lock", "Package.resolved", "flake.lock", "pubspec.lock", "mix.lock", "gradle.lockfile", "project.pbxproj",
+])
+const GENERATED_FILE_PATTERN = /(?:[.-]min\.(?:js|mjs|css)|\.(?:js|mjs|css)\.map|\.pb\.(?:go|swift|cc|h)|_pb2(?:_grpc)?\.pyi?|\.xcworkspacedata)$/iu
+
+export function isGeneratedPath(path: string) {
+  const name = path.slice(path.lastIndexOf("/") + 1)
+  return GENERATED_FILE_NAMES.has(name) || GENERATED_FILE_PATTERN.test(name)
+}
+
+/** Changed lines past which a diff waits for a click: one huge file shouldn't stall the rest. */
+export const LARGE_DIFF_LINES = 1_000
+
+/**
+ * Why a file's diff isn't drawn straight away, GitHub's precautions: what
+ * the file says instead, and whether "Load diff" can still show it. Null
+ * when it's drawn as usual. An image or PDF never lands here; it shows as
+ * itself.
+ */
+export function diffHold(file: DiffFile): { message: string; loadable: boolean } | null {
+  const lines = file.additions + file.deletions
+  if (file.binary) return { message: "Binary file not shown.", loadable: false }
+  if (file.changeType === "renamed" && lines === 0) return { message: "File renamed without changes.", loadable: false }
+  if (file.changeType !== "deleted" && file.size === 0) return { message: "Empty file.", loadable: false }
+  if (file.changeType === "deleted") return { message: "This file was deleted.", loadable: true }
+  if (isGeneratedPath(file.path)) return { message: "Generated files are not rendered by default.", loadable: true }
+  if (lines > LARGE_DIFF_LINES) return { message: "Large diffs are not rendered by default.", loadable: true }
+  return null
+}
+
+const PATH_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+
+/**
+ * Tree order, as GitHub's and VS Code's file lists: folder by folder, a
+ * folder's subfolders before its files, names in natural order ("item2"
+ * before "item10", case aside). A file sits with its neighbours, so a
+ * component and its test read one after the other.
+ */
+export function compareFilePaths(left: string, right: string) {
+  const leftParts = left.split("/")
+  const rightParts = right.split("/")
+  const shared = Math.min(leftParts.length, rightParts.length)
+  for (let index = 0; index < shared; index += 1) {
+    const leftPart = leftParts[index]!
+    const rightPart = rightParts[index]!
+    if (leftPart === rightPart) continue
+    const leftIsFolder = index < leftParts.length - 1
+    const rightIsFolder = index < rightParts.length - 1
+    if (leftIsFolder !== rightIsFolder) return leftIsFolder ? -1 : 1
+    return PATH_COLLATOR.compare(leftPart, rightPart) || (leftPart < rightPart ? -1 : 1)
+  }
+  return leftParts.length - rightParts.length
+}
+
+export function sortByPath<T extends { path: string }>(files: readonly T[]): T[] {
+  return [...files].sort((left, right) => compareFilePaths(left.path, right.path))
+}
+
 /** "src/app/Page.tsx" → name "Page.tsx", folder "src/app". */
 export function splitDiffPath(path: string) {
   const slash = path.lastIndexOf("/")
