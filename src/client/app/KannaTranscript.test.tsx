@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { CollapsedToolGroup } from "../components/messages/CollapsedToolGroup"
 import { OpenLocalLinkProvider } from "../components/messages/shared"
 import { formatPromptTimestamp } from "../components/messages/ResultMessage"
-import type { HydratedTranscriptMessage } from "../../shared/types"
+import type { HydratedTranscriptMessage, MessageSource } from "../../shared/types"
 import {
   buildResolvedTranscriptRows,
   computeStableResolvedTranscriptRows,
@@ -315,6 +315,328 @@ Please check the latest error first.`,
 
     expect(countRowWrappers(html)).toBe(2)
     expect(html).toContain("Worked for 1m 1s")
+  })
+
+  test("a prompt nobody typed says who sent it in its bubble, and the boundary above only dates it", () => {
+    const at = (minute: number) => new Date(2026, 6, 19, 8, minute).toISOString()
+    const turn = (index: number, minute: number): HydratedTranscriptMessage[] => [
+      { id: `text-${index}`, kind: "assistant_text", text: "ok", timestamp: at(minute) },
+      { id: `result-${index}`, kind: "result", success: true, cancelled: false, result: "", durationMs: 1000, timestamp: at(minute) },
+    ]
+    const html = renderTranscript([
+      { id: "user-1", kind: "user_prompt", content: "mine", timestamp: at(0) },
+      ...turn(1, 1),
+      { id: "user-2", kind: "user_prompt", content: "scheduled", source: { kind: "schedule", scheduleId: "s" }, timestamp: at(10) },
+      ...turn(2, 11),
+      { id: "user-3", kind: "user_prompt", content: "from a peer", source: { kind: "agent", chatId: "c" }, timestamp: at(20) },
+      ...turn(3, 21),
+      { id: "user-4", kind: "user_prompt", content: "report", source: { kind: "report", chatIds: ["c"] }, timestamp: at(30) },
+      ...turn(4, 31),
+      { id: "user-5", kind: "user_prompt", content: "mine again", timestamp: at(40) },
+    ])
+
+    // Every boundary is a time and nothing more, the user's own included.
+    for (const minute of [10, 20, 30, 40]) expect(html).toContain(`>${formatPromptTimestamp(at(minute))}<`)
+    expect(html).not.toContain("from an automation")
+    expect(html).not.toContain("from another agent")
+    expect(html).not.toContain("from a sub-chat")
+    // Each sender is said once, by the quote over its bubble. Nothing
+    // here knows the chats or the schedule, so each quote is the plain line.
+    for (const sender of ["Automation", "Another agent", "Sub-chat"]) expect(html.split(`>${sender}<`).length - 1).toBe(1)
+  })
+
+  test("a prompt nobody typed sits on the agent's side, in a prompt's bubble", () => {
+    const timestamp = new Date(2026, 6, 19, 9, 5).toISOString()
+    const bubble = "rounded-2xl border border-border bg-muted"
+    const typed = renderTranscript([{ id: "user-1", kind: "user_prompt", content: "mine", timestamp }])
+    expect(typed).toContain("items-end")
+    expect(typed).not.toContain("items-start")
+    expect(typed).toContain(bubble)
+
+    const sources: MessageSource[] = [
+      { kind: "report", chatIds: ["c"] },
+      { kind: "agent", chatId: "c" },
+      { kind: "schedule", scheduleId: "s" },
+    ]
+    for (const source of sources) {
+      const html = renderTranscript([{ id: "user-1", kind: "user_prompt", content: "theirs", source, timestamp }])
+      expect(html).toContain("items-start")
+      expect(html).not.toContain("items-end")
+      expect(html).toContain(bubble)
+      // Held to five lines until asked for.
+      expect(html.split("max-height:5lh").length - 1).toBe(1)
+    }
+    // The same clamp for what the user typed, with room for 25.
+    expect(typed.split("max-height:25lh").length - 1).toBe(1)
+    expect(typed).not.toContain("max-height:5lh")
+  })
+
+  test("what the agent says is never clamped", () => {
+    const html = renderTranscript([
+      { id: "text-1", kind: "assistant_text", text: Array.from({ length: 40 }, (_, line) => `line ${line}`).join("\n\n"), timestamp: new Date().toISOString() },
+    ])
+    expect(html).toContain("line 39")
+    expect(html).not.toContain("max-height:")
+    expect(html).not.toContain("Show more")
+  })
+
+  test("a report quotes the call that started its sub-chat", () => {
+    const at = (minute: number) => new Date(2026, 6, 19, 8, minute).toISOString()
+    const call = (id: string, toolName: string, payload: Record<string, unknown>, rawResult: Record<string, unknown>, minute: number): HydratedTranscriptMessage => ({
+      id, kind: "tool", toolKind: "chat", toolName, toolId: id, input: { payload }, rawResult, resultEntryId: `result-${id}`, timestamp: at(minute),
+    })
+    const report = (id: string, minute: number): HydratedTranscriptMessage => ({
+      id,
+      kind: "user_prompt",
+      content: "<system-message>\nSub-chat completed: [Parser audit](/chat/child) (chat id child)\n</system-message>\n\nall clear",
+      source: { kind: "report", chatIds: ["child"] },
+      timestamp: at(minute),
+    })
+    const started = call("chat-1", "create_chat", { message: "audit the parser", title: "Parser audit" }, { chatId: "child", title: "Parser audit" }, 1)
+
+    const html = renderTranscript([started, report("user-1", 5)])
+    // The card where the call sits says what the call did. The quote on the
+    // report says what the report is to, in the words that call used.
+    const quote = ">audit the parser<"
+    expect(html.split("Started a sub-chat · audit the parser").length - 1).toBe(1)
+    expect(html.split(quote).length - 1).toBe(1)
+    expect(html.indexOf("Started a sub-chat")).toBeLessThan(html.indexOf(quote))
+
+    // A report answers the last thing its sub-chat was sent.
+    const followUp = renderTranscript([
+      started,
+      report("user-1", 5),
+      call("chat-2", "send_message", { chatId: "child", message: "now the lexer" }, { started: true }, 6),
+      report("user-2", 9),
+    ])
+    const second = followUp.slice(followUp.indexOf('id="msg-user-2"'))
+    expect(second).toContain(">now the lexer<")
+    expect(second).not.toContain("audit the parser")
+
+    // With the call outside what is loaded, the quote is the chat's row and
+    // nothing under it.
+    const alone = renderTranscript([report("user-1", 5)])
+    expect(alone).toContain(">Sub-chat<")
+    expect(alone).not.toContain("truncate pl-[26px]")
+    expect(alone).toContain("all clear")
+  })
+
+  test("a report on several sub-chats is a bubble for each, beside its own quote", () => {
+    const html = renderTranscript([
+      {
+        id: "chat-1", kind: "tool", toolKind: "chat", toolName: "create_chat", toolId: "chat-1",
+        input: { payload: { message: "tell a joke", title: "Joke" } },
+        rawResult: { chatId: "abc", title: "Joke" },
+        resultEntryId: "result-chat-1",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        id: "user-1",
+        kind: "user_prompt",
+        content: [
+          "<system-message>\nSub-chat completed: [Joke](/chat/abc) (chat id abc)\n</system-message>",
+          "Why did the scarecrow win an award?",
+          "<system-message>\nSub-chat failed: [Deploy](/chat/def) (chat id def)\n</system-message>",
+          "---\n\ncredentials expired",
+        ].join("\n\n"),
+        source: { kind: "report", chatIds: ["abc", "def"] },
+        timestamp: new Date().toISOString(),
+      },
+    ])
+    const report = html.slice(html.indexOf('id="msg-user-1"'))
+    expect(report.split("max-height:5lh").length - 1).toBe(2)
+    // The rule that divided them in one bubble has nothing to divide in two.
+    expect(report).not.toContain("<hr")
+    // In order: the first sub-chat's call, its words, then the second with no call to quote.
+    const words = report.indexOf("Why did the scarecrow")
+    // The second quote is its chat's row alone: it is found after the first sub-chat's words.
+    const order = [report.indexOf(">tell a joke<"), words, report.indexOf(">Sub-chat<", words), report.indexOf("credentials expired")]
+    expect(order.every((position) => position >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+  })
+
+  test("a chat that opens with an agent's message gets a boundary of its own", () => {
+    const timestamp = new Date(2026, 6, 19, 9, 5).toISOString()
+    const fromAgent = renderTranscript([
+      { id: "user-1", kind: "user_prompt", content: "audit the parser", source: { kind: "agent", chatId: "parent" }, timestamp },
+    ])
+    // Dated by the boundary, and attributed by the quote over its bubble: the
+    // same row the sender draws on what comes back.
+    expect(fromAgent).toContain(`>${formatPromptTimestamp(timestamp)}<`)
+    expect(fromAgent).toContain("Another agent")
+    expect(fromAgent).not.toContain("Replied to")
+    // The boundary comes before the message it introduces.
+    expect(fromAgent.indexOf(formatPromptTimestamp(timestamp))).toBeLessThan(fromAgent.indexOf("audit the parser"))
+
+    // A chat the user opens still starts with the message and no boundary.
+    const fromUser = renderTranscript([
+      { id: "user-1", kind: "user_prompt", content: "audit the parser", timestamp },
+    ])
+    expect(fromUser).not.toContain(formatPromptTimestamp(timestamp))
+  })
+
+  test("a prompt after a stopped turn is still dated and still says it came from an automation", () => {
+    const timestamp = new Date(2026, 6, 19, 9, 30).toISOString()
+    const html = renderTranscript([
+      { id: "user-1", kind: "user_prompt", content: "start", timestamp: new Date(2026, 6, 19, 9, 0).toISOString() },
+      { id: "stop-1", kind: "interrupted", timestamp: new Date(2026, 6, 19, 9, 1).toISOString() },
+      { id: "user-2", kind: "user_prompt", content: "check the deploy", source: { kind: "schedule", scheduleId: "s" }, timestamp },
+    ])
+    expect(html).toContain(`>${formatPromptTimestamp(timestamp)}<`)
+    expect(html).toContain("Automation")
+  })
+
+  test("what Kanna tells the agent inside a message is not shown to the reader", () => {
+    const html = renderTranscript([
+      {
+        id: "user-1",
+        kind: "user_prompt",
+        content: [
+          "<system-message>\nSub-chat completed: [Tell me a joke](/chat/abc) (chat id abc)\n</system-message>",
+          "Why did the scarecrow win an award?",
+          "<system-message>\nSub-chat failed: [Deploy](/chat/def) (chat id def)\n</system-message>",
+          "---\n\ncredentials expired",
+        ].join("\n\n"),
+        source: { kind: "report", chatIds: ["abc", "def"] },
+        timestamp: new Date().toISOString(),
+      },
+    ])
+    expect(html).toContain("Why did the scarecrow win an award?")
+    expect(html).toContain("credentials expired")
+    expect(html).not.toContain("chat id")
+    expect(html).not.toContain("Sub-chat completed")
+    expect(html).not.toContain("system-message")
+  })
+
+  test("a message with nothing for the reader draws no bubble", () => {
+    const timestamp = new Date(2026, 6, 19, 9, 5).toISOString()
+    const html = renderTranscript([
+      {
+        id: "user-1",
+        kind: "user_prompt",
+        content: "<system-message>\nSub-chat cancelled: [Deploy](/chat/def) (chat id def)\n</system-message>",
+        source: { kind: "report", chatIds: ["def"] },
+        timestamp,
+      },
+    ])
+    // The boundary still says a sub-chat reported in; there is just no text under it.
+    expect(html).toContain("from a sub-chat")
+    expect(html).not.toContain("Sub-chat cancelled")
+    expect(html).not.toContain("prose")
+  })
+
+  test("a report that is only the news of an adoption draws that line, and its boundary only dates it", () => {
+    const at = (minute: number) => new Date(2026, 6, 19, 9, minute).toISOString()
+    const html = renderTranscript([
+      { id: "user-1", kind: "user_prompt", content: "start", timestamp: at(0) },
+      { id: "text-1", kind: "assistant_text", text: "ok", timestamp: at(1) },
+      { id: "result-1", kind: "result", success: true, cancelled: false, result: "", durationMs: 1000, timestamp: at(1) },
+      {
+        id: "user-2",
+        kind: "user_prompt",
+        content: '<system-message>\nSub-chat adopted: [Audit](/chat/abc) (chat id abc) now reports to the chat "Coordinator" (/chat/xyz), which adopted it. Its result will not arrive here. read_chat and wait_for_chats still reach it.\n</system-message>',
+        source: { kind: "report", chatIds: ["abc"] },
+        timestamp: at(5),
+      },
+    ])
+    expect(html).toContain('id="msg-user-2"')
+    expect(html).toContain(" was adopted by ")
+    // The line says who it is about, so the divider above it does not.
+    expect(html).toContain(`>${formatPromptTimestamp(at(5))}<`)
+    expect(html).not.toContain("from a sub-chat")
+  })
+
+  test("a chat tool call draws as a card, not folded into a tool group", () => {
+    const html = renderTranscript([
+      createToolMessage("tool-1"),
+      {
+        id: "chat-1",
+        kind: "tool",
+        toolKind: "chat",
+        toolName: "create_chat",
+        toolId: "chat-1",
+        input: { payload: { message: "audit the parser", title: "Parser audit" } },
+        rawResult: { chatId: "child", title: "Parser audit" },
+        resultEntryId: "result-chat-1",
+        timestamp: new Date().toISOString(),
+      },
+      createToolMessage("tool-2"),
+    ])
+    expect(html).toContain("Parser audit")
+    expect(html).toContain("Started a sub-chat")
+    expect(html).toContain("audit the parser")
+    // Three rows: the card splits the tool calls either side of it.
+    expect(countRowWrappers(html)).toBe(3)
+  })
+
+  test("a schedule tool call draws as a card for the schedule", () => {
+    const html = renderTranscript([
+      createToolMessage("tool-1"),
+      {
+        id: "sched-1",
+        kind: "tool",
+        toolKind: "schedule",
+        toolName: "set_schedule",
+        toolId: "sched-1",
+        input: { payload: { name: "Deploy check", message: "check the deploy", everyMinutes: 5 } },
+        rawResult: { scheduleId: "s1", name: "Deploy check", message: "check the deploy" },
+        resultEntryId: "result-sched-1",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        id: "sched-2",
+        kind: "tool",
+        toolKind: "schedule",
+        toolName: "set_schedule",
+        toolId: "sched-2",
+        input: { payload: { scheduleId: "s1", dailyAt: "09:00", weekdays: [1, 3] } },
+        rawResult: { scheduleId: "s1", name: "Deploy check", message: "check the deploy" },
+        resultEntryId: "result-sched-2",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        // Recorded before the card existed: an unknown tool, its result as JSON text.
+        id: "sched-3",
+        kind: "tool",
+        toolKind: "unknown_tool",
+        toolName: "delete_schedule",
+        toolId: "sched-3",
+        input: { payload: { scheduleId: "s1" } },
+        rawResult: [{ type: "text", text: JSON.stringify({ deleted: "s1", name: "Deploy check" }) }],
+        resultEntryId: "result-sched-3",
+        timestamp: new Date().toISOString(),
+      },
+      createToolMessage("tool-2"),
+    ])
+    expect(html).toContain("Scheduled · Every 5 min · check the deploy")
+    expect(html).toContain("Updated · Daily at 09:00 · Mon, Wed · check the deploy")
+    expect(html).toContain("Deleted")
+    expect(html.split("Deploy check").length - 1).toBe(3)
+    // Five rows: three cards, and a tool call either side.
+    expect(countRowWrappers(html)).toBe(5)
+  })
+
+  test("a chat tool call recorded before the card existed still draws as one", () => {
+    // Such a call was filed as an unknown tool, and its result is what the
+    // provider was sent: the value as JSON in a text block.
+    const html = renderTranscript([
+      createToolMessage("tool-1"),
+      {
+        id: "chat-old",
+        kind: "tool",
+        toolKind: "unknown_tool",
+        toolName: "create_chat",
+        toolId: "chat-old",
+        input: { payload: { message: "summarize the week", title: "Weekly summary" } },
+        rawResult: [{ type: "text", text: JSON.stringify({ chatId: "child", title: "Weekly summary" }) }],
+        resultEntryId: "result-chat-old",
+        timestamp: new Date().toISOString(),
+      },
+      createToolMessage("tool-2"),
+    ])
+    expect(html).toContain("Weekly summary")
+    expect(html).toContain("Started a sub-chat · summarize the week")
+    expect(countRowWrappers(html)).toBe(3)
   })
 
   test("shows the follow-up prompt time on earlier results and worked-for on the last", () => {

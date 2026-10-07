@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react"
+import { memo, useMemo } from "react"
 import { Archive, ChevronRight, MoreHorizontal } from "lucide-react"
 import type { SidebarChatRow } from "../../../../shared/types"
 import {
@@ -8,6 +8,7 @@ import {
 } from "../../../lib/thread-sections"
 import { useDraftStartTimes } from "../../../stores/chatInputStore"
 import { usePendingSendTimes } from "../../../stores/pendingSendStore"
+import { useSectionOverrides } from "../../../stores/sidebarSectionStore"
 import { cn, normalizeChatId } from "../../../lib/utils"
 import { Button } from "../../ui/button"
 import {
@@ -120,6 +121,17 @@ interface Props {
   onDeleteChat: (chat: SidebarChatRow) => void
   onCopyPath: (localPath: string) => void
   onOpenExternalPath: (action: "open_finder" | "open_editor", localPath: string) => void
+  /**
+   * Which list this is, for remembering its opened and folded sections
+   * (`useSectionOverrides`). A channel's chats pass their own, so each channel
+   * keeps its sections apart from the others' and from the Chats view's.
+   */
+  expandScope?: string
+  /**
+   * Rows lead with their project's icon. For the Chats view, which spans
+   * projects; a channel's own chats are all one project and leave it off.
+   */
+  showProjectIcons?: boolean
 }
 
 /**
@@ -143,6 +155,8 @@ function ThreadSectionsImpl({
   onDeleteChat,
   onCopyPath,
   onOpenExternalPath,
+  expandScope = "chats",
+  showProjectIcons = false,
 }: Props) {
   // Drafts are browser-local, so they reach the sections as an argument rather
   // than as a field on the rows the server sent.
@@ -163,13 +177,13 @@ function ThreadSectionsImpl({
   const normalizedActiveChatId = activeChatId ? normalizeChatId(activeChatId) : null
   // User toggles override each bucket's default (Today/Yesterday open, rest
   // closed). Keyed by stable bucket key so state survives day rollovers sanely.
-  const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({})
+  // In a store rather than here: this list unmounts whenever the sidebar shows
+  // something else (a channel list, another view), and should come back as it
+  // was left.
+  const [expandOverrides, setSectionExpanded] = useSectionOverrides(expandScope)
 
   const toggleBucket = (key: string, defaultExpanded: boolean) => {
-    setExpandOverrides((previous) => ({
-      ...previous,
-      [key]: !(previous[key] ?? defaultExpanded),
-    }))
+    setSectionExpanded(key, !(expandOverrides[key] ?? defaultExpanded))
   }
 
   const pinnedGroups = [
@@ -195,6 +209,7 @@ function ThreadSectionsImpl({
       detailScope="cross-project"
       nowMs={nowMs}
       dimIdleTitles={false}
+      showProjectIcon={showProjectIcons}
       onSelect={onSelectChat}
       onCreateChat={onCreateChat}
       onRenameChat={onRenameChat}
@@ -294,6 +309,7 @@ function ThreadSectionsImpl({
                     detailScope="cross-project"
                     nowMs={nowMs}
                     dimIdleTitles={false}
+                    showProjectIcon={showProjectIcons}
                     onSelect={onOpenArchivedChat}
                     onCreateChat={onCreateChat}
                     onRenameChat={onRenameChat}
