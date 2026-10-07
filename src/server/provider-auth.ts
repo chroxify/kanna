@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
+import { accessSync, constants as fsConstants, statSync } from "node:fs"
+import path from "node:path"
 import { LOG_PREFIX } from "../shared/branding"
 import {
   AUTH_SERVICE_LABELS,
@@ -239,6 +241,8 @@ export interface ProviderAuthManagerDeps {
   fetchFn?: typeof fetch
   fetchLatestNpmVersion?: (packageName: string) => Promise<string>
   resolveCommandPath?: (command: string) => string | null
+  /** Whether a path is an executable file (default: the filesystem). */
+  isExecutable?: (filePath: string) => boolean
   /** Oldest Claude Code Kanna runs turns on (default: the Agent SDK's pairing). */
   claudeMinimumVersion?: string
   onSignedIn?: (service: AuthServiceId) => void
@@ -286,6 +290,8 @@ export class ProviderAuthManager {
   private readonly listeners = new Set<(snapshot: ProviderAuthSnapshot) => void>()
   private readonly flows = new Map<AuthServiceId, LoginFlowRuntime>()
   private readonly commandPaths = new Map<string, string | null>()
+  /** Latest probe started per service; an older probe's result is dropped. */
+  private readonly probeSeq = new Map<AuthServiceId, number>()
   private refreshInFlight: Promise<void> | null = null
   private lastStatusRefreshAt: number | null = null
   private lastVersionCheckAt: number | null = null
@@ -355,6 +361,17 @@ export class ProviderAuthManager {
     this.patchService(service, { login })
   }
 
+  private isExecutable(filePath: string): boolean {
+    if (this.deps.isExecutable) return this.deps.isExecutable(filePath)
+    try {
+      if (!statSync(filePath).isFile()) return false
+      accessSync(filePath, fsConstants.X_OK)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private resolvePath(command: string, options?: { fresh?: boolean }): string | null {
     if (!options?.fresh && this.commandPaths.has(command)) {
       return this.commandPaths.get(command) ?? null
@@ -390,43 +407,52 @@ export class ProviderAuthManager {
 
   /** Force-probe one service (post login/install). */
   async probeService(service: AuthServiceId): Promise<void> {
+    // A probe takes seconds, and a page-open refresh can start one just
+    // before an update swaps the binary. If it finished after the install's
+    // own probe, it would write the old version back over the new one.
+    const seq = (this.probeSeq.get(service) ?? 0) + 1
+    this.probeSeq.set(service, seq)
+    let patch: Partial<AuthServiceSnapshot>
     try {
       if (service === "openrouter") {
         const provider = await this.deps.readLlmProvider()
         const signedIn = provider.provider === "openrouter" && provider.apiKey.length > 0
-        this.patchService(service, {
+        patch = {
           installed: true,
           authStatus: signedIn ? "signed_in" : "signed_out",
           account: null,
           statusDetail: null,
-          checkedAt: this.now(),
-        })
-        return
+        }
+      } else {
+        patch = await this.probeCliService(service)
       }
-      await this.probeCliService(service)
     } catch (error) {
-      this.patchService(service, {
+      patch = {
         authStatus: "error",
         statusDetail: error instanceof Error ? error.message : String(error),
-        checkedAt: this.now(),
-      })
+      }
     }
+    if (this.probeSeq.get(service) !== seq) return
+    this.patchService(service, { ...patch, checkedAt: this.now() })
   }
 
-  private async probeCliService(service: Exclude<AuthServiceId, "openrouter">) {
-    // The card probes the same `claude` the turns run (claude-executable.ts).
+  /** The binary the card probes and updates: the same `claude` turns run (claude-executable.ts). */
+  private cliPath(service: Exclude<AuthServiceId, "openrouter">): string | null {
     const override = service === "claude" ? claudeExecutableOverride() : null
-    const binaryPath = override ?? this.resolvePath(CLI_BINARIES[service])
+    return override ?? this.resolvePath(CLI_BINARIES[service])
+  }
+
+  private async probeCliService(service: Exclude<AuthServiceId, "openrouter">): Promise<Partial<AuthServiceSnapshot>> {
+    const override = service === "claude" ? claudeExecutableOverride() : null
+    const binaryPath = this.cliPath(service)
     if (!binaryPath) {
-      this.patchService(service, {
+      return {
         installed: false,
         version: null,
         authStatus: "not_installed",
         account: null,
         statusDetail: null,
-        checkedAt: this.now(),
-      })
-      return
+      }
     }
 
     const versionResult = await this.deps.exec([binaryPath, "--version"], { timeoutMs: 15_000 })
@@ -497,14 +523,13 @@ export class ProviderAuthManager {
       }
     }
 
-    this.patchService(service, {
+    return {
       installed: true,
       version,
       authStatus,
       account,
       statusDetail,
-      checkedAt: this.now(),
-    })
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -585,9 +610,19 @@ export class ProviderAuthManager {
       // Re-resolve the binary (fresh — the install may have added it to PATH).
       this.commandPaths.delete(CLI_BINARIES[service])
       this.lastVersionCheckAt = null
-      this.patchService(service, { installState: "idle", installError: null })
       this.deps.trackEvent?.("auth_cli_install_succeeded", { service })
+      // Stay "installing" until the probe has read the new version. The probe
+      // takes seconds, and going idle first showed the old version's Update
+      // button in between, which looked like the update had failed.
       await this.probeService(service)
+      // An installer can exit 0 without moving the version on PATH: Homebrew
+      // with a stale index, or npm installing beside a brew/bun copy that
+      // still wins. Say so, or the card silently shows Update again.
+      const probed = this.services.get(service)!
+      const stale = probed.updateAvailable
+        ? `The update finished, but ${probed.label} still reports ${probed.version} (latest is ${probed.latestVersion}).`
+        : null
+      this.patchService(service, { installState: stale ? "error" : "idle", installError: stale })
       void this.checkLatestVersions().catch(() => undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -604,15 +639,31 @@ export class ProviderAuthManager {
       // global prefix is root-owned (e.g. cloud dev-boxes). For existing
       // installs try the binary's own self-update, falling back to the
       // native installer (which also migrates npm-managed installs).
-      const existing = this.resolvePath(CLI_BINARIES.claude)
+      const existing = this.cliPath("claude")
       const nativeInstall = "curl -fsSL https://claude.ai/install.sh | bash"
       if (existing) return `${shellQuote(existing)} update || (${nativeInstall})`
       return nativeInstall
     }
     if (service === "codex") {
+      // Update the codex the card runs, not whichever npm a login bash finds.
+      // The install runs in `bash -l`, which doesn't read ~/.zshrc, so there a
+      // bare `npm` was Homebrew's while the card ran nvm's codex: updates
+      // landed in the other install and the version never moved. So use the
+      // npm (or bun) beside that codex, with its folder first on PATH so that
+      // npm runs on its own node and installs into its own prefix.
       const pkg = NPM_PACKAGES.codex!
-      if (this.resolvePath("npm")) return `npm install -g ${pkg}`
-      if (this.resolvePath("bun")) return `bun add -g ${pkg}`
+      const existing = this.cliPath("codex")
+      const beside = (tool: string) => {
+        if (!existing) return null
+        const candidate = path.join(path.dirname(existing), tool)
+        return this.isExecutable(candidate) ? candidate : null
+      }
+      const besideBun = beside("bun")
+      const npm = beside("npm") ?? (besideBun ? null : this.resolvePath("npm"))
+      const bun = besideBun ?? this.resolvePath("bun")
+      const run = (tool: string) => `PATH=${shellQuote(path.dirname(tool))}:"$PATH" ${shellQuote(tool)}`
+      if (npm) return `${run(npm)} install -g ${pkg}`
+      if (bun) return `${run(bun)} add -g ${pkg}`
       throw new Error("Neither npm nor bun is available to install the package.")
     }
     if (service === "cursor") {
@@ -627,13 +678,21 @@ export class ProviderAuthManager {
     }
     // gh
     if (platform === "darwin") {
-      if (this.resolvePath("brew")) return "brew install gh || brew upgrade gh"
-      throw new Error("Homebrew not found. Install it from brew.sh, or download the GitHub CLI from cli.github.com.")
+      // brew refreshes its formula index at most daily on its own, so without
+      // this an update inside that window is a silent no-op that exits 0.
+      // A failed index refresh (offline) still lets the install run.
+      if (this.resolvePath("brew")) return "brew update --quiet; brew install gh || brew upgrade gh"
+      // No Homebrew: fall through to the release download below. The macOS
+      // build is signed and notarized, and ~/.local/bin is on the lookup path
+      // (process-utils USER_BIN_DIRS) even when the user's PATH lacks it.
     }
     // Download to a file (not `curl | tar`): in a pipeline a mid-transfer
     // curl failure just truncates tar's stdin — `set -e` never sees curl's
     // exit code and the surfaced error is a baffling "gzip: unexpected end
     // of file". Retries paper over transient CDN 5xx/timeouts.
+    const [os, archive, extract] = platform === "darwin"
+      ? ["macOS", "zip", `unzip -q "$tmp/gh.zip" -d "$tmp"`]
+      : ["linux", "tar.gz", `tar -xzf "$tmp/gh.tar.gz" -C "$tmp"`]
     return [
       "set -e",
       `ver=$(curl -fsSL --retry 3 --retry-all-errors https://api.github.com/repos/cli/cli/releases/latest | grep -o '"tag_name": *"v[^"]*"' | head -1 | grep -o 'v[0-9][0-9.]*')`,
@@ -641,10 +700,10 @@ export class ProviderAuthManager {
       `arch=$(uname -m); case "$arch" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; esac`,
       `tmp=$(mktemp -d)`,
       `trap 'rm -rf "$tmp"' EXIT`,
-      `curl -fsSL --retry 3 --retry-all-errors -o "$tmp/gh.tar.gz" "https://github.com/cli/cli/releases/download/$ver/gh_$(echo $ver | tr -d v)_linux_$arch.tar.gz"`,
-      `tar -xzf "$tmp/gh.tar.gz" -C "$tmp"`,
+      `curl -fsSL --retry 3 --retry-all-errors -o "$tmp/gh.${archive}" "https://github.com/cli/cli/releases/download/$ver/gh_$(echo $ver | tr -d v)_${os}_$arch.${archive}"`,
+      extract,
       "mkdir -p \"$HOME/.local/bin\"",
-      `cp "$tmp/gh_$(echo $ver | tr -d v)_linux_$arch/bin/gh" "$HOME/.local/bin/gh"`,
+      `cp "$tmp/gh_$(echo $ver | tr -d v)_${os}_$arch/bin/gh" "$HOME/.local/bin/gh"`,
     ].join("\n")
   }
 

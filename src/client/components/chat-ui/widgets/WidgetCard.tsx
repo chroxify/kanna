@@ -2,6 +2,7 @@ import { ChevronRight } from "lucide-react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "../../../lib/utils"
 import { useRightSidebarStore, type WidgetDisclosureId } from "../../../stores/rightSidebarStore"
+import { StillTooltips } from "../../ui/tooltip"
 
 /**
  * Widgets in the right sidebar's column.
@@ -140,11 +141,19 @@ export function WidgetSection({
   )
 }
 
-/** The card surface that holds a widget's sections, divided from each other. */
+/**
+ * The card surface that holds a widget's sections, divided from each other.
+ *
+ * In the Mac app it takes the left sidebar's radius, so the cards on both
+ * sides of the chat have the same corners.
+ */
 export function WidgetGroup({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn("divide-y divide-border overflow-hidden rounded-2xl border border-border bg-background dark:bg-card", className)}>
-      {children}
+    // Lifted off whatever is under it while the column is a slideover (the
+    // desktop peek, the phone's sheet); beside the chat it sits flat.
+    <section className={cn("divide-y divide-border overflow-hidden rounded-2xl border border-border bg-background dark:bg-card mac-app:rounded-[calc(var(--mac-window-radius)-8px)] transition-shadow duration-200 ease-out group-data-[slideover]/widgets:shadow-md", className)}>
+      {/* The right sidebar is scanned like the left one; see StillTooltips. */}
+      <StillTooltips>{children}</StillTooltips>
     </section>
   )
 }
@@ -177,8 +186,9 @@ const PRESENCE_EXIT_MS = 180
  * A card present when the slot mounts shows at once: opening the column is
  * not a change to announce, and it happens far too often to animate.
  *
- * The slot also owns the column's spacing (pt-2 inside the collapsing part),
- * so a card's gap folds away with it instead of snapping shut at the end.
+ * The slot also owns the column's spacing (pt-2 inside the collapsing part,
+ * 1px for the first), so a card's gap folds away with it instead of snapping
+ * shut at the end.
  */
 export function WidgetPresence({ show, spaced = true, children }: {
   show: boolean
@@ -225,12 +235,14 @@ export function WidgetPresence({ show, spaced = true, children }: {
       ref={rootRef}
       inert={!open}
       className={cn(
-        "grid transition-[grid-template-rows,opacity] ease-snappy motion-reduce:transition-opacity",
+        "group/widget-slot grid transition-[grid-template-rows,opacity] ease-snappy motion-reduce:transition-opacity",
         open ? "grid-rows-[1fr] opacity-100 duration-200" : "grid-rows-[0fr] opacity-0 duration-150",
       )}
     >
       <div className="min-h-0 overflow-hidden">
-        <div className={spaced ? "pt-2" : undefined}>{show ? children : lastChildrenRef.current}</div>
+        {/* The top card sits right under the navbar: 1px, not a gap, so the
+            slot's overflow-hidden doesn't clip the card's top border. */}
+        <div className={spaced ? "pt-2 group-first/widget-slot:pt-[1px]" : undefined}>{show ? children : lastChildrenRef.current}</div>
       </div>
     </div>
   )

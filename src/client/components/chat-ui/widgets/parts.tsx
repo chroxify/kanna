@@ -37,7 +37,9 @@ import { SwapIn } from "./WidgetCard"
  * target, not a list.
  */
 export const ROW_HIGHLIGHT_CLASS = "border-border bg-muted"
-export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted"
+// Also while the row's hover card is up (`HOVER_CARD_OPEN_ATTRIBUTE`): the
+// pointer leaves the row to reach the card, and the row should not go plain.
+export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted data-[hover-card-open]:border-border data-[hover-card-open]:bg-muted"
 
 /** A row's box, before any highlight. */
 const ROW_BASE_CLASS = "flex w-full min-w-0 items-start gap-2 rounded-lg border border-transparent px-[5px] py-1.5 text-left text-sm"
@@ -66,8 +68,11 @@ export function WidgetStrip({ leading, children, trailing, form, field = false }
   /**
    * Sets the strip as a filled field inset in the card rather than a bar
    * across it, so a search reads as something to type in, not as a second
-   * header. No border and no divider: the fill is the edge, and it is the
-   * rows' hover fill, so the column keeps one gray. The 6px inset is the
+   * header. No border and no divider: the fill is the edge. It is a shade
+   * further from the card than the rows' hover fill in both themes, since
+   * `bg-muted` sits too close to the card to read as a field. Its hue and
+   * saturation are `--muted`'s, so the field and a lit row read as one gray at
+   * two depths; keep them in step if `--muted` changes. The 6px inset is the
    * List's, so the field lines up with the rows under it, and its own padding
    * keeps the leading icon at 12px and the text at 36px.
    */
@@ -83,7 +88,7 @@ export function WidgetStrip({ leading, children, trailing, form, field = false }
   // A bar is divided from what follows it, but not from the card's own edge
   // when it is all the body holds.
   const className = field
-    ? "mx-1.5 mt-1.5 flex h-8 items-center gap-2 rounded-lg bg-muted pl-1.5 pr-0.5 last:mb-1.5"
+    ? "mx-1.5 mt-1.5 flex h-8 items-center gap-2 rounded-lg bg-[hsl(210_20%_95.5%)] dark:bg-[hsl(223_4%_21.5%)] pl-1.5 pr-0.5 last:mb-1.5"
     : "flex h-9 items-center gap-2 border-border pl-3 pr-2 not-last:border-b"
   return form ? <form {...form} className={className}>{content}</form> : <div className={className}>{content}</div>
 }
@@ -182,6 +187,12 @@ export interface WidgetRowProps {
    */
   menuIdle?: ReactNode
   menuLabel?: string
+  /**
+   * For a row whose menu is not its own to build: a chat's row gets the chat's
+   * menu, the one every list of chats uses. Wraps the row in that menu in
+   * place of this row's `ContextMenu`, and the kebab opens it all the same.
+   */
+  wrapMenu?: (row: ReactNode) => ReactNode
   /** Makes the row pressable (Enter and Space too). Without it the row is static. */
   onActivate?: () => void
   /**
@@ -225,6 +236,7 @@ export function WidgetRow({
   menu,
   menuIdle,
   menuLabel = "More actions",
+  wrapMenu,
   onActivate,
   highlightClassName,
   active = false,
@@ -239,6 +251,7 @@ export function WidgetRow({
   ...aria
 }: WidgetRowProps) {
   const interactive = Boolean(onActivate) && !disabled
+  const hasMenu = Boolean(menu) || Boolean(wrapMenu)
   const row = (
     <div
       id={id}
@@ -256,14 +269,14 @@ export function WidgetRow({
         interactive && "cursor-pointer",
         disabled && "opacity-60",
         muted && "text-muted-foreground",
-        highlightClassName ?? (active ? ROW_HIGHLIGHT_CLASS : interactive || menu ? ROW_HOVER_CLASS : undefined),
+        highlightClassName ?? (active ? ROW_HIGHLIGHT_CLASS : interactive || hasMenu ? ROW_HOVER_CLASS : undefined),
         className,
       )}
       {...aria}
     >
       <WidgetIconColumn>{icon}</WidgetIconColumn>
       <div className="min-w-0 flex-1">
-        <div className={cn("truncate leading-5", muted ? "text-muted-foreground group-hover/row:text-foreground" : "text-foreground")}>{title}</div>
+        <div className={cn("truncate leading-5", muted ? "text-muted-foreground group-hover/row:text-foreground group-data-[hover-card-open]/row:text-foreground" : "text-foreground")}>{title}</div>
         {subtitle ? <div className="truncate text-xs leading-4 text-muted-foreground">{subtitle}</div> : null}
       </div>
       {meta || subMeta ? (
@@ -274,7 +287,7 @@ export function WidgetRow({
           {subMeta ? <div className="flex h-4 items-center gap-1.5">{subMeta}</div> : null}
         </div>
       ) : null}
-      {menu ? (
+      {hasMenu ? (
         menuIdle ? (
           // One slot, two occupants: the idle glyph at rest, the kebab when
           // the row is hovered or focused. They cross-fade in place (shrink
@@ -298,6 +311,7 @@ export function WidgetRow({
       ) : null}
     </div>
   )
+  if (wrapMenu) return wrapMenu(row)
   if (!menu) return row
   return (
     <ContextMenu>
@@ -433,12 +447,16 @@ export function WidgetStatic({ children, className }: { children: ReactNode; cla
  */
 export function WidgetFooter({ children, above }: {
   children: ReactNode
-  /** Fields the buttons act on, stacked over them (the commit message). */
+  /**
+   * Fields the buttons act on, stacked over them (the commit message). They
+   * are the footer too: unpadded, so they draw edge to edge like the buttons,
+   * with one rule under them. Rules between fields are theirs to draw.
+   */
   above?: ReactNode
 }) {
   return (
     <div>
-      {above ? <div className="border-b border-border p-2">{above}</div> : null}
+      {above ? <div className="border-b border-border">{above}</div> : null}
       <div className="flex h-10 min-w-0 items-stretch divide-x divide-border">{children}</div>
     </div>
   )

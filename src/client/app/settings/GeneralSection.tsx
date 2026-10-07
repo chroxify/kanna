@@ -1,25 +1,16 @@
 import { useEffect, useState } from "react"
-import { DownloadCloud, Monitor, Moon, Sun } from "lucide-react"
+import { DownloadCloud } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { ANALYTICS_STATIC_EVENT_NAMES, ANALYTICS_STATIC_PROPERTY_NAMES } from "../../../shared/analytics"
 import type { EditorPreset } from "../../../shared/protocol"
-import { DEFAULT_NEW_PROJECTS_DIRECTORY, isNightlyVersion, type SubmitWhileRunning } from "../../../shared/types"
+import { DEFAULT_NEW_PROJECTS_DIRECTORY, isNightlyVersion, type PaneVisibilityScope, type SubmitWhileRunning } from "../../../shared/types"
 import { EDITOR_OPTIONS, EditorIcon } from "../../components/editor-icons"
 import { useInstalledEditors } from "../../components/open-external-menu"
 import { Button } from "../../components/ui/button"
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogTitle } from "../../components/ui/dialog"
 import { Input } from "../../components/ui/input"
-import { SegmentedControl } from "../../components/ui/segmented-control"
-import { SettingsHeaderButton } from "../../components/ui/settings-header-button"
 import { Switch } from "../../components/ui/switch"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../../components/ui/select"
+import { SelectItem } from "../../components/ui/select"
 import { useTheme, type ThemePreference } from "../../hooks/useTheme"
 import { cn } from "../../lib/utils"
 import { playChatNotificationSound } from "../../lib/chatSounds"
@@ -56,22 +47,29 @@ import {
   SettingsErrorBanner,
   SettingsField,
   SettingsGroup,
+  SettingsActionButton,
   SettingsGroups,
   SettingsRow,
+  SettingsSelect,
   shouldPreviewChatSoundChange,
 } from "./shared"
 import { SETTINGS_ROWS } from "./registry"
 
-const themeOptions = [
-  { value: "light" as ThemePreference, label: "Light", icon: Sun },
-  { value: "dark" as ThemePreference, label: "Dark", icon: Moon },
-  { value: "system" as ThemePreference, label: "System", icon: Monitor },
+const themeOptions: { value: ThemePreference; label: string }[] = [
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+  { value: "system", label: "System" },
 ]
 
 const chatSoundPreferenceOptions: { value: ChatSoundPreference; label: string }[] = [
   { value: "never", label: "Never" },
   { value: "unfocused", label: "When Unfocused" },
   { value: "always", label: "Always" },
+]
+
+const paneVisibilityScopeOptions: { value: PaneVisibilityScope; label: string }[] = [
+  { value: "chat", label: "Per Chat" },
+  { value: "project", label: "Per Project" },
 ]
 
 const chatBrowserNotificationPreferenceOptions: { value: ChatBrowserNotificationPreference; label: string }[] = [
@@ -118,6 +116,7 @@ export function GeneralSection({
   const newProjectsDirectory = appSettings?.newProjectsDirectory ?? DEFAULT_NEW_PROJECTS_DIRECTORY
   const [newProjectsDirectoryDraft, setNewProjectsDirectoryDraft] = useState(newProjectsDirectory)
   const submitWhileRunning = appSettings?.submitWhileRunning ?? "queue"
+  const paneVisibility = appSettings?.paneVisibility ?? { widgets: "chat", terminal: "chat" }
   const transcriptWindow = appSettings?.transcript?.windowAssistantMessages ?? DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES
   const [transcriptWindowDraft, setTranscriptWindowDraft] = useState(String(transcriptWindow))
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null)
@@ -279,6 +278,39 @@ export function GeneralSection({
     })()
   }
 
+  function handlePaneVisibilityChange(pane: "widgets" | "terminal", scope: PaneVisibilityScope) {
+    void handleWriteAppSettings({ paneVisibility: { [pane]: scope } }).catch((error) => {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save layout settings.")
+    })
+  }
+
+  async function handleProjectIconsInChatsChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ projectIconsInChats: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
+  async function handleChatTabsChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ chatTabsEnabled: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
+  async function handleWidgetsPeekChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ widgetsPeekEnabled: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
   async function handleAnalyticsPreferenceChange(enabled: boolean) {
     try {
       setAppSettingsError(null)
@@ -331,103 +363,110 @@ export function GeneralSection({
             )}
           >
             {updateSnapshot?.updateAvailable ? (
-              <SettingsHeaderButton
-                variant="default"
+              <SettingsActionButton
+                prominent
                 onClick={() => { void state.handleInstallUpdate() }}
                 disabled={isInstallingUpdate}
-                icon={<DownloadCloud className="h-4 w-4" />}
+                icon={<DownloadCloud />}
               >
                 {isInstallingUpdate ? "Updating…" : `Update to ${updateSnapshot.latestVersion ?? "latest"}`}
-              </SettingsHeaderButton>
+              </SettingsActionButton>
             ) : (
-              <SettingsHeaderButton
+              <SettingsActionButton
                 onClick={() => { void state.handleCheckForUpdates({ force: true }) }}
                 disabled={isCheckingForUpdate || isInstallingUpdate}
               >
                 {isCheckingForUpdate ? "Checking…" : "Check for updates"}
-              </SettingsHeaderButton>
+              </SettingsActionButton>
             )}
           </SettingsRow>
         </SettingsGroup>
 
         <SettingsGroup title="Appearance">
           <SettingsRow def={SETTINGS_ROWS.theme}>
-            <SegmentedControl
-              value={theme}
-              onValueChange={handleThemeChange}
-              options={themeOptions}
-              size="sm"
+            <SettingsSelect value={theme} onValueChange={(value) => handleThemeChange(value as ThemePreference)}>
+              {themeOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SettingsSelect>
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.projectIconsInChats}>
+            <Switch
+              checked={appSettings?.projectIconsInChats !== false}
+              onCheckedChange={(checked) => {
+                void handleProjectIconsInChatsChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.projectIconsInChats.title}
+            />
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.chatTabs}>
+            <Switch
+              checked={appSettings?.chatTabsEnabled === true}
+              onCheckedChange={(checked) => {
+                void handleChatTabsChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.chatTabs.title}
+            />
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.widgetsPeek}>
+            <Switch
+              checked={appSettings?.widgetsPeekEnabled === true}
+              onCheckedChange={(checked) => {
+                void handleWidgetsPeekChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.widgetsPeek.title}
             />
           </SettingsRow>
         </SettingsGroup>
 
         <SettingsGroup title="Notifications">
           <SettingsRow def={SETTINGS_ROWS.chatSounds}>
-            <Select
+            <SettingsSelect
               value={chatSoundPreference}
               onValueChange={(value) => handleChatSoundPreferenceChange(value as ChatSoundPreference)}
             >
-              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {chatSoundPreferenceOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+              {chatSoundPreferenceOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SettingsSelect>
           </SettingsRow>
 
           <SettingsRow def={SETTINGS_ROWS.chatSound}>
             {/* Which sound only matters while sounds can play at all. */}
-            <Select
+            <SettingsSelect
               value={chatSoundId}
               onValueChange={(value) => handleChatSoundIdChange(value as ChatSoundId)}
               disabled={chatSoundPreference === "never"}
             >
-              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {CHAT_SOUND_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+              {CHAT_SOUND_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SettingsSelect>
           </SettingsRow>
 
           <SettingsRow def={SETTINGS_ROWS.chatBrowserNotifications}>
-            <Select
+            <SettingsSelect
               value={chatBrowserNotificationPreference}
               onValueChange={(value) => handleChatBrowserNotificationPreferenceChange(value as ChatBrowserNotificationPreference)}
             >
-              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {chatBrowserNotificationPreferenceOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+              {chatBrowserNotificationPreferenceOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SettingsSelect>
           </SettingsRow>
         </SettingsGroup>
 
         <SettingsGroup title="Chats">
           <SettingsRow def={SETTINGS_ROWS.submitWhileRunning}>
-            <Select
+            <SettingsSelect
               value={submitWhileRunning}
               onValueChange={(value) => {
                 void handleWriteAppSettings({ submitWhileRunning: value as SubmitWhileRunning }).catch((error) => {
@@ -435,19 +474,12 @@ export function GeneralSection({
                 })
               }}
             >
-              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="queue">Queue message</SelectItem>
-                  <SelectItem value="steer">Steer now</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+              <SelectItem value="queue">Queue message</SelectItem>
+              <SelectItem value="steer">Steer now</SelectItem>
+            </SettingsSelect>
           </SettingsRow>
 
-          <SettingsRow def={SETTINGS_ROWS.transcriptWindow}>
+          <SettingsRow def={SETTINGS_ROWS.transcriptWindow} wideControl>
             <SettingsField
               hint={`${MIN_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES}–${MAX_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES} messages${transcriptWindow === DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES ? " (default)" : ""}`}
             >
@@ -466,43 +498,57 @@ export function GeneralSection({
           </SettingsRow>
         </SettingsGroup>
 
+        <SettingsGroup title="Layout">
+          {([
+            ["widgets", SETTINGS_ROWS.widgetsVisibility],
+            ["terminal", SETTINGS_ROWS.terminalVisibility],
+          ] as const).map(([pane, def]) => (
+            <SettingsRow key={pane} def={def}>
+              <SettingsSelect
+                value={paneVisibility[pane]}
+                onValueChange={(value) => handlePaneVisibilityChange(pane, value as PaneVisibilityScope)}
+              >
+                {paneVisibilityScopeOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SettingsSelect>
+            </SettingsRow>
+          ))}
+        </SettingsGroup>
+
         <SettingsGroup title="Editor & Projects">
           <SettingsRow def={SETTINGS_ROWS.defaultEditor}>
-            <Select
+            <SettingsSelect
               value={editorPreset}
               onValueChange={(value) => handleEditorPresetChange(value as EditorPreset)}
             >
-              <SelectTrigger className={SETTINGS_CONTROL_CLASS}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {EDITOR_OPTIONS.map((option) => {
-                    // Listed but not selectable when it isn't on this machine —
-                    // picking it would only make every "Open in" fail later.
-                    const installed = !installedEditors || option.value === "custom" || installedEditors.includes(option.value)
-                    return (
-                      <SelectItem key={option.value} value={option.value} disabled={!installed}>
-                        <span className="flex items-center gap-2">
-                          <EditorIcon preset={option.value} className={`h-4 w-4 shrink-0${installed ? "" : " opacity-40 grayscale"}`} />
-                          <span className={installed ? undefined : "text-muted-foreground"}>{option.label}</span>
-                          {installed ? null : (
-                            <span className="ml-auto shrink-0 rounded-full border border-border/70 px-1.5 py-px text-[10px] leading-4 font-medium text-muted-foreground">
-                              Not installed
-                            </span>
-                          )}
+              {EDITOR_OPTIONS.map((option) => {
+                // Listed but not selectable when it isn't on this machine —
+                // picking it would only make every "Open in" fail later.
+                const installed = !installedEditors || option.value === "custom" || installedEditors.includes(option.value)
+                return (
+                  <SelectItem key={option.value} value={option.value} disabled={!installed}>
+                    <span className="flex items-center gap-2">
+                      <EditorIcon preset={option.value} className={`h-4 w-4 shrink-0${installed ? "" : " opacity-40 grayscale"}`} />
+                      <span className={installed ? undefined : "text-muted-foreground"}>{option.label}</span>
+                      {installed ? null : (
+                        <span className="ml-auto shrink-0 rounded-full border border-border/70 px-1.5 py-px text-[10px] leading-4 font-medium text-muted-foreground">
+                          Not installed
                         </span>
-                      </SelectItem>
-                    )
-                  })}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+                      )}
+                    </span>
+                  </SelectItem>
+                )
+              })}
+            </SettingsSelect>
           </SettingsRow>
 
           {editorPreset === "custom" ? (
             <SettingsRow
               nested
+              wideControl
               title="Command Template"
               description={<>Include {"{path}"} and optionally {"{line}"} and {"{column}"} in your command.</>}
             >
@@ -521,7 +567,7 @@ export function GeneralSection({
             </SettingsRow>
           ) : null}
 
-          <SettingsRow def={SETTINGS_ROWS.newProjectsDirectory}>
+          <SettingsRow def={SETTINGS_ROWS.newProjectsDirectory} wideControl>
             <SettingsField
               hint={`Created on first use${newProjectsDirectory === DEFAULT_NEW_PROJECTS_DIRECTORY ? " (default)" : ""}`}
             >
@@ -540,7 +586,7 @@ export function GeneralSection({
         </SettingsGroup>
 
         <SettingsGroup title="Terminal">
-          <SettingsRow def={SETTINGS_ROWS.terminalScrollback}>
+          <SettingsRow def={SETTINGS_ROWS.terminalScrollback} wideControl>
             <SettingsField
               hint={`${MIN_TERMINAL_SCROLLBACK}–${MAX_TERMINAL_SCROLLBACK} lines${scrollbackLines === DEFAULT_TERMINAL_SCROLLBACK ? " (default)" : ""}`}
             >
@@ -558,7 +604,7 @@ export function GeneralSection({
             </SettingsField>
           </SettingsRow>
 
-          <SettingsRow def={SETTINGS_ROWS.terminalMinColumnWidth}>
+          <SettingsRow def={SETTINGS_ROWS.terminalMinColumnWidth} wideControl>
             <SettingsField
               hint={`${MIN_TERMINAL_MIN_COLUMN_WIDTH}–${MAX_TERMINAL_MIN_COLUMN_WIDTH} px${minColumnWidth === DEFAULT_TERMINAL_MIN_COLUMN_WIDTH ? " (default)" : ""}`}
             >
@@ -580,7 +626,6 @@ export function GeneralSection({
         <SettingsGroup title="Privacy">
           <SettingsRow
             def={SETTINGS_ROWS.anonymousAnalytics}
-            inlineControl
             description={(
               <>
                 <span>

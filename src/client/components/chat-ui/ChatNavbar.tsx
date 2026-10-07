@@ -1,4 +1,4 @@
-import { memo } from "react"
+import { memo, useEffect, useRef, useState, type ReactNode, type Ref } from "react"
 import { ArrowLeft, Check, Flower, Loader2, MoreHorizontal, PanelLeft, PanelRight, Search, Terminal, UserRoundPlus } from "lucide-react"
 import type { EditorOpenSettings, EditorPreset, OpenExternalAction, TerminalPreset } from "../../../shared/protocol"
 import { Button } from "../ui/button"
@@ -131,10 +131,132 @@ interface Props {
   terminalShortcut?: string[]
   rightSidebarShortcut?: string[]
   branchName?: string
+  /**
+   * What the bar's left end holds, beside the sidebar: the open chat's
+   * title (`ChatNavbarTitle`), or the open chats as tabs (`ChatTabs`). A
+   * node, so memoize it: this bar is.
+   */
+  titleSlot?: ReactNode
+  /**
+   * Drops the branch name (or "Setup Git") from the right sidebar's button,
+   * leaving its icon. For the tab bar, where every pixel of the bar is a
+   * tab's; the sidebar the button opens still says both.
+   */
+  hideBranchLabel?: boolean
   /** The project's forge page, for the "Open in…" menu's last entry. */
   repoUrl?: string
   hasGitRepo?: boolean
   gitStatus?: "unknown" | "ready" | "no_repo"
+  className?: string
+  headerRef?: Ref<HTMLDivElement>
+  inert?: boolean
+}
+
+/** How long after a chat opens its scroll position is still being put back. */
+const WASH_SETTLE_MS = 400
+
+/**
+ * The fade what scrolls under the navbar goes into: the transcript and the
+ * widget column each draw their own. It lives with them, not the navbar,
+ * because the navbar runs on over the viewer, which starts below it and has
+ * nothing to fade. It's as tall as the navbar (`--chat-navbar-h`, measured by
+ * the chat page).
+ *
+ * In the transcript both washes stop at its scrollbar gutter instead of
+ * running to the card edge, so the scrollbar isn't dimmed by them — a native
+ * scrollbar paints under any later positioned sibling and no z-index can lift
+ * it. The widget column hides its scrollbar, so it runs edge to edge.
+ *
+ * It shows only once something is under it: scrolled to the top, there's
+ * nothing to fade and it would only dim the first thing. Its scroller is the
+ * `data-navbar-scroller` element beside it. Scroll events don't bubble, so it
+ * listens on its parent in the capture phase, which also covers a scroller
+ * that remounts (the transcript, per chat). `resetKey` re-reads it when one
+ * mounts without scrolling, which fires nothing.
+ */
+export function ChatNavbarWash({ stopAtTranscriptScrollbar = true, resetKey, opaqueBar = false }: {
+  stopAtTranscriptScrollbar?: boolean
+  resetKey?: string | null
+  /**
+   * Solid behind the chat tabs, down to their bottom edge, with
+   * the fade starting there. A bar full of things to read can't have text
+   * scrolling up behind it, even dimmed: that is text behind text.
+   */
+  opaqueBar?: boolean
+}) {
+  const washRef = useRef<HTMLDivElement>(null)
+  const [scrolled, setScrolled] = useState(false)
+  // The fade is for scrolling: it eases in as text first goes under the bar.
+  // A chat being opened is not that. Its scroller mounts at the top and is
+  // put where it was read to a frame or two later, and easing through that
+  // made every switch fade the wash out and back in. So for a moment after a
+  // switch the wash takes its state at once, and eases again after.
+  const [settling, setSettling] = useState(true)
+
+  useEffect(() => {
+    setSettling(true)
+    const settled = window.setTimeout(() => setSettling(false), WASH_SETTLE_MS)
+    return () => window.clearTimeout(settled)
+  }, [resetKey])
+
+  useEffect(() => {
+    const host = washRef.current?.parentElement
+    if (!host) return
+    const read = () => {
+      const scroller = host.querySelector<HTMLElement>("[data-navbar-scroller]")
+      setScrolled((scroller?.scrollTop ?? 0) > 0)
+    }
+    const handleScroll = (event: Event) => {
+      if (event.target instanceof Element && event.target.matches("[data-navbar-scroller]")) read()
+    }
+    read()
+    // A scroller that just mounted may take its position a frame later.
+    const frame = window.requestAnimationFrame(read)
+    host.addEventListener("scroll", handleScroll, { capture: true, passive: true })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      host.removeEventListener("scroll", handleScroll, { capture: true })
+    }
+  }, [resetKey])
+
+  return (
+    <div
+      ref={washRef}
+      className={cn(
+        "absolute top-0 left-0 z-10 h-[100px] pointer-events-none",
+        settling ? "transition-none" : "transition-opacity duration-200 ease-out",
+        stopAtTranscriptScrollbar ? "right-[var(--transcript-scrollbar-w,0px)]" : "right-0",
+        // Behind the tabs it is always there: only its fade comes and goes
+        // with the scroll (below). Fading the solid part meant every tab
+        // switch, which starts the next chat unscrolled for a frame, faded
+        // the bar out and back in with the transcript showing through it.
+        opaqueBar || scrolled ? "opacity-100" : "opacity-0"
+      )}
+    >
+      {opaqueBar ? (
+        // Solid down to the tabs' bottom edge and no further, then a short
+        // fade. The tabs are 30px tall, centered on a line that differs by
+        // app: on the web 36px down (the row's 27px center, plus the 9px the
+        // tabs drop to meet the sidebar's bar), in the Mac app the traffic
+        // lights' center.
+        <>
+          <div className="absolute inset-x-0 top-0 h-[51px] bg-background mac-app:md:h-[calc(var(--mac-traffic-lights-center)+15px)]"></div>
+          <div
+            className={cn(
+              "absolute inset-x-0 top-[51px] h-4 bg-gradient-to-b from-background to-background/0 mac-app:md:top-[calc(var(--mac-traffic-lights-center)+15px)]",
+              settling ? "transition-none" : "transition-opacity duration-200 ease-out",
+              scrolled ? "opacity-100" : "opacity-0"
+            )}
+          ></div>
+        </>
+      ) : (
+        <>
+          <div className="absolute inset-x-0 top-0 h-[var(--chat-navbar-h,53px)] bg-gradient-to-b from-background lg:from-background/0"></div>
+          <div className="absolute inset-0 bg-gradient-to-b from-background via-background/50 to-background/10 md:to-background/0"></div>
+        </>
+      )}
+    </div>
+  )
 }
 
 /**
@@ -164,9 +286,14 @@ function ChatNavbarImpl({
   terminalShortcut,
   rightSidebarShortcut,
   branchName,
+  titleSlot,
+  hideBranchLabel = false,
   repoUrl,
   hasGitRepo = true,
   gitStatus = "unknown",
+  className,
+  headerRef,
+  inert,
 }: Props) {
   // New Sidebar mode surfaces search in the sidebar, so the chat navbar only
   // keeps its search button on mobile (where the sidebar is hidden).
@@ -176,6 +303,7 @@ function ChatNavbarImpl({
     : gitStatus === "unknown"
       ? null
       : (branchName ?? "Detached HEAD")
+  const showBranchLabel = Boolean(branchLabel) && !hideBranchLabel
   const isMac = platform === "darwin"
   const rightPanelVisible = widgetsOpen
 
@@ -184,27 +312,28 @@ function ChatNavbarImpl({
       // In the Mac app the navbar's bare background drags the window, and its
       // row is exactly twice the traffic lights' center tall, so whatever its
       // controls measure (bordered groups are 32px), they center on the lights.
+      // No padding under the row there either: the widget column and the
+      // viewer start at the navbar's foot, and the controls center in the
+      // space above them, as the web's 9px + 36px row + 8px does.
       data-window-drag
+      ref={headerRef}
+      inert={inert || undefined}
+      // Read by the title slot, which sits lower while there is a sidebar bar
+      // to line up with (ChatTabs, ChatNavbarTitle).
+      data-sidebar-collapsed={sidebarCollapsed || undefined}
       className={cn(
-        "absolute top-0 left-0 right-0 z-10 md:pt-[9px] max-md:px-2 md:pl-1 md:pr-2 border-border/0 flex items-center justify-center mac-app:md:pt-0"
+        "group/navbar absolute top-0 left-0 right-0 z-10 md:pt-[9px] max-md:px-2 md:pl-1 md:pr-2 border-border/0 flex items-center justify-center mac-app:md:pt-0 mac-app:md:pb-0",
+        className
       )}
     >
-      {/* Both washes stop at the transcript's scrollbar gutter instead of
-          running to the card edge, so the scrollbar isn't dimmed by them — a
-          native scrollbar paints under any later positioned sibling and no
-          z-index can lift it. The header keeps its full width so the controls
-          in it stay where they were; only the backgrounds move inward, and
-          they cover nothing but bare background out there anyway. */}
-      <div className="absolute inset-y-0 left-0 right-[var(--transcript-scrollbar-w,0px)] z-0 bg-gradient-to-b from-background lg:from-background/0 pointer-events-none"></div>
-      <div className="absolute top-0 left-0 right-[var(--transcript-scrollbar-w,0px)] z-0 h-[100px] bg-gradient-to-b from-background via-background/50 to-background/10 md:to-background/0 pointer-events-none block"></div>
       <div className="relative flex items-center gap-2 w-full mac-app:md:h-[calc(var(--mac-traffic-lights-center)*2)]">
         <div className={cn(
           "md:h-[30px] flex items-center gap-0 flex-shrink-0 border border-border/0 rounded-[9px] md:px-[2px]",
-          // The app pins its sidebar toggle beside the traffic lights
-          // (KannaSidebar); clear both: 28px toggle + 8px gap, less pl-1.
-          // Its border framed the flower and expand button, which the app
-          // replaces with that toggle.
-          sidebarCollapsed && "px-1.5 border-border mac-app:md:ml-[calc(var(--mac-traffic-lights-inset)+32px)] mac-app:md:border-border/0"
+          // Unbordered: the flower and expand button stand on their own. The
+          // app pins its sidebar toggle beside the traffic lights
+          // and back/forward (KannaSidebar); clear them: 3 × 28px + 8px gap,
+          // less pl-1.
+          sidebarCollapsed && "px-1.5 mac-app:md:ml-[calc(var(--mac-traffic-lights-inset)+88px)]"
         )}>
           <Button
             variant="ghost"
@@ -246,7 +375,14 @@ function ChatNavbarImpl({
           </Button>
         </div>
 
-        <div className="flex-1 min-w-0" />
+        {/* In the row's flow, so it starts after whatever the left group is
+            holding: nothing with the sidebar open, the expand button and the
+            room for the traffic lights with it collapsed. It is the row's
+            flexible middle, taking what the buttons leave. Desktop only (it
+            hides itself under `md`), so the spacer stays for a phone, and for
+            a page with no chat to title. */}
+        {titleSlot}
+        <div className={cn("min-w-0 flex-1", titleSlot ? "md:hidden" : null)} />
 
         {localPath && (onOpenExternal || onToggleEmbeddedTerminal || onToggleWidgets || onExportTranscript) ? (
           <div className="flex items-center gap-2 flex-shrink-0">
@@ -329,14 +465,37 @@ function ChatNavbarImpl({
                         aria-label={widgetsOpen ? "Hide widgets" : "Show widgets"}
                         aria-pressed={widgetsOpen}
                         className={cn(
-                          "border flex flex-row items-center gap-1.5 h-9 max-md:h-[45px] max-md:w-[42px] max-md:px-0 border-border/0 hover:!border-border/0 hover:!bg-transparent",
-                          widgetsOpen ? "w-[38px] justify-center px-0 text-foreground" : "pl-1.5 pr-2"
+                          // Open, the padding centers the icon (24px wide: only
+                          // its height is set) in 38px. It moves with the
+                          // branch label below, on the label's timing, so the
+                          // button shrinks and grows as one.
+                          "border flex flex-row items-center justify-center h-9 max-md:h-[45px] max-md:w-[42px] max-md:px-0 border-border/0 hover:!border-border/0 hover:!bg-transparent",
+                          "transition-[color,background-color,border-color,padding] ease-snappy motion-reduce:transition-colors",
+                          widgetsOpen ? "min-w-[38px] px-1.5 text-foreground duration-150" : "pl-1.5 pr-2 duration-200"
                         )}
                       >
-                        <PanelRight strokeWidth={2.25} className="h-4 max-md:h-5 max-md:w-5" />
+                        <PanelRight strokeWidth={2.25} className="h-4 shrink-0 max-md:h-5 max-md:w-5" />
                         {/* The branch rides on the closed button so it stays
-                            visible at a glance; open, the Changes widget shows it. */}
-                        {branchLabel && !widgetsOpen ? <div className="font-[13px] max-w-[140px] truncate hidden md:block">{branchLabel}</div> : null}
+                            visible at a glance; open, the Changes widget shows
+                            it. It folds away as the column opens and unfolds as
+                            it closes (0fr↔1fr, the gap inside the fold) rather
+                            than snapping, so what's left of it slides instead
+                            of jumping. Out is quicker than in: leaving is the
+                            answer to the click. The text keeps its own width
+                            while it folds, clipped rather than re-truncated. */}
+                        {showBranchLabel ? (
+                          <span
+                            aria-hidden={widgetsOpen || undefined}
+                            className={cn(
+                              "hidden md:grid transition-[grid-template-columns,opacity] ease-snappy motion-reduce:transition-opacity",
+                              widgetsOpen ? "grid-cols-[0fr] opacity-0 duration-150" : "grid-cols-[1fr] opacity-100 duration-200"
+                            )}
+                          >
+                            <span className="min-w-0 overflow-hidden">
+                              <span className="block w-max max-w-[140px] truncate pl-1.5 font-[13px]">{branchLabel}</span>
+                            </span>
+                          </span>
+                        ) : null}
                       </Button>
                     </HotkeyTooltipTrigger>
                     <HotkeyTooltipContent side="bottom" shortcut={rightSidebarShortcut} />

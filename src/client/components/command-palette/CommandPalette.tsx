@@ -24,6 +24,7 @@ import {
   Lock,
   LockOpen,
   Moon,
+  Network,
   PanelRight,
   Paperclip,
   Plus,
@@ -62,10 +63,12 @@ import {
 import { filterProjects, getLocalProjectTitle, groupProjectsByRecency, groupProjectsForNewChat } from "../../lib/project-groups"
 import { usePendingSendStore } from "../../stores/pendingSendStore"
 import { useRightSidebarStore, useWidgetsOpen } from "../../stores/rightSidebarStore"
+import { getPaneChatKey, usePaneChatKey } from "../../lib/paneVisibility"
 import { setFocusMode, useFocusModeEnabled } from "../../stores/focusModeStore"
 import { useSidebarStore } from "../../stores/sidebarStore"
 import { useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
+import { useChatViewer, useViewerStore } from "../../stores/viewerStore"
 import { PROVIDER_ICONS } from "../chat-ui/ChatPreferenceControls"
 import { UsageSection } from "../../app/settings/UsageSection"
 import { getOpenAppItems, openAppValue, OpenAppIcon, useInstalledEditors, useInstalledTerminals } from "../open-external-menu"
@@ -78,6 +81,7 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/command"
+import { listedThreads } from "../../lib/thread-sections"
 import {
   computeSidebarThreadSections,
   computeThreadSections,
@@ -266,10 +270,17 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const onChatPage = Boolean(state.activeChatId)
   const projectId = state.activeProjectId
   // Reactive so the palette's Show/Hide Widgets label tracks the navbar toggle.
-  const widgetsOpen = useWidgetsOpen(projectId)
+  const widgetsChatKey = usePaneChatKey("widgets", state.activeChatId)
+  const widgetsOpen = useWidgetsOpen(projectId, widgetsChatKey)
   const isMac = (state.localProjects?.machine.platform ?? "darwin") === "darwin"
   // Reactive so the action's label flips between Focus and Exit Focus Mode.
   const focusModeEnabled = useFocusModeEnabled()
+  // The graph is shown in the previewer's pane, so only where a page has one
+  // (the same count a sub-chat's click reads: `chatPreviewHosts`).
+  const canShowGraph = useViewerStore((store) => store.chatPreviewHosts > 0)
+  // Reactive so the label says what choosing it will do. A chat picked from
+  // the graph has taken the graph's place, so the graph is not "shown" then.
+  const graphShown = useChatViewer()?.item.kind === "graph"
   // The active chat's row plus the project group that owns it (for the
   // "Hide <project>" action, which needs the group key + title).
   const currentChat = useMemo(() => {
@@ -283,7 +294,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const currentChatRow = currentChat?.row ?? null
   const currentChatGroup = currentChat?.group ?? null
 
-  const threads = useMemo(() => flattenSidebarThreads(sidebarData), [sidebarData])
+  const threads = useMemo(() => listedThreads(flattenSidebarThreads(sidebarData)), [sidebarData])
   const paletteProjects = useMemo(
     () => flattenVisibleProjectGroups(sidebarData.projectGroups),
     [sidebarData]
@@ -636,7 +647,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
         shortcut: chatShortcuts("toggleRightSidebar"),
         run: () => {
           close()
-          useRightSidebarStore.getState().toggleWidgets(projectId)
+          useRightSidebarStore.getState().toggleWidgets(projectId, widgetsChatKey)
         },
       })
       list.push({
@@ -649,11 +660,12 @@ export function CommandPalette({ state }: { state: KannaState }) {
           close()
           const store = useTerminalLayoutStore.getState()
           const layout = store.projects[projectId]
+          const terminalChatKey = getPaneChatKey("terminal", state.activeChatId)
           if (!layout || layout.terminals.length === 0) {
-            store.addTerminal(projectId)
+            store.addTerminal(projectId, undefined, terminalChatKey)
             return
           }
-          store.toggleVisibility(projectId)
+          store.toggleVisibility(projectId, terminalChatKey)
         },
       })
       list.push({
@@ -712,6 +724,22 @@ export function CommandPalette({ state }: { state: KannaState }) {
           },
         })
       }
+    }
+
+    if (state.activeChatId && canShowGraph) {
+      const graphChatId = state.activeChatId
+      list.push({
+        id: "show-graph",
+        title: graphShown ? "Hide Graph" : "Show Graph",
+        keywords: ["graph", "tree", "map", "overview", "sub-chats", "subchats", "sub chats", "delegation", "agents", "children", "show", "hide"],
+        icon: <Network className={ICON_CLASS} />,
+        run: () => {
+          close()
+          // The tree this chat is in, from its root down, beside the chat.
+          if (graphShown) useViewerStore.getState().close()
+          else useViewerStore.getState().open({ kind: "graph", chatId: graphChatId })
+        },
+      })
     }
 
     if (state.activeChatId) {
@@ -919,6 +947,8 @@ export function CommandPalette({ state }: { state: KannaState }) {
     editorCommandTemplate,
     editorPreset,
     focusModeEnabled,
+    canShowGraph,
+    graphShown,
     installedEditors,
     installedTerminals,
     isMac,
@@ -927,6 +957,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     projectId,
     pushPage,
     resolvedTheme,
+    widgetsChatKey,
     widgetsOpen,
     setTheme,
     state.activeChatId,
