@@ -7,6 +7,112 @@ import { createEmptyState, type TouchedFile } from "./events"
 import type { WorkingTreeProbe } from "./diff-store"
 
 describe("read models", () => {
+  test("a sub-chat stays in the project's chats but is left out of the lists it shows", () => {
+    const state = createEmptyState()
+    const now = Date.now()
+    state.projectsById.set("p", { id: "p", localPath: "/tmp/p", title: "P", createdAt: 1, updatedAt: 1 })
+    const chat = (id: string, parentChatId?: string) => ({
+      id,
+      projectId: "p",
+      title: id,
+      createdAt: now,
+      updatedAt: now,
+      unread: false,
+      provider: null,
+      planMode: false,
+      autoPlan: false,
+      sessionToken: null,
+      hasMessages: true,
+      lastMessageAt: now,
+      lastTurnOutcome: null,
+      ...(parentChatId ? { parentChatId } : {}),
+    })
+    state.chatsById.set("parent", chat("parent"))
+    state.chatsById.set("child", chat("child", "parent"))
+
+    const group = deriveSidebarData(state, new Map(), { nowMs: now }).projectGroups[0]!
+    // Still findable by id: opening it, its title, its status all read from here.
+    expect(group.chats.map((row) => [row.chatId, row.parentChatId])).toEqual(
+      expect.arrayContaining([["parent", undefined], ["child", "parent"]]),
+    )
+    expect([...group.previewChats, ...group.olderChats].map((row) => row.chatId)).toEqual(["parent"])
+  })
+
+  test("a chat waiting on a subagent reads so in the sidebar and its snapshot, unless its last turn failed", () => {
+    const state = createEmptyState()
+    state.projectsById.set("p", { id: "p", localPath: "/tmp/p", title: "P", createdAt: 1, updatedAt: 1 })
+    const outcomes = { waiting: "success", failed: "failed", resting: "success" } as const
+    for (const [id, lastTurnOutcome] of Object.entries(outcomes)) {
+      state.chatsById.set(id, {
+        id, projectId: "p", title: id, createdAt: 1, updatedAt: 1, unread: true, provider: null,
+        planMode: false, autoPlan: false, sessionToken: null, hasMessages: true, lastMessageAt: 1, lastTurnOutcome,
+      })
+    }
+    const statuses = new Map([["waiting", "waiting_on_subagent"], ["failed", "waiting_on_subagent"]] as const)
+
+    const rows = deriveSidebarData(state, statuses).projectGroups[0]!.chats
+    expect(Object.fromEntries(rows.map((row) => [row.chatId, row.status]))).toEqual({
+      waiting: "waiting_on_subagent",
+      // The failure is what the user has to look at, whatever is still going.
+      failed: "failed",
+      resting: "idle",
+    })
+    const snapshot = (chatId: string) => deriveChatSnapshot(state, statuses, new Set(), chatId, () => ({ messages: [], startIndex: 0, readAnchor: null }))
+    expect(snapshot("waiting")?.runtime.status).toBe("waiting_on_subagent")
+    expect(snapshot("failed")?.runtime.status).toBe("failed")
+    expect(snapshot("resting")?.runtime.status).toBe("idle")
+  })
+
+  test("a sub-chat's snapshot names its parent, and a chat of the user's own names none", () => {
+    const state = createEmptyState()
+    state.projectsById.set("p", { id: "p", localPath: "/tmp/p", title: "P", createdAt: 1, updatedAt: 1 })
+    for (const [id, parentChatId] of [["parent", undefined], ["child", "parent"]] as const) {
+      state.chatsById.set(id, {
+        id, projectId: "p", title: id, createdAt: 1, updatedAt: 1, unread: false, provider: null,
+        planMode: false, autoPlan: false, sessionToken: null, hasMessages: true, lastMessageAt: 1, lastTurnOutcome: null,
+        ...(parentChatId ? { parentChatId } : {}),
+      })
+    }
+    const runtime = (chatId: string) => deriveChatSnapshot(state, new Map(), new Set(), chatId, () => ({ messages: [], startIndex: 0, readAnchor: null }))?.runtime
+
+    expect(runtime("child")?.parentChatId).toBe("parent")
+    expect(runtime("parent")).not.toHaveProperty("parentChatId")
+  })
+
+  test("a chat's snapshot carries the schedules to do with it", () => {
+    const state = createEmptyState()
+    state.projectsById.set("p", { id: "p", localPath: "/tmp/p", title: "P", createdAt: 1, updatedAt: 1 })
+    for (const id of ["target", "creator", "run", "other"]) {
+      state.chatsById.set(id, {
+        id, projectId: "p", title: id, createdAt: 1, updatedAt: 1, unread: false, provider: null,
+        planMode: false, autoPlan: false, sessionToken: null, lastTurnOutcome: null,
+      })
+    }
+    state.schedulesById.set("s", {
+      id: "s",
+      name: "Nightly",
+      content: "triage",
+      target: { kind: "chat", chatId: "target" },
+      trigger: { kind: "interval", everyMs: 60_000 },
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+      createdByChatId: "creator",
+      lastRunChatId: "run",
+      nextRunAt: 5,
+      runCount: 1,
+      runs: [{ at: 2, outcome: "sent", chatId: "run" }],
+    })
+    const schedulesOf = (chatId: string) => deriveChatSnapshot(
+      state, new Map(), new Set(), chatId, () => ({ messages: [], startIndex: 0, readAnchor: null }),
+    )?.runtime.schedules
+    expect(schedulesOf("target")?.map((schedule) => schedule.id)).toEqual(["s"])
+    expect(schedulesOf("creator")?.[0]?.runs).toEqual([{ at: 2, outcome: "sent", chatId: "run" }])
+    expect(schedulesOf("run")).toHaveLength(1)
+    // Nothing on the wire for a chat no schedule touches.
+    expect(schedulesOf("other")).toBeUndefined()
+  })
+
   test("excludes hidden projects even when discovery returns the same folder", () => {
     const state = createEmptyState()
     state.projectsById.set("hidden-project", {

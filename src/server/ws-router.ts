@@ -6,6 +6,7 @@ import type { ClientEnvelope, ServerEnvelope, SubscriptionTopic } from "../share
 import { isClientEnvelope } from "../shared/protocol"
 import { diffSidebarIndex, indexSidebarData, type SidebarIndex } from "../shared/sidebar-patch"
 import type { AgentCoordinator } from "./agent"
+import { createChatCommands, type ChatChange, type ChatCommandOutcome, type ChatCommands } from "./chat-commands"
 import type { AnalyticsReporter } from "./analytics"
 import { NoopAnalyticsReporter } from "./analytics"
 import type { AppSettingsManager } from "./app-settings"
@@ -24,11 +25,13 @@ import { installSkill, listGlobalSkillsWithSources, listInstalledSkills, searchS
 import { writeStandaloneTranscriptExport } from "./standalone-export"
 import { TerminalManager } from "./terminal-manager"
 import type { WorktreeProbe } from "./worktree-probe"
+import type { ProjectIcons } from "./project-icons"
 import type { ProviderAuthManager } from "./provider-auth"
 import type { UpdateManager } from "./update-manager"
 import type { UsageLimitsManager } from "./usage-limits"
 import { deriveChatSnapshot, deriveChatTouchedFiles, deriveLocalProjectsSnapshot, deriveSidebarData } from "./read-models"
 import type {
+  AppSettingsSnapshot,
   ChatSnapshot,
   LlmProviderSnapshot,
   LlmProviderValidationResult,
@@ -102,6 +105,7 @@ interface CreateWsRouterArgs {
   store: EventStore
   diffStore: Pick<DiffStore, "getProjectSnapshot" | "getSnapshotVersion" | "refreshSnapshot" | "initializeGit" | "getGitHubPublishInfo" | "checkGitHubRepoAvailability" | "publishToGitHub" | "listBranches" | "previewMergeBranch" | "mergeBranch" | "syncBranch" | "checkoutBranch" | "createBranch" | "generateCommitMessage" | "commitFiles" | "discardFile" | "ignoreFile" | "readPatch" | "readCommit" | "readBranch">
   worktreeProbe: Pick<WorktreeProbe, "getStates" | "getRepoLabels" | "getProjectsWithoutRepo">
+  projectIcons?: Pick<ProjectIcons, "getUrls">
   agent: AgentCoordinator
   terminals: TerminalManager
   portTunnels?: Pick<PortTunnelManager, "expose" | "unexpose" | "getPublicUrl">
@@ -135,6 +139,11 @@ interface CreateWsRouterArgs {
   > | null
   /** Overrides `BACKGROUND_CHAT_PUSH_INTERVAL_MS`; tests shorten it. */
   backgroundChatPushIntervalMs?: number
+  /**
+   * The chat actions, shared with the orchestrator so an agent's tools run
+   * the same code as these commands. Built here when not handed in.
+   */
+  chatCommands?: ChatCommands
 }
 
 interface SnapshotBroadcastFilter {
@@ -228,6 +237,7 @@ export function createWsRouter({
   store,
   diffStore,
   worktreeProbe,
+  projectIcons,
   agent,
   terminals,
   portTunnels,
@@ -243,15 +253,25 @@ export function createWsRouter({
   usageLimits,
   providerAuth,
   backgroundChatPushIntervalMs = BACKGROUND_CHAT_PUSH_INTERVAL_MS,
+  chatCommands: providedChatCommands,
 }: CreateWsRouterArgs) {
   const sockets = new Set<ServerWebSocket<ClientState>>()
   let pendingBroadcastTimer: ReturnType<typeof setTimeout> | null = null
   let pendingBroadcastAll = false
   const pendingBroadcastChatIds = new Set<string>()
   const resolvedAnalytics = analytics ?? NoopAnalyticsReporter
+  const chatCommands = providedChatCommands ?? createChatCommands({ store, agent, analytics: resolvedAnalytics })
+
+  /**
+   * Every chat that is not at rest: a turn in flight, or waiting on a
+   * subagent. The fallback is for test fakes that predate the second.
+   */
+  function getChatStatuses() {
+    return agent.getChatStatuses?.() ?? agent.getActiveStatuses()
+  }
 
   function getProtectedChatIds() {
-    const activeStatuses = agent.getActiveStatuses()
+    const activeStatuses = getChatStatuses()
     const drainingChatIds = typeof agent.getDrainingChatIds === "function"
       ? agent.getDrainingChatIds()
       : new Set<string>()
@@ -367,7 +387,7 @@ export function createWsRouter({
       return cache.sidebar
     }
 
-    const activeStatuses = agent.getActiveStatuses()
+    const activeStatuses = getChatStatuses()
     const drainingChatIds = agent.getDrainingChatIds()
     const pendingToolKinds = new Map<string, string>()
     const pendingUserInputPreviews = new Map<string, string>()
@@ -410,6 +430,7 @@ export function createWsRouter({
       workingTrees: worktreeProbe.getStates(),
       repoLabels: worktreeProbe.getRepoLabels(),
       projectsWithoutRepo: worktreeProbe.getProjectsWithoutRepo(),
+      projectIcons: projectIcons?.getUrls(),
     })
 
     const sidebar: SidebarSnapshotEntry = {
@@ -427,6 +448,18 @@ export function createWsRouter({
     }
 
     return sidebar
+  }
+
+  /**
+   * The live provider catalog rides every app-settings payload so pickers
+   * outside a chat (new-chat composer, settings defaults) see
+   * runtime-discovered models; chat snapshots carry the same list. That
+   * includes the acks of the settings commands, not only the subscription
+   * push: the client replaces its whole snapshot with an ack, so one without
+   * the catalog put those pickers back on the static list after any write.
+   */
+  function withProviderCatalog(snapshot: AppSettingsSnapshot): AppSettingsSnapshot {
+    return { ...snapshot, availableProviders: [...SERVER_PROVIDERS] }
   }
 
   /**
@@ -517,10 +550,7 @@ export function createWsRouter({
         id,
         snapshot: {
           type: "app-settings",
-          // The live provider catalog rides along so pickers outside a chat
-          // (new-chat composer, settings defaults) see runtime-discovered
-          // models; chat snapshots carry the same list.
-          data: { ...appSettings.getSnapshot(), availableProviders: [...SERVER_PROVIDERS] },
+          data: withProviderCatalog(appSettings.getSnapshot()),
         },
       }
     }
@@ -605,7 +635,7 @@ export function createWsRouter({
         type: "chat",
         data: deriveChatSnapshot(
           store.state,
-          agent.getActiveStatuses(),
+          getChatStatuses(),
           agent.getDrainingChatIds(),
           topic.chatId,
           (chatId) => store.getClientTranscript(chatId),
@@ -640,7 +670,7 @@ export function createWsRouter({
     }
     const data = deriveChatSnapshot(
       store.state,
-      agent.getActiveStatuses(),
+      getChatStatuses(),
       agent.getDrainingChatIds(),
       chatId,
       (id) => store.getClientTranscript(id, fromIndex ?? getEarliestChatWindowStart(id)),
@@ -985,6 +1015,26 @@ export function createWsRouter({
     await broadcastChatAndSidebar(chatId)
   }
 
+  /** Push what a chat command says it changed. */
+  async function broadcastChatChange(change: ChatChange) {
+    await broadcastFilteredSnapshots({
+      includeSidebar: change.sidebar,
+      includeLocalProjects: change.localProjects,
+      ...(change.chatIds?.length ? { chatIds: new Set(change.chatIds) } : {}),
+    })
+  }
+
+  /** Ack a chat command, then push what it changed: the ack first, so the sender never sees its own push before its answer. */
+  async function finishChatCommand(ws: ServerWebSocket<ClientState>, id: string, outcome: ChatCommandOutcome<unknown>) {
+    send(ws, {
+      v: PROTOCOL_VERSION,
+      type: "ack",
+      id,
+      ...(outcome.result === undefined ? {} : { result: outcome.result }),
+    })
+    if (outcome.changed) await broadcastChatChange(outcome.changed)
+  }
+
   function broadcastError(message: string) {
     for (const ws of sockets) {
       send(ws, {
@@ -1303,7 +1353,7 @@ export function createWsRouter({
           return
         }
         case "settings.readAppSettings": {
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: appSettings.getSnapshot() })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: withProviderCatalog(appSettings.getSnapshot()) })
           return
         }
         case "usage.refresh": {
@@ -1374,7 +1424,7 @@ export function createWsRouter({
             resolvedAnalytics.track("analytics_disabled")
           }
           const snapshot = await appSettings.write({ analyticsEnabled: command.analyticsEnabled })
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: snapshot })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: withProviderCatalog(snapshot) })
           if (!previousAnalyticsEnabled && command.analyticsEnabled) {
             resolvedAnalytics.track("analytics_enabled")
           }
@@ -1383,7 +1433,7 @@ export function createWsRouter({
         case "settings.writeAppSettingsPatch": {
           const previousAnalyticsEnabled = appSettings.getSnapshot().analyticsEnabled
           const snapshot = await appSettings.writePatch(command.patch)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: snapshot })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: withProviderCatalog(snapshot) })
           if (command.patch.analyticsEnabled !== undefined && previousAnalyticsEnabled && !snapshot.analyticsEnabled) {
             resolvedAnalytics.track("analytics_disabled")
           }
@@ -1494,6 +1544,15 @@ export function createWsRouter({
           await broadcastFilteredSnapshots({ includeSidebar: true, includeLocalProjects: true })
           return
         }
+        case "project.setPinned": {
+          const pinnedAt = typeof command.pinnedAt === "number" && Number.isFinite(command.pinnedAt)
+            ? command.pinnedAt
+            : undefined
+          await store.setProjectPinned(command.projectId, command.pinned, pinnedAt)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          await broadcastFilteredSnapshots({ includeSidebar: true })
+          return
+        }
         case "project.clone": {
           const cloneDest = await resolveClonePath(command.localPath, command.fallbackPath)
           await cloneRepository(command.cloneUrl, cloneDest)
@@ -1563,85 +1622,34 @@ export function createWsRouter({
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           return
         }
+        // The chat actions are defined in chat-commands.ts, where the agents'
+        // tools reach them too. Only the ack and the push are done here.
         case "chat.create": {
-          const chat = await store.createChat(command.projectId)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { chatId: chat.id } })
-          resolvedAnalytics.track("chat_created")
-          // Adding a chat changes local-projects too (chatCount/lastOpenedAt).
-          await broadcastFilteredSnapshots({
-            includeSidebar: true,
-            includeLocalProjects: true,
-            chatIds: new Set([chat.id]),
-          })
+          await finishChatCommand(ws, id, await chatCommands.create(command.projectId))
           return
         }
         case "chat.fork": {
-          const result = await agent.forkChat(command.chatId)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
-          await broadcastFilteredSnapshots({ includeSidebar: true, includeLocalProjects: true })
+          await finishChatCommand(ws, id, await chatCommands.fork(command.chatId))
           return
         }
         case "chat.rename": {
-          await store.renameChat(command.chatId, command.title)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.rename(command.chatId, command.title))
           return
         }
         case "chat.setPinned": {
-          await store.setChatPinned(command.chatId, command.pinned)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastFilteredSnapshots({ includeSidebar: true })
+          await finishChatCommand(ws, id, await chatCommands.setPinned(command.chatId, command.pinned))
           return
         }
         case "chat.archive": {
-          // Archiving a chat that never got a message is a hard delete — an
-          // empty chat has nothing worth keeping in the Archived list.
-          const chat = store.getChat(command.chatId)
-          const hardDeleted = chat != null && !chat.hasMessages && !chat.lastMessageAt
-          if (hardDeleted) {
-            await store.deleteChat(command.chatId)
-          } else {
-            await store.archiveChat(command.chatId)
-          }
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          // Archiving removes the chat from local-projects' chat counts; a hard
-          // delete must also refresh the chat's own topic (to null) so a tab
-          // viewing it learns it's gone.
-          await broadcastFilteredSnapshots({
-            includeSidebar: true,
-            includeLocalProjects: true,
-            ...(hardDeleted ? { chatIds: new Set([command.chatId]) } : {}),
-          })
+          await finishChatCommand(ws, id, await chatCommands.archive(command.chatId))
           return
         }
         case "chat.unarchive": {
-          await store.unarchiveChat(command.chatId)
-          // Unarchiving is the explicit "Restore" action (viewing an archived
-          // chat no longer unarchives it). Mark it done so restoring alone
-          // doesn't resurface it as needing review; sending a message clears
-          // the done state and brings it back to running.
-          await store.setChatDoneState(command.chatId, true)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastFilteredSnapshots({
-            includeSidebar: true,
-            includeLocalProjects: true,
-            chatIds: new Set([command.chatId]),
-          })
+          await finishChatCommand(ws, id, await chatCommands.unarchive(command.chatId))
           return
         }
         case "chat.delete": {
-          await agent.cancel(command.chatId)
-          await agent.closeChat(command.chatId)
-          await store.deleteChat(command.chatId)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          resolvedAnalytics.track("chat_deleted")
-          // The deleted chat's own topic must refresh (to null) so another tab
-          // viewing it learns it's gone, and local-projects loses the chat.
-          await broadcastFilteredSnapshots({
-            includeSidebar: true,
-            includeLocalProjects: true,
-            chatIds: new Set([command.chatId]),
-          })
+          await finishChatCommand(ws, id, await chatCommands.delete(command.chatId))
           return
         }
         case "chat.touchedFiles": {
@@ -1660,15 +1668,11 @@ export function createWsRouter({
           return
         }
         case "chat.markRead": {
-          await store.setChatReadState(command.chatId, false)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.markRead(command.chatId))
           return
         }
         case "chat.setDone": {
-          await store.setChatDoneState(command.chatId, command.done)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.setDone(command.chatId, command.done))
           return
         }
         case "chat.setReadAnchor": {
@@ -1750,8 +1754,7 @@ export function createWsRouter({
           return
         }
         case "chat.send": {
-          const result = await agent.send(command)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          await finishChatCommand(ws, id, await chatCommands.send(command))
           return
         }
         case "chat.refreshDiffs": {
@@ -1910,8 +1913,7 @@ export function createWsRouter({
           return
         }
         case "chat.cancel": {
-          await agent.cancel(command.chatId)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          await finishChatCommand(ws, id, await chatCommands.cancel(command.chatId))
           return
         }
         case "chat.stopDraining": {
@@ -1947,21 +1949,15 @@ export function createWsRouter({
           return
         }
         case "message.enqueue": {
-          const result = await agent.enqueue(command)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.enqueue(command))
           return
         }
         case "message.steer": {
-          await agent.steer(command)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.steer(command))
           return
         }
         case "message.dequeue": {
-          await agent.dequeue(command)
-          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
-          await broadcastChatAndSidebar(command.chatId)
+          await finishChatCommand(ws, id, await chatCommands.dequeue(command))
           return
         }
         case "terminal.create": {
@@ -2058,6 +2054,7 @@ export function createWsRouter({
     },
     scheduleBroadcast,
     scheduleChatStateBroadcast,
+    broadcastChatChange,
     pruneStaleEmptyChats: () => maybePruneStaleEmptyChats(),
     autoArchiveStaleChats: () => maybeAutoArchiveStaleChats(),
     deleteStaleChats: () => maybeDeleteStaleChats(),

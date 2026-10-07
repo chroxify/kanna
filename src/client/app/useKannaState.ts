@@ -6,6 +6,7 @@ import { PROVIDERS, withPiFaveModels, type AgentProvider, type AppSettingsPatch,
 import { NEW_CHAT_COMPOSER_ID, useChatPreferencesStore } from "../stores/chatPreferencesStore"
 import { useComposerAvailabilityStore } from "../stores/composerAvailabilityStore"
 import { useRightSidebarStore } from "../stores/rightSidebarStore"
+import { usePreviewedChatId } from "../stores/viewerStore"
 import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
 import { getEditorPresetLabel, useTerminalPreferencesStore } from "../stores/terminalPreferencesStore"
 import { useEffectiveEditorPreset } from "../components/open-external-menu"
@@ -27,7 +28,7 @@ import type { OpenLocalLinkTarget } from "../components/messages/shared"
 import { useAppDialog } from "../components/ui/app-dialog"
 import { useTheme } from "../hooks/useTheme"
 import { processTranscriptMessages } from "../lib/parseTranscript"
-import { canCancelStatus, getLatestToolIds, isProcessingStatus } from "./derived"
+import { canCancelStatus, getLatestToolIds, hasNoTurnStatus, isProcessingStatus } from "./derived"
 import {
   getActiveChatSnapshot,
   getMostRecentlyActiveProjectId,
@@ -56,6 +57,7 @@ import {
 import { DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES, trimTranscriptWindow } from "../../shared/transcript-window"
 import { CLOUD_WS_ENDPOINT_PATH, type CloudWsEndpointResponse } from "../../shared/cloud-api"
 import { KannaSocket, type SocketStatus } from "./socket"
+import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "../lib/storageKeys"
 import { useAppSettingsSync } from "./useAppSettingsSync"
 import { useBackgroundChatSubscriptions } from "./useBackgroundChatSubscriptions"
 import { useChatCommands } from "./useChatCommands"
@@ -286,7 +288,15 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const [localProjectsReady, setLocalProjectsReady] = useState(false)
   const [chatReady, setChatReady] = useState(false)
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Remembered in this browser: collapsing the sidebar is how a window is
+  // arranged, and a reload should not put it back.
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1"
+  )
+  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
+    setSidebarCollapsedState(collapsed)
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0")
+  }, [])
   const [commandError, setCommandError] = useState<string | null>(null)
   const [startingLocalPath, setStartingLocalPath] = useState<string | null>(null)
   const [pendingChatId, setPendingChatId] = useState<string | null>(null)
@@ -704,7 +714,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const latestToolIds = useMemo(() => getLatestToolIds(messages), [messages])
   const runtime = activeChatSnapshot?.runtime ?? null
   const queuedMessages = activeChatSnapshot?.queuedMessages ?? EMPTY_QUEUED_MESSAGES
-  const optimisticRuntimeStatus = optimisticProcessing?.scopeId === optimisticScopeId && (!runtime || runtime.status === "idle")
+  const optimisticRuntimeStatus = optimisticProcessing?.scopeId === optimisticScopeId && (!runtime || hasNoTurnStatus(runtime.status))
     ? "starting"
     : null
   // The chat's snapshot waits on the server reading the transcript off disk,
@@ -742,7 +752,9 @@ export function useKannaState(activeChatId: string | null): KannaState {
 
   // A chat left mid-turn is followed from the window it was just showing: the
   // chat subscription's cleanup flushes that window before this effect runs.
-  useBackgroundChatSubscriptions(socket, activeChatId, transcriptWindowSizeRef)
+  // Nor the chat in the previewer, which holds a subscription of its own
+  // while it is there (`useChatSession`).
+  useBackgroundChatSubscriptions(socket, activeChatId, transcriptWindowSizeRef, usePreviewedChatId())
 
   const canCancel = canCancelStatus(effectiveRuntimeStatus ?? undefined)
   const isDraining = runtime?.isDraining ?? false
@@ -768,7 +780,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (optimisticProcessing?.scopeId !== optimisticScopeId) {
       return
     }
-    if (runtime?.status && runtime.status !== "idle") {
+    if (runtime?.status && !hasNoTurnStatus(runtime.status)) {
       setOptimisticProcessing(null)
     }
   }, [optimisticProcessing, optimisticScopeId, runtime?.status])
@@ -784,7 +796,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (!optimisticProcessing?.ackedAt || optimisticProcessing.scopeId !== optimisticScopeId) {
       return
     }
-    if (runtime?.status && runtime.status !== "idle") {
+    if (runtime?.status && !hasNoTurnStatus(runtime.status)) {
       return
     }
     const { ackedAt } = optimisticProcessing
@@ -1108,11 +1120,18 @@ export function useKannaState(activeChatId: string | null): KannaState {
     navigate("/")
   }, [activeProjectId, fallbackLocalProjectPath, navigate, startChatFromIntent])
 
-  // On mobile the sidebar is the `/` page rather than an overlay, so "open"
-  // means navigate there. Desktop always shows it and never calls this.
-  const openSidebar = useCallback(() => navigate("/"), [navigate])
-  const collapseSidebar = useCallback(() => setSidebarCollapsed(true), [])
-  const expandSidebar = useCallback(() => setSidebarCollapsed(false), [])
+  // On mobile the sidebar is a page rather than an overlay (`/`, or a
+  // project's page of chats), so "open" means go to it. That is back to
+  // wherever the chat was opened from, through the history, so the chat's
+  // Back button and the system's swipe back agree; and `/` for a chat opened
+  // directly, with nothing behind it. Desktop always shows the sidebar and
+  // never calls this.
+  const openSidebar = useCallback(() => {
+    if (((window.history.state as { idx?: number } | null)?.idx ?? 0) > 0) navigate(-1)
+    else navigate("/")
+  }, [navigate])
+  const collapseSidebar = useCallback(() => setSidebarCollapsed(true), [setSidebarCollapsed])
+  const expandSidebar = useCallback(() => setSidebarCollapsed(false), [setSidebarCollapsed])
 
   return {
     socket,

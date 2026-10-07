@@ -25,6 +25,7 @@ import type {
   KannaStatus,
   QueuedChatMessage,
   SubagentActivity,
+  MessageSource,
   TranscriptEntry,
 } from "../shared/types"
 import { normalizeToolCall } from "../shared/tools"
@@ -32,6 +33,7 @@ import type { ClientCommand } from "../shared/protocol"
 import { AsyncQueue } from "./async-queue"
 import { resolveClaudeExecutable } from "./claude-executable"
 import { KannaToolRuntime, KannaToolEventFilter, type KannaToolHost } from "./kanna-tools"
+import type { ChatOrchestrator } from "./orchestrator"
 import { createClaudeKannaTools } from "./kanna-tool-adapters"
 import { EventStore } from "./event-store"
 import { STRUCTURED_RESULT_TOOL_KINDS } from "./events"
@@ -85,6 +87,7 @@ import { timestamped } from "./transcript"
 import {
   findWorkflowOf,
   finishActivity,
+  isDelegatedTask,
   linkWorkflowAgents,
   normalizeClaudeTaskMessage,
   pruneTaskLog,
@@ -189,6 +192,8 @@ interface ActiveTurn {
   hasFinalResult: boolean
   cancelRequested: boolean
   cancelRecorded: boolean
+  /** The user approved this turn's plan, so it is no longer read-only whatever `planMode` says. */
+  planExited?: boolean
 }
 
 interface ClaudeSessionHandle {
@@ -289,6 +294,14 @@ interface AgentCoordinatorArgs {
 }
 
 
+/**
+ * Whether a provider's subagents are known only from its transcript. See
+ * `AgentCoordinator.trackSubagentFromEntry`.
+ */
+function tracksSubagentsFromTranscript(provider: AgentProvider) {
+  return provider !== "claude" && provider !== "codex"
+}
+
 function isClaudeSteerLoggingEnabled() {
   return process.env.KANNA_LOG_CLAUDE_STEER === "1"
 }
@@ -316,6 +329,22 @@ export const RESUME_AFTER_RESTART_MESSAGE = `<system-message>
 Kanna restarted while you were working on this, so your process was stopped mid-task and is now back up. Continue the task you were on from where it left off.
 Whatever you were doing last may not have completed — re-check the state of any file you were editing and any command you had running before assuming it finished.
 </system-message>`
+
+interface StartTurnArgs {
+  chatId: string
+  provider: AgentProvider
+  content: string
+  attachments: ChatAttachment[]
+  model: string
+  effort?: string
+  serviceTier?: "fast"
+  planMode: boolean
+  autoPlan: boolean
+  appendUserPrompt: boolean
+  steered?: boolean
+  /** Who sent the prompt, when not the user. Stamped on the transcript entry. */
+  source?: MessageSource
+}
 
 interface SendMessageOptions {
   provider?: AgentProvider
@@ -1090,12 +1119,34 @@ export class AgentCoordinator {
    */
   private readonly foregroundTasks = new Map<string, Map<string, { task: TaskStart; startedAt: number }>>()
   readonly claudeSessions = new Map<string, ClaudeSessionState>()
+  /**
+   * Chats with a turn on its way: a start in progress, a queue drain, a steer
+   * between its cancel and its new turn. `activeTurns` has a gap at each of
+   * those, and a chat read as idle inside one would be reported finished.
+   */
+  private readonly startingTurns = new Map<string, number>()
+  private shuttingDown = false
+  /**
+   * Chats, schedules and the links between them. Set after construction,
+   * because the orchestrator is built on top of this coordinator.
+   */
+  orchestration: ChatOrchestrator | null = null
+  /**
+   * Fired when a chat has no turn left to run: its turn ended and nothing
+   * queued started another. Not fired for a steer or a shutdown, where the
+   * turn that ended is about to be replaced.
+   */
+  onChatSettled?: (chatId: string) => void
+  /** Fired when someone stops a chat on purpose, as against a steer or a shutdown. */
+  onChatStopped?: (chatId: string) => void
 
   constructor(args: AgentCoordinatorArgs) {
     this.store = args.store
     this.onStateChange = args.onStateChange
     this.analytics = args.analytics ?? NoopAnalyticsReporter
     this.codexManager = args.codexManager ?? new CodexAppServerManager()
+    // Optional: test stand-ins for the manager predate it.
+    this.codexManager.setTaskActivityListener?.((chatId, update) => this.applySubagentActivity(chatId, update))
     this.cursorManager = args.cursorManager ?? new CursorCliManager()
     this.grokManager = args.grokManager ?? new GrokCliManager()
     this.piManager = args.piManager ?? new PiAgentManager()
@@ -1199,6 +1250,36 @@ export class AgentCoordinator {
     return statuses
   }
 
+  /**
+   * What the sidebar and the chat page show: the turns in flight, plus every
+   * chat whose own turn has ended while work it handed off is still going.
+   *
+   * Read off the task log, but not every running row there counts: a chat is
+   * waiting on work it gave another agent (`hasDelegatedWork`), not on a
+   * shell or a monitor it left running, which the Tasks widget still lists.
+   */
+  getChatStatuses() {
+    const statuses = this.getActiveStatuses()
+    for (const [chatId, byId] of this.subagents) {
+      if (statuses.has(chatId)) continue
+      for (const activity of byId.values()) {
+        if (activity.status !== "running" || !isDelegatedTask(activity.type)) continue
+        statuses.set(chatId, "waiting_on_subagent")
+        break
+      }
+    }
+    // What only the coordinator knows to be going. The orchestrator adds the
+    // rest (queues, reports on their way) and finds the chats above them.
+    const unsettled = new Set([...this.activeTurns.keys(), ...this.startingTurns.keys(), ...this.drainingStreams.keys()])
+    for (const chatId of this.subagents.keys()) {
+      if (this.hasDelegatedWork(chatId)) unsettled.add(chatId)
+    }
+    for (const chatId of this.orchestration?.getChatsWaitingOnSubchats(unsettled) ?? []) {
+      if (!statuses.has(chatId)) statuses.set(chatId, "waiting_on_subagent")
+    }
+    return statuses
+  }
+
   getPendingTool(chatId: string): PendingToolSnapshot | null {
     const pending = this.activeTurns.get(chatId)?.pendingTool
     if (!pending) return null
@@ -1215,9 +1296,71 @@ export class AgentCoordinator {
 
   /** Delegated work for a chat, oldest first. Empty when it has spawned none. */
   getSubagents(chatId: string): SubagentActivity[] {
-    const byId = this.subagents.get(chatId)
-    if (!byId) return []
-    return [...byId.values()].sort((a, b) => a.startedAt - b.startedAt)
+    const native = [...(this.subagents.get(chatId)?.values() ?? [])]
+    // Sub-chats are derived from the store on each read rather than kept in
+    // the registry: its sweeps close anything the provider does not name, and
+    // a sub-chat outlives the turn that started it.
+    const chats = this.orchestration?.getChildActivities(chatId) ?? []
+    return [...native, ...chats].sort((a, b) => a.startedAt - b.startedAt)
+  }
+
+  /** A turn is running or about to. See `startingTurns`. */
+  isBusy(chatId: string) {
+    return this.activeTurns.has(chatId) || this.startingTurns.has(chatId)
+  }
+
+  /** A turn gave its result and its stream is still open. */
+  isDraining(chatId: string) {
+    return this.drainingStreams.has(chatId)
+  }
+
+  /**
+   * Work the chat handed to another agent of its provider's is still going: a
+   * subagent, a workflow, a Codex agent. This is what the chat is waiting on
+   * once its own turn is over (`isDelegatedTask`).
+   */
+  hasDelegatedWork(chatId: string) {
+    for (const activity of this.subagents.get(chatId)?.values() ?? []) {
+      if (activity.status === "running" && isDelegatedTask(activity.type)) return true
+    }
+    return false
+  }
+
+  /**
+   * The kinds of task still running here that the chat is not waiting on: a
+   * shell, a monitor. The other half of the task log from `hasDelegatedWork`,
+   * and for a different question. A chat with only these is at rest, but any
+   * of them can start another turn in it (a shell by ending, a monitor each
+   * time it fires), and that turn is still one its parent is owed.
+   */
+  getLeftRunning(chatId: string) {
+    const types = new Set<string>()
+    for (const activity of this.subagents.get(chatId)?.values() ?? []) {
+      if (activity.status === "running" && !isDelegatedTask(activity.type)) types.add(activity.type)
+    }
+    return [...types]
+  }
+
+  /** Whether the chat is read-only right now. */
+  isPlanning(chatId: string) {
+    const active = this.activeTurns.get(chatId)
+    if (active) return active.planMode && !active.planExited
+    return Boolean(this.store.getChat(chatId)?.planMode)
+  }
+
+  private markStarting(chatId: string) {
+    this.startingTurns.set(chatId, (this.startingTurns.get(chatId) ?? 0) + 1)
+  }
+
+  private unmarkStarting(chatId: string) {
+    const count = (this.startingTurns.get(chatId) ?? 1) - 1
+    if (count > 0) this.startingTurns.set(chatId, count)
+    else this.startingTurns.delete(chatId)
+  }
+
+  private notifySettled(chatId: string) {
+    if (this.shuttingDown || this.isBusy(chatId)) return
+    this.onChatSettled?.(chatId)
   }
 
   /**
@@ -1339,6 +1482,12 @@ export class AgentCoordinator {
 
     pruneTaskLog(byId)
     this.emitStateChange(chatId)
+    // Outside a turn there is no turn start to tell the chats above this one
+    // that it is back at work.
+    if (update.kind === "started" && !this.isBusy(chatId)) this.orchestration?.handleBackgroundWorkStarted(chatId)
+    // A chat whose turn ended with background work still going is finished
+    // only now, and no turn end is coming to say so.
+    if (update.kind === "stopped" || update.kind === "inFlight") this.notifySettled(chatId)
   }
 
   /**
@@ -1347,8 +1496,19 @@ export class AgentCoordinator {
    * task's end, reported as `stopped`, which is what updates the row.
    */
   async stopBackgroundTask(chatId: string, taskId: string) {
+    if (await this.orchestration?.stopChildTask(chatId, taskId)) return
     const task = this.subagents.get(chatId)?.get(taskId)
     if (!task || task.status !== "running") return
+    if (task.stoppable && this.store.getChat(chatId)?.provider === "codex") {
+      // Codex does not tell a turn that the agent it is waiting on was
+      // stopped: its wait runs out after two minutes and it waits again. So
+      // an agent is stopped on its own only once the chat's turn is over.
+      if (this.isBusy(chatId)) {
+        throw new Error("This chat's turn is still using this agent. Stop the chat to end both.")
+      }
+      // A Codex agent is a thread with a turn of its own to interrupt.
+      if (await this.codexManager.stopAgent?.(chatId, taskId)) return
+    }
     const stopTask = this.claudeSessions.get(chatId)?.session.stopTask
     if (!task.stoppable || !stopTask) {
       throw new Error("This task can't be stopped on its own. Stop the chat to end it.")
@@ -1357,16 +1517,18 @@ export class AgentCoordinator {
   }
 
   /**
-   * Derive delegated work from the transcript, for providers with no hook
-   * equivalent (Codex, Grok — both normalize their spawn call to
-   * `subagent_task`). Weaker than Claude's hooks: a subagent is "running" from
-   * its tool call until its tool result, which is all these providers report.
+   * Derive delegated work from the transcript, for providers that report it
+   * nowhere else (Grok, which normalizes its spawn call to `subagent_task`).
+   * Weaker than a task stream: a subagent is "running" from its tool call
+   * until its tool result, which is all such a provider reports.
    *
-   * Claude is deliberately excluded. Its hooks key on `agent_id` while the tool
-   * call keys on `toolId`, so running both would list every agent twice.
+   * Claude and Codex are deliberately excluded. Each reports its tasks itself
+   * (Claude's hooks and task stream, Codex's agent threads) under ids that are
+   * not the tool call's, so running both would list every agent twice. And a
+   * Codex `wait` or `closeAgent` is a `subagent_task` call that is no agent.
    */
-  private trackSubagentFromEntry(chatId: string, entry: TranscriptEntry) {
-    if (this.activeTurns.get(chatId)?.provider === "claude") return
+  private trackSubagentFromEntry(chatId: string, provider: AgentProvider, entry: TranscriptEntry) {
+    if (!tracksSubagentsFromTranscript(provider)) return
     if (entry.kind === "tool_call" && entry.tool.toolKind === "subagent_task") {
       const input = entry.tool.input as { subagentType?: unknown; description?: unknown }
       const label = typeof input.subagentType === "string" && input.subagentType
@@ -1554,15 +1716,22 @@ export class AgentCoordinator {
     }
   }
 
-  private async enqueueMessage(chatId: string, content: string, attachments: ChatAttachment[], options?: SendMessageOptions) {
+  private async enqueueMessage(
+    chatId: string,
+    content: string,
+    attachments: ChatAttachment[],
+    options?: SendMessageOptions & { source?: MessageSource },
+  ) {
     const queued = await this.store.enqueueMessage(chatId, {
       content,
       attachments,
       provider: options?.provider,
       model: options?.model,
       modelOptions: options?.modelOptions,
+      effort: options?.effort,
       planMode: options?.planMode,
       autoPlan: options?.autoPlan,
+      source: options?.source,
     })
     this.emitStateChange(chatId)
     return queued
@@ -1585,16 +1754,24 @@ export class AgentCoordinator {
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
       steered: options?.steered,
+      source: queuedMessage.source,
     })
   }
 
   private async maybeStartNextQueuedMessage(chatId: string) {
-    if (this.activeTurns.has(chatId)) return false
+    if (this.isBusy(chatId)) return false
     const nextQueuedMessage = typeof this.store.getQueuedMessages === "function"
       ? this.store.getQueuedMessages(chatId)[0]
       : undefined
     if (!nextQueuedMessage) return false
-    await this.dequeueAndStartQueuedMessage(chatId, nextQueuedMessage)
+    // Marked before the first await: two callers that both saw the chat idle
+    // would otherwise both take the head of the queue.
+    this.markStarting(chatId)
+    try {
+      await this.dequeueAndStartQueuedMessage(chatId, nextQueuedMessage)
+    } finally {
+      this.unmarkStarting(chatId)
+    }
     return true
   }
 
@@ -1749,19 +1926,16 @@ export class AgentCoordinator {
     return restore
   }
 
-  private async startTurnForChat(args: {
-    chatId: string
-    provider: AgentProvider
-    content: string
-    attachments: ChatAttachment[]
-    model: string
-    effort?: string
-    serviceTier?: "fast"
-    planMode: boolean
-    autoPlan: boolean
-    appendUserPrompt: boolean
-    steered?: boolean
-  }) {
+  private async startTurnForChat(args: StartTurnArgs) {
+    this.markStarting(args.chatId)
+    try {
+      await this.startTurn(args)
+    } finally {
+      this.unmarkStarting(args.chatId)
+    }
+  }
+
+  private async startTurn(args: StartTurnArgs) {
 
     // Close any lingering draining stream before starting a new turn.
     const draining = this.drainingStreams.get(args.chatId)
@@ -1836,7 +2010,13 @@ export class AgentCoordinator {
 
     if (args.appendUserPrompt) {
       const userPromptEntry = timestamped(
-        { kind: "user_prompt", content: args.content, attachments: args.attachments, steered: args.steered },
+        {
+          kind: "user_prompt",
+          content: args.content,
+          attachments: args.attachments,
+          steered: args.steered,
+          ...(args.source ? { source: args.source } : {}),
+        },
         Date.now()
       )
       await this.store.appendMessage(args.chatId, userPromptEntry)
@@ -1866,6 +2046,7 @@ export class AgentCoordinator {
             this.emitStateChange(args.chatId)
           },
           requestInput: (request, callSignal) => this.requestToolInput(args.chatId, request, callSignal),
+          orchestration: this.orchestration ?? undefined,
         })
         return active.customTools.execute(name, input, signal)
       },
@@ -1902,6 +2083,12 @@ export class AgentCoordinator {
     )
     if (concurrentAgentsNotice) {
       wireContent = appendSystemMessageBlock(wireContent, concurrentAgentsNotice)
+    }
+    // Orchestration: who sent this prompt when it was not the user, and which
+    // sub-chats of this one are still running. The second matters most after a
+    // steer, which ends the turn that was tracking them.
+    for (const notice of this.orchestration?.buildTurnNotices(args.chatId, args.source) ?? []) {
+      wireContent = appendSystemMessageBlock(wireContent, notice)
     }
 
     // Harness switch or session restore: lead with the rebuilt transcript so
@@ -1951,7 +2138,8 @@ export class AgentCoordinator {
       let grokContent = buildPromptText(wireContent, args.attachments)
       grokContent = appendSystemMessageBlock(
         grokContent,
-        buildKannaSystemMessage(buildKannaAgentId("grok", args.model)),
+        // Grok is not handed the Kanna tools, so it is not told about them.
+        buildKannaSystemMessage(buildKannaAgentId("grok", args.model), { tools: false }),
       )
       turn = await this.grokManager.startTurn({
         cwd: project.localPath,
@@ -2175,7 +2363,12 @@ export class AgentCoordinator {
     }
   }
 
-  async send(command: Extract<ClientCommand, { type: "chat.send" }>) {
+  /**
+   * `source` names the sender when it is not the user: another chat's agent,
+   * a sub-chat's report, a schedule. It rides the queue and lands on the
+   * transcript entry.
+   */
+  async send(command: Extract<ClientCommand, { type: "chat.send" }>, extras?: { source?: MessageSource }) {
     let chatId = command.chatId
 
 
@@ -2194,8 +2387,11 @@ export class AgentCoordinator {
     if (chat.archivedAt) {
       await this.store.unarchiveChat(chatId)
     }
-    if (this.activeTurns.has(chatId)) {
-      this.analytics.track("message_sent")
+    // `isBusy`, not just a running turn: two sends can reach an idle chat
+    // together (a report and a schedule, say), and the second must queue
+    // behind the turn the first is still starting rather than start its own.
+    if (this.isBusy(chatId)) {
+      if (!extras?.source) this.analytics.track("message_sent")
       const queuedMessage = await this.enqueueMessage(chatId, command.content, command.attachments ?? [], {
         provider: command.provider,
         model: command.model,
@@ -2203,13 +2399,15 @@ export class AgentCoordinator {
         effort: command.effort,
         planMode: command.planMode,
         autoPlan: command.autoPlan,
+        source: extras?.source,
       })
       return { chatId, queuedMessageId: queuedMessage.id, queued: true as const }
     }
 
     const provider = this.resolveProvider(command, chat.provider)
     const settings = this.getProviderSettings(provider, command)
-    this.analytics.track("message_sent")
+    // The count is of messages people send.
+    if (!extras?.source) this.analytics.track("message_sent")
     await this.startTurnForChat({
       chatId,
       provider,
@@ -2221,20 +2419,26 @@ export class AgentCoordinator {
       planMode: settings.planMode,
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
+      source: extras?.source,
     })
 
 
     return { chatId }
   }
 
-  async enqueue(command: Extract<ClientCommand, { type: "message.enqueue" }>) {
-    this.analytics.track("message_sent")
+  async enqueue(
+    command: Extract<ClientCommand, { type: "message.enqueue" }>,
+    extras?: { source?: MessageSource; effort?: string },
+  ) {
+    if (!extras?.source) this.analytics.track("message_sent")
     const queuedMessage = await this.enqueueMessage(command.chatId, command.content, command.attachments ?? [], {
       provider: command.provider,
       model: command.model,
       modelOptions: command.modelOptions,
+      effort: extras?.effort,
       planMode: command.planMode,
       autoPlan: command.autoPlan,
+      source: extras?.source,
     })
     if (command.steer) {
       // The same path as "Send now" on a queued message, so the two can't
@@ -2265,20 +2469,26 @@ export class AgentCoordinator {
       queuedMessagePreview: queuedMessage.content.slice(0, 160),
     })
 
-    if (this.activeTurns.has(command.chatId)) {
-      await this.cancel(command.chatId, { hideInterrupted: true })
+    // The chat is not idle between the cancel and the turn that replaces it.
+    this.markStarting(command.chatId)
+    try {
+      if (this.activeTurns.has(command.chatId)) {
+        await this.cancel(command.chatId, { hideInterrupted: true })
+      }
+
+      logClaudeSteer("steer_after_cancel", {
+        chatId: command.chatId,
+        stillActive: this.activeTurns.has(command.chatId),
+      })
+
+      if (this.activeTurns.has(command.chatId)) {
+        throw new Error("Chat is still running")
+      }
+
+      await this.dequeueAndStartQueuedMessage(command.chatId, queuedMessage, { steered: true })
+    } finally {
+      this.unmarkStarting(command.chatId)
     }
-
-    logClaudeSteer("steer_after_cancel", {
-      chatId: command.chatId,
-      stillActive: this.activeTurns.has(command.chatId),
-    })
-
-    if (this.activeTurns.has(command.chatId)) {
-      throw new Error("Chat is still running")
-    }
-
-    await this.dequeueAndStartQueuedMessage(command.chatId, queuedMessage, { steered: true })
   }
 
   async dequeue(command: Extract<ClientCommand, { type: "message.dequeue" }>) {
@@ -2407,6 +2617,8 @@ export class AgentCoordinator {
    * a plan nobody approved. Those chats stay interrupted so the user re-asks.
    */
   async interruptForShutdown() {
+    // These turns come back on the next boot, so none of them has settled.
+    this.shuttingDown = true
     for (const [chatId, active] of [...this.activeTurns.entries()]) {
       if (!active.pendingTool) {
         try {
@@ -2466,7 +2678,7 @@ export class AgentCoordinator {
     return true
   }
 
-  async forkChat(chatId: string) {
+  async forkChat(chatId: string, lineage?: { parentChatId?: string; createdByChatId?: string }) {
     const chat = this.store.requireChat(chatId)
     if (!chat.provider) {
       throw new Error("Chat must have a provider before forking")
@@ -2480,7 +2692,7 @@ export class AgentCoordinator {
     // tool calls whose results have not arrived. Nothing here touches the
     // source's turn — it keeps running.
     const running = this.activeTurns.has(chatId) || this.drainingStreams.has(chatId)
-    const forked = await this.store.forkChat(chatId, { atLastCompletedTurn: running })
+    const forked = await this.store.forkChat(chatId, { atLastCompletedTurn: running, ...lineage })
     this.analytics.track("chat_created")
     return { chatId: forked.id }
   }
@@ -2658,6 +2870,7 @@ export class AgentCoordinator {
           if (!active.cancelRequested) {
             await this.maybeStartNextQueuedMessage(session.chatId)
           }
+          this.notifySettled(session.chatId)
         }
 
         this.emitStateChange(session.chatId)
@@ -2703,6 +2916,7 @@ export class AgentCoordinator {
       }
       session.session.close()
       this.emitStateChange(session.chatId)
+      this.notifySettled(session.chatId)
     }
   }
 
@@ -2752,7 +2966,7 @@ export class AgentCoordinator {
 
         if (!event.entry || customToolEvents.skip(event.entry)) continue
         await this.store.appendMessage(active.chatId, event.entry)
-        this.trackSubagentFromEntry(active.chatId, event.entry)
+        this.trackSubagentFromEntry(active.chatId, active.provider, event.entry)
 
         if (event.entry.kind === "system_init") {
           active.status = active.pendingTool ? "waiting_for_user" : "running"
@@ -2806,6 +3020,14 @@ export class AgentCoordinator {
       }
       // Stream has fully ended — no longer draining.
       this.drainingStreams.delete(active.chatId)
+      // These providers report a subagent only on this stream, so one still
+      // marked running can never be closed and would hold the chat in
+      // "waiting on subagent" for good. Not when a newer turn has started:
+      // the log is that turn's now. Claude's tasks and Codex's agents outlive
+      // the turn, and each has its own way of saying one has ended.
+      if (tracksSubagentsFromTranscript(active.provider) && !this.activeTurns.has(active.chatId)) {
+        this.closeRunningSubagents(active.chatId)
+      }
       this.emitStateChange(active.chatId)
 
       if (active.postToolFollowUp && !active.cancelRequested) {
@@ -2857,10 +3079,19 @@ export class AgentCoordinator {
           this.emitStateChange(active.chatId)
         }
       }
+      // Here rather than at the result: the stream is closed and any follow-up
+      // or queued turn has had its chance to start.
+      this.notifySettled(active.chatId)
     }
   }
 
   async cancel(chatId: string, options?: { hideInterrupted?: boolean }) {
+    // A steer hides its interrupt and replaces the turn, and a shutdown brings
+    // it back, so neither is a stop. Fired even when nothing is running here:
+    // an idle chat can still have sub-chats to stop.
+    const stopped = !options?.hideInterrupted && !this.shuttingDown
+    if (stopped) this.onChatStopped?.(chatId)
+
     // Also clean up any draining stream for this chat.
     const draining = this.drainingStreams.get(chatId)
     if (draining) {
@@ -2925,8 +3156,17 @@ export class AgentCoordinator {
     // Remove from activeTurns immediately so the UI reflects the cancellation
     // right away, rather than waiting for interrupt() which may hang.
     this.activeTurns.delete(chatId)
-    this.closeRunningSubagents(chatId)
+    if (active.provider === "codex") {
+      // Codex's agents run on after the turn that spawned them is interrupted,
+      // and each still reports its own end, so their rows stay as they are. A
+      // stop is meant for them too. A steer is not: its new turn can go on
+      // waiting for them.
+      if (stopped) void this.codexManager.stopAgents?.(chatId)
+    } else {
+      this.closeRunningSubagents(chatId)
+    }
     this.emitStateChange(chatId)
+    if (stopped) this.notifySettled(chatId)
     logClaudeSteer("cancel_active_turn_deleted", {
       chatId,
       provider: active.provider,
@@ -3009,6 +3249,12 @@ export class AgentCoordinator {
         confirmed?: boolean
         clearContext?: boolean
         message?: string
+      }
+      if (result.confirmed) {
+        active.planExited = true
+        // The chat is no longer read-only, and the record is what a turn Kanna
+        // starts on its own reads: a sub-chat's report, a schedule, a resume.
+        await this.store.setPlanMode(command.chatId, false)
       }
       if (result.confirmed && result.clearContext) {
         await this.store.setSessionToken(command.chatId, null)

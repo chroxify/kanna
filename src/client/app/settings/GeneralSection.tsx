@@ -284,6 +284,33 @@ export function GeneralSection({
     })
   }
 
+  async function handleProjectIconsInChatsChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ projectIconsInChats: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
+  async function handleChatTabsChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ chatTabsEnabled: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
+  async function handleWidgetsPeekChange(enabled: boolean) {
+    try {
+      setAppSettingsError(null)
+      await handleWriteAppSettings({ widgetsPeekEnabled: enabled })
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : "Unable to save appearance settings.")
+    }
+  }
+
   async function handleAnalyticsPreferenceChange(enabled: boolean) {
     try {
       setAppSettingsError(null)
@@ -364,6 +391,33 @@ export function GeneralSection({
                 </SelectItem>
               ))}
             </SettingsSelect>
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.projectIconsInChats}>
+            <Switch
+              checked={appSettings?.projectIconsInChats !== false}
+              onCheckedChange={(checked) => {
+                void handleProjectIconsInChatsChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.projectIconsInChats.title}
+            />
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.chatTabs}>
+            <Switch
+              checked={appSettings?.chatTabsEnabled === true}
+              onCheckedChange={(checked) => {
+                void handleChatTabsChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.chatTabs.title}
+            />
+          </SettingsRow>
+          <SettingsRow def={SETTINGS_ROWS.widgetsPeek}>
+            <Switch
+              checked={appSettings?.widgetsPeekEnabled === true}
+              onCheckedChange={(checked) => {
+                void handleWidgetsPeekChange(checked)
+              }}
+              aria-label={SETTINGS_ROWS.widgetsPeek.title}
+            />
           </SettingsRow>
         </SettingsGroup>
 
