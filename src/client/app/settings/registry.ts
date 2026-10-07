@@ -1,4 +1,5 @@
-import { BookText, Command, FlaskConical, Gauge, MessageSquareQuote, ScrollText, Settings2, type LucideIcon } from "lucide-react"
+import { BookText, Command, FlaskConical, Gauge, LaptopMinimal, MessageSquareQuote, ScrollText, Settings2, type LucideIcon } from "lucide-react"
+import { macSetupAvailable } from "../../lib/macApp"
 
 /**
  * Single source of truth for settings navigation targets.
@@ -15,7 +16,13 @@ export const SETTINGS_SECTIONS = [
     id: "general",
     label: "General",
     icon: Settings2 as LucideIcon,
-    subtitle: "Appearance, notifications, chats, editor, and terminal.",
+    subtitle: "Appearance, notifications, chats, layout, editor, and terminal.",
+  },
+  {
+    id: "mac",
+    label: "This Mac",
+    icon: LaptopMinimal as LucideIcon,
+    subtitle: "What keeps your agents running on this Mac while you're away.",
   },
   {
     id: "providers",
@@ -59,6 +66,19 @@ export const SETTINGS_SECTIONS = [
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]
 export type SettingsSectionId = SettingsSection["id"]
 
+/**
+ * This Mac exists only in Kanna for Mac, on this Mac's own server
+ * (lib/macApp.ts): its switches are the app's. Everywhere else the section,
+ * its rows and its palette entries don't exist.
+ */
+export function isSettingsSectionVisible(id: SettingsSectionId) {
+  return id !== "mac" || macSetupAvailable()
+}
+
+export function visibleSettingsSections(): SettingsSection[] {
+  return SETTINGS_SECTIONS.filter((section) => isSettingsSectionVisible(section.id))
+}
+
 export interface SettingsRowDef {
   /** Stable anchor id; the palette navigates to `/settings/:sectionId#id`. */
   id: string
@@ -92,6 +112,24 @@ export const SETTINGS_ROWS = defineRows({
     description: "Light, dark, or match the system appearance.",
     keywords: ["appearance", "dark mode", "light mode"],
   },
+  projectIconsInChats: {
+    sectionId: "general",
+    title: "Project Icons in Chats",
+    description: "Lead each chat in the sidebar's Chats view with its project's icon, in place of the agent's.",
+    keywords: ["sidebar", "icon", "favicon", "app icon", "project", "chats", "monogram", "initials"],
+  },
+  chatTabs: {
+    sectionId: "general",
+    title: "Chat Tabs",
+    description: "Keep the chats you open as tabs in the title bar, to switch between, rearrange and close.",
+    keywords: ["tabs", "tab bar", "title bar", "navbar", "open chats", "switch"],
+  },
+  widgetsPeek: {
+    sectionId: "general",
+    title: "Peek at Widgets",
+    description: "Show the closed widget column over the chat while the mouse is at the window's right edge.",
+    keywords: ["widgets", "right sidebar", "hover", "edge", "popout", "overlay", "slideover", "peek"],
+  },
   chatSounds: {
     sectionId: "general",
     title: "Chat Sounds",
@@ -115,6 +153,18 @@ export const SETTINGS_ROWS = defineRows({
     title: "Enter While Running",
     description: "What Enter does while an agent is working. ⌘Enter always does the other one.",
     keywords: ["queue", "steer", "interrupt", "enter", "send", "composer"],
+  },
+  widgetsVisibility: {
+    sectionId: "general",
+    title: "Widgets Visibility",
+    description: "Show and hide the widget column for each chat on its own, or once for every chat in the project.",
+    keywords: ["right sidebar", "panel", "widgets", "per chat", "per project", "remember", "layout"],
+  },
+  terminalVisibility: {
+    sectionId: "general",
+    title: "Terminal Visibility",
+    description: "Show and hide the terminal for each chat on its own, or once for every chat in the project. The terminals themselves belong to the project either way.",
+    keywords: ["terminal", "shell", "panel", "per chat", "per project", "remember", "layout"],
   },
   defaultEditor: {
     sectionId: "general",
@@ -201,6 +251,38 @@ export const SETTINGS_ROWS = defineRows({
     keywords: ["fave models", "pi"],
   },
 
+  // This Mac (Kanna for Mac)
+  openAtLogin: {
+    sectionId: "mac",
+    title: "Open at Login",
+    description: "Start Kanna when you log in, so your agents and this Mac's Kanna Cloud address come back after a restart.",
+    keywords: ["login item", "startup", "launch", "restart", "boot"],
+  },
+  keepAwake: {
+    sectionId: "mac",
+    title: "Keep This Mac Awake",
+    description: "Stay awake while plugged in, so agents keep running and this Mac stays reachable. The display still sleeps and locks.",
+    keywords: ["sleep", "caffeinate", "power", "reachable", "remote", "idle"],
+  },
+  keepAwakeOnBattery: {
+    sectionId: "mac",
+    title: "Also on Battery",
+    description: "Stay awake on battery too, not just when plugged in.",
+    keywords: ["sleep", "battery", "power"],
+  },
+  quitBehavior: {
+    sectionId: "mac",
+    title: "When You Quit",
+    description: "Kanna can keep running after the app quits, so this Mac stays online and running chats keep going.",
+    keywords: ["quit", "close", "background", "offline", "online", "keep running", "stop"],
+  },
+  fullDiskAccess: {
+    sectionId: "mac",
+    title: "Full Disk Access",
+    description: "Lets agents work on projects anywhere in your home folder without macOS asking about each protected folder.",
+    keywords: ["privacy", "permission", "tcc", "desktop", "documents", "downloads", "icloud"],
+  },
+
   // Labs
   recentChatsInSidebar: {
     sectionId: "labs",
@@ -223,5 +305,5 @@ export const SETTINGS_ROWS = defineRows({
 })
 
 export function listAllSettingsRowDefs(): SettingsRowDef[] {
-  return Object.values<SettingsRowDef>(SETTINGS_ROWS)
+  return Object.values<SettingsRowDef>(SETTINGS_ROWS).filter((row) => isSettingsSectionVisible(row.sectionId))
 }

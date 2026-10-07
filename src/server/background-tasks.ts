@@ -22,19 +22,27 @@ import type { SubagentActivity, WorkflowAgent, WorkflowAgentState, WorkflowPhase
  * count trustworthy when an end event never lands (crash, kill, a session
  * torn down mid-flight). `ambient` names a task the CLI says is housekeeping,
  * not activity, so the sweep must not list it either.
+ *
+ * `foreground` is a task the CLI registered with its tool call blocking on
+ * it: every plain Bash call is one. It isn't work running on the chat's
+ * behalf, only the turn's own step, so it gets no row unless `backgrounded`
+ * later says it was moved off the turn (Ctrl+B, or the CLI's own timeout).
  */
+export interface TaskStart {
+  id: string
+  type: string
+  label: string
+  toolUseId?: string
+  description?: string
+  workflowName?: string
+  /** The provider can stop just this task. */
+  stoppable?: boolean
+}
+
 export type SubagentActivityUpdate =
-  | {
-    kind: "started"
-    id: string
-    type: string
-    label: string
-    toolUseId?: string
-    description?: string
-    workflowName?: string
-    /** The provider can stop just this task. */
-    stoppable?: boolean
-  }
+  | ({ kind: "started" } & TaskStart)
+  | { kind: "foreground"; task: TaskStart }
+  | { kind: "backgrounded"; id: string }
   | {
     kind: "progress"
     id: string
@@ -70,6 +78,22 @@ const CLAUDE_TASK_TYPES: Record<string, string> = {
   dream: "dream",
   auto_mode_scan: "auto-mode scan",
   remote_agent: "cloud session",
+}
+
+/**
+ * The kinds of task that are work handed to another agent: it does the work
+ * and its result comes back to the chat. Only these make a chat read as
+ * waiting on a subagent. A shell is not one, though it also runs on after the
+ * turn: a dev server left running is not something the chat is waiting for.
+ * Nor is a monitor, which watches for something rather than works toward an
+ * end, or an MCP task, which is one tool call running long, or the CLI's own
+ * housekeeping (`dream`, `auto-mode scan`). A kind not listed here is not
+ * known to be an agent, and a status that sticks is worse than one missing.
+ */
+const DELEGATED_TASK_TYPES = new Set(["subagent", "workflow", "teammate", "cloud session"])
+
+export function isDelegatedTask(type: string) {
+  return DELEGATED_TASK_TYPES.has(type)
 }
 
 /** Bounds the one field in a task report that is free text of any length. */
@@ -281,8 +305,7 @@ export function normalizeClaudeTaskMessage(message: unknown): SubagentActivityUp
       const description = text(record.description, SUMMARY_LIMIT)
       const workflowName = text(record.workflow_name)
       const type = claudeTaskType(record.task_type, subagentType)
-      return {
-        kind: "started",
+      const task: TaskStart = {
         id,
         type,
         label: workflowName ?? subagentType ?? description ?? type,
@@ -291,6 +314,11 @@ export function normalizeClaudeTaskMessage(message: unknown): SubagentActivityUp
         ...(workflowName ? { workflowName } : {}),
         stoppable: true,
       }
+      // A foreground subagent keeps its row: it can run for minutes, and the
+      // row is where you see what it is doing. A foreground shell is over in
+      // seconds and is already on screen as its tool call.
+      if (record.task_type === "local_bash" && record.is_backgrounded === false) return { kind: "foreground", task }
+      return { kind: "started", ...task }
     }
     case "task_progress": {
       const usage = usageFrom(record.usage)
@@ -306,10 +334,12 @@ export function normalizeClaudeTaskMessage(message: unknown): SubagentActivityUp
     case "task_updated": {
       // Only an end matters here. `paused` (a workflow waiting out a rate
       // limit) is still work in progress, and reads as running.
-      const status = asRecord(record.patch)?.status
+      const patch = asRecord(record.patch)
+      const status = patch?.status
       if (status === "completed") return { kind: "stopped", id, failed: false }
       if (status === "failed") return { kind: "stopped", id, failed: true }
       if (status === "killed") return { kind: "stopped", id, failed: false, stopped: true }
+      if (patch?.is_backgrounded === true) return { kind: "backgrounded", id }
       return null
     }
     case "task_notification": {

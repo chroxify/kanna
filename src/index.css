@@ -1,5 +1,11 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+/* Inside Kanna for Mac (macos/). The app marks <html> with .kanna-mac-app and
+   sets --mac-window-radius, --mac-traffic-lights-inset and
+   --mac-traffic-lights-center from the real window
+   (macos/src/native-window.ts), so the sidebar can sit under the
+   traffic lights with corners concentric to the window's. */
+@custom-variant mac-app (&:where(.kanna-mac-app, .kanna-mac-app *));
 
 @font-face {
   font-family: "Body";
@@ -77,6 +83,15 @@
     --success: oklch(69.6% 0.17 162.48); /* emerald-500 */
     /* Reachable from outside (a port exposed through a tunnel). */
     --info: oklch(68.5% 0.169 237.323); /* sky-500 */
+    /* Shared with the isolated visualization documents on web and iOS. */
+    --viz-red: var(--logo);
+    --viz-green: var(--success);
+    --viz-blue: var(--info);
+    --viz-yellow: #efb100;
+    --viz-orange: #ff9900;
+    --viz-purple: #615fff;
+    --viz-pink: #f6339a;
+    --viz-teal: #00bba7;
     /* Section and widget titles: quieter than body text, louder than muted. */
     --section-title: oklch(44.6% 0.043 257.281); /* slate-600 */
   }
@@ -116,8 +131,30 @@
     --logo: oklch(71.2% 0.194 13.428);
     --success: oklch(76.5% 0.177 163.223); /* emerald-400 */
     --info: oklch(74.6% 0.16 232.661); /* sky-400 */
+    --viz-yellow: #fdc700;
+    --viz-orange: #ffb86a;
+    --viz-purple: #a3a0ff;
+    --viz-pink: #fb64b6;
+    --viz-teal: #00d5be;
     --section-title: var(--color-slate-300);
   }
+}
+
+/*
+ * `surface`: the colour of whatever a transcript is sitting on. The page's
+ * background by default; a container with a fill of its own names it in
+ * `--surface` (the viewer's card, which is the card colour in dark mode) and
+ * paints itself with it. Everything in a transcript that has to disappear
+ * into what is behind it reads this, never `background`: the composer dock's
+ * fade, and the pills and bordered lists that are filled only so the surface
+ * seems to show through. One declaration then moves all of them together.
+ *
+ * `inline`, so a utility carries the `var()` itself and resolves it where it
+ * is used. As a plain theme variable it would be resolved once, on the root,
+ * and never see a container's `--surface`.
+ */
+@theme inline {
+  --color-surface: var(--surface, var(--color-background));
 }
 
 @theme {
@@ -148,6 +185,11 @@
   --color-section-title: var(--section-title);
   /* Starts fast and settles: for UI that enters, opens or answers a press. */
   --ease-snappy: cubic-bezier(0.23, 1, 0.32, 1);
+  /* iOS's glide (from Ionic): for a part that travels across its control, like
+     a switch's knob, and for a pane opening beside the chat (paneAnimation.ts).
+     Snappy front-loads so hard that short travel looks instant; this keeps
+     the move visible and still settles softly. */
+  --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -262,6 +304,75 @@
 }
 
 /*
+ * Floating surfaces: popovers, context menus, selects, hover cards and
+ * tooltips. This is the one place their motion lives; the ui/ primitives put
+ * `floating-surface` on their content and callers add nothing.
+ *
+ * They open tens of times a day, so the entrance is barely there: a 150ms
+ * grow from 0.97, out of the trigger rather than the surface's own centre
+ * (Radix names the origin per primitive, and only the one in use is set).
+ * Closing is shorter and only fades, since by then attention has moved on.
+ *
+ * Tooltips enter faster (125ms) and only on their first, delayed open. Once
+ * one is showing, the next opens as `instant-open` and appears at once, so a
+ * pointer sweeping a toolbar isn't made to wait on each.
+ *
+ * Keyframes rather than transitions because Radix keeps a closing surface
+ * mounted only while a CSS animation runs on it.
+ */
+.floating-surface {
+  transform-origin: var(
+    --radix-popover-content-transform-origin,
+    var(
+      --radix-tooltip-content-transform-origin,
+      var(
+        --radix-hover-card-content-transform-origin,
+        var(--radix-context-menu-content-transform-origin, var(--radix-select-content-transform-origin, center))
+      )
+    )
+  );
+}
+
+.floating-surface[data-state="open"] {
+  animation: floating-surface-in 150ms var(--ease-snappy);
+}
+
+.floating-surface[data-state="delayed-open"] {
+  animation: floating-surface-in 125ms var(--ease-snappy);
+}
+
+.floating-surface[data-state="closed"] {
+  animation: floating-surface-out 100ms var(--ease-snappy) forwards;
+}
+
+@keyframes floating-surface-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes floating-surface-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* Reduced motion keeps the fade, which says a surface arrived, and drops the grow. */
+@keyframes floating-surface-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .floating-surface[data-state="open"],
+  .floating-surface[data-state="delayed-open"] {
+    animation-name: floating-surface-fade-in;
+  }
+}
+
+/*
  * A running workflow agent's tile. Shallow and quick: dimming only to 70% at
  * 1.2s a cycle reads as work going on, where the stock pulse's 2s dip to half
  * read as blinking. Still under reduced motion: the grey already says running.
@@ -293,6 +404,42 @@
 
   .kanna-table-wave {
     animation: none;
+  }
+}
+
+/*
+ * WebKit (Safari) only. `font: -apple-system-body`
+ * is a WebKit-only value, so Chrome and Firefox keep everything above.
+ *
+ * The stepped animations above are stepped for Chrome, which composites
+ * them. Core Animation has no stepped timing, so WebKit ticks steps() on the
+ * main thread instead, restyling and laying out the whole page every frame:
+ * with a long chat open, a running chat's shimmer alone makes typing lag.
+ * WebKit gets smooth curves Core Animation runs on its own.
+ *
+ * Safari 26 draws a rotating <svg> at sub-pixel offsets, so spinners drift
+ * side to side as they turn. In WebKit the svg holds still and its shapes turn
+ * around the viewBox center instead; that only repaints the spinner.
+ */
+@supports (font: -apple-system-body) {
+  .kanna-shiny-track,
+  .kanna-shiny-copy,
+  .kanna-table-wave {
+    animation-timing-function: linear;
+  }
+
+  .kanna-ping {
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+
+  svg.animate-spin {
+    animation: none;
+  }
+
+  svg.animate-spin > * {
+    transform-box: view-box;
+    transform-origin: 50% 50%;
+    animation: spin 1s linear infinite;
   }
 }
 
@@ -483,10 +630,13 @@
     overflow: hidden;
   }
 
+  /* The pane's contents fade in step with the pane itself: --pane-duration is
+     set beside the layout animation (paneAnimation.ts) to its open or close
+     time, on the same curve. */
   [data-terminal-visual] {
     transition:
-      opacity var(--terminal-toggle-duration, 350ms) cubic-bezier(0.4, 0, 0.2, 1),
-      filter var(--terminal-toggle-duration, 350ms) cubic-bezier(0.4, 0, 0.2, 1);
+      opacity var(--pane-duration, 300ms) var(--ease-glide),
+      filter var(--pane-duration, 300ms) var(--ease-glide);
     will-change: opacity, filter;
   }
 
@@ -504,10 +654,14 @@
     filter: blur(0);
   }
 
+  /* translate is the peek's (WidgetsColumn); visibility takes the closed
+     column out once it has faded, since nothing clips it there. */
   [data-right-sidebar-visual] {
     transition:
-      opacity var(--terminal-toggle-duration, 350ms) cubic-bezier(0.4, 0, 0.2, 1),
-      filter var(--terminal-toggle-duration, 350ms) cubic-bezier(0.4, 0, 0.2, 1);
+      opacity var(--pane-duration, 300ms) var(--ease-glide),
+      filter var(--pane-duration, 300ms) var(--ease-glide),
+      translate var(--pane-duration, 300ms) var(--ease-glide),
+      visibility var(--pane-duration, 300ms);
     will-change: opacity, filter;
   }
 
@@ -523,6 +677,33 @@
   [data-right-sidebar-visual][data-right-sidebar-open="true"] {
     opacity: 1;
     filter: blur(0);
+  }
+
+  [data-widgets-column] > [data-right-sidebar-visual][data-right-sidebar-open="false"] {
+    visibility: hidden;
+  }
+
+  /* Behind the cards of a slideover (the desktop peek, the phone's sheet):
+     the page's background, solid at the window's edge and gone by the
+     slideover's left. The fade is a mask, and the mask is the gradient
+     crossed with noise. A plain gradient between two near-equal colors has a
+     handful of steps to spread over the column's whole width, and they show
+     as bands; the noise breaks each step's edge up, pixel by pixel. */
+  [data-slideover] [data-widgets-stack]::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: hsl(var(--background));
+    -webkit-mask-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.3 0 0 0 0.85'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+      linear-gradient(to left, #000, transparent);
+    -webkit-mask-composite: source-in;
+    mask-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.3 0 0 0 0.85'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+      linear-gradient(to left, #000, transparent);
+    mask-composite: intersect;
   }
 
   /* Custom scrollbar styling */
@@ -554,6 +735,23 @@
   /* Attachment rows show their scrollbar thumb only while the card is hovered.
      Both forms are needed: browsers that support scrollbar-color ignore the
      ::-webkit-scrollbar rules above. */
+  /* The expand button over an inline visualization. Where a pointer hovers it
+     shows only with the pointer over the visualization: `:hover` holds on the
+     wrapper while the pointer is over the frame inside it, though the frame
+     keeps the events themselves. Not `:focus-within`, which a click into the
+     frame would hold on. A touch screen has no hover, and a tap on the frame
+     never reaches the page to count as one, so there it is always shown. */
+  @media (hover: hover) and (pointer: fine) {
+    .visualization-expand {
+      opacity: 0;
+      transition: opacity 150ms ease-out;
+    }
+    .visualization:hover > .visualization-expand,
+    .visualization-expand:focus-visible {
+      opacity: 1;
+    }
+  }
+
   .group:not(:hover) > .attachments-scroller {
     scrollbar-color: transparent transparent;
   }
@@ -569,6 +767,25 @@
   }
 
   .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* The right sidebar (on desktop and in the mobile overlay) and the
+     settings page hide every scrollbar inside them. One rule on the container
+     rather than `scrollbar-hide` on each scroller, so a widget or section
+     added later can't bring a scrollbar back, and the settings footer never
+     has to leave room for one. */
+  [data-right-sidebar-visual],
+  [data-right-sidebar-visual] *,
+  [data-settings-page],
+  [data-settings-page] * {
+    scrollbar-width: none;
+  }
+
+  [data-right-sidebar-visual]::-webkit-scrollbar,
+  [data-right-sidebar-visual] *::-webkit-scrollbar,
+  [data-settings-page]::-webkit-scrollbar,
+  [data-settings-page] *::-webkit-scrollbar {
     display: none;
   }
 
@@ -739,6 +956,55 @@
     animation: kanna-empty-state-text-in 0.38s ease-out both;
   }
 
+  /*
+   * The new chat page's chat list, arriving a row at a time once the hero
+   * line has typed out, so the eye runs down the list instead of taking it
+   * in as one block. Short and small on purpose: the page opens tens of
+   * times a day, so it rises 4px, not a slide, and every row has started
+   * within 280ms. Rows past the eighth share the last step; a longer tail
+   * would read as the list loading.
+   *
+   * Delays by position rather than a per-row index, since the list's direct
+   * children mix the search field, group labels and rows. The first child is
+   * the sticky sentinel and the second the field, which lead together.
+   * `backwards` holds the start frame through the delay and hands back to
+   * the stylesheet at the end; the component drops the class once it's done
+   * so rows mounted later (a search) don't replay it.
+   */
+  .kanna-empty-state-cascade > * {
+    animation: kanna-empty-state-cascade-in 240ms var(--ease-snappy) backwards;
+    animation-delay: 280ms;
+  }
+
+  .kanna-empty-state-cascade > :nth-child(-n + 2) { animation-delay: 0ms; }
+  .kanna-empty-state-cascade > :nth-child(3) { animation-delay: 35ms; }
+  .kanna-empty-state-cascade > :nth-child(4) { animation-delay: 70ms; }
+  .kanna-empty-state-cascade > :nth-child(5) { animation-delay: 105ms; }
+  .kanna-empty-state-cascade > :nth-child(6) { animation-delay: 140ms; }
+  .kanna-empty-state-cascade > :nth-child(7) { animation-delay: 175ms; }
+  .kanna-empty-state-cascade > :nth-child(8) { animation-delay: 210ms; }
+  .kanna-empty-state-cascade > :nth-child(9) { animation-delay: 245ms; }
+
+  @keyframes kanna-empty-state-cascade-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+
+  /* Still one after the other, without the rise. */
+  @media (prefers-reduced-motion: reduce) {
+    .kanna-empty-state-cascade > * {
+      animation-name: kanna-empty-state-cascade-fade-in;
+    }
+  }
+
+  @keyframes kanna-empty-state-cascade-fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
   .kanna-typewriter-cursor-slot {
     display: inline-flex;
     align-items: center;
@@ -769,5 +1035,240 @@
 
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/*
+ * Setup wizard motion (components/auth/SetupWizard.tsx). Onboarding is seen
+ * once, so it gets a composed hand-off, but only transform and opacity move.
+ *
+ * Steps push sideways: forward, the step leaves left as the next arrives
+ * from the right; back is the exact reverse. The exit is quick (180ms) and
+ * the entry settles (380ms), its title, card and footer 45ms apart, the
+ * card's rows fading in behind them. The last step arrives slower, and the
+ * logo and bar lift away first: it's the resolution, not another step.
+ */
+.wizard-step,
+.wizard-leave {
+  --wizard-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --wizard-push: 36px;
+}
+
+.wizard-step > * {
+  animation: wizard-in-forward 380ms var(--wizard-ease-out) both;
+}
+.wizard-step > :nth-child(2) { animation-delay: 45ms; }
+.wizard-step > :nth-child(3) { animation-delay: 90ms; }
+.wizard-step > :nth-child(4) { animation-delay: 135ms; }
+
+.wizard-step[data-direction="back"] > * { animation-name: wizard-in-back; }
+.wizard-step[data-direction="open"] > * { animation-name: wizard-in-open; animation-duration: 460ms; }
+.wizard-step[data-direction="finish"] > * { animation-name: wizard-in-open; animation-duration: 520ms; }
+.wizard-step[data-direction="finish"] > :nth-child(1) { animation-delay: 160ms; }
+.wizard-step[data-direction="finish"] > :nth-child(2) { animation-delay: 230ms; }
+.wizard-step[data-direction="finish"] > :nth-child(3) { animation-delay: 300ms; }
+
+/* Rows land after their card has arrived; fade only, so a row never drifts
+   inside a card that's still moving. */
+.wizard-step [data-setup-list] > * {
+  animation: wizard-fade 260ms var(--wizard-ease-out) both;
+  animation-delay: calc(120ms + var(--wizard-row, 0) * 40ms);
+}
+.wizard-step [data-setup-list] > :nth-child(2) { --wizard-row: 1; }
+.wizard-step [data-setup-list] > :nth-child(3) { --wizard-row: 2; }
+.wizard-step [data-setup-list] > :nth-child(4) { --wizard-row: 3; }
+.wizard-step [data-setup-list] > :nth-child(5) { --wizard-row: 4; }
+.wizard-step [data-setup-list] > :nth-child(n + 6) { --wizard-row: 5; }
+.wizard-step[data-direction="finish"] [data-setup-list] > * {
+  animation-delay: calc(360ms + var(--wizard-row, 0) * 55ms);
+}
+
+.wizard-leave {
+  animation: wizard-out-forward 180ms var(--wizard-ease-out) both;
+}
+.wizard-leave[data-direction="back"] { animation-name: wizard-out-back; }
+
+@keyframes wizard-in-forward {
+  from { opacity: 0; transform: translateX(var(--wizard-push)); }
+}
+@keyframes wizard-in-back {
+  from { opacity: 0; transform: translateX(calc(var(--wizard-push) * -1)); }
+}
+@keyframes wizard-in-open {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+}
+@keyframes wizard-fade {
+  from { opacity: 0; }
+}
+@keyframes wizard-out-forward {
+  to { opacity: 0; transform: translateX(calc(var(--wizard-push) * -0.6)); }
+}
+@keyframes wizard-out-back {
+  to { opacity: 0; transform: translateX(calc(var(--wizard-push) * 0.6)); }
+}
+
+/* The bar is pushed by Continue, so it earns a small overshoot (about 10%)
+   before it settles. It slides inside its track (SetupWizard) to keep its
+   round end. */
+.wizard-progress {
+  transition: transform 560ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+/* The flower and bar arrive with the wizard, then lift away on the last
+   step once the bar has filled. */
+.wizard-header {
+  /* backwards, not both: once it has arrived, the lift-away transition owns it. */
+  animation: wizard-in-open 460ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  transition: opacity 260ms cubic-bezier(0.23, 1, 0.32, 1) 420ms, transform 260ms cubic-bezier(0.23, 1, 0.32, 1) 420ms;
+}
+.wizard-header[data-finished] {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wizard-step > *,
+  .wizard-step [data-setup-list] > *,
+  .wizard-header {
+    animation-name: wizard-fade;
+  }
+  .wizard-leave {
+    animation-name: wizard-fade-out;
+  }
+  .wizard-progress {
+    transition-duration: 0ms;
+  }
+  .wizard-header[data-finished] {
+    transform: none;
+  }
+}
+
+@keyframes wizard-fade-out {
+  to { opacity: 0; }
+}
+
+/*
+ * Dialogs (components/ui/dialog.tsx). Opened now and then, so the modal
+ * arrives: 250ms from 0.96, out of its own centre since nothing on screen
+ * anchors it, with the backdrop fading on the same clock so the two read as
+ * one surface. Closing is instant. Most closes are Escape or the button that
+ * finished the job, and an exit animation would keep focus in the dialog
+ * until it ended.
+ */
+.dialog-surface[data-state="open"] {
+  animation: dialog-surface-in 250ms var(--ease-snappy);
+}
+
+.dialog-overlay[data-state="open"] {
+  animation: floating-surface-fade-in 250ms var(--ease-snappy);
+}
+
+@keyframes dialog-surface-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog-surface[data-state="open"] {
+    animation-name: floating-surface-fade-in;
+  }
+}
+
+/*
+ * Kanna Cloud pairing (components/cloud/CloudPairPanel.tsx). A machine is
+ * paired once, so this is where a little motion is spent.
+ *
+ * The panel swaps whole views: the link, paired, a retry, the manual steps.
+ * The old view fades out in 120ms, laid over the new one, whose rows come in
+ * 60ms apart behind it. A touch of blur on both makes the swap read as one
+ * thing changing rather than two things crossing.
+ *
+ * The views differ in height and the dialog is centred, so without help both
+ * of its edges jump when the view changes. The panel glides between heights
+ * instead. That is the one layout property animated here, on a box of three
+ * rows, and there is no transform that resizes a box around its content.
+ *
+ * Paired is the payoff. The badge grows in, the check draws itself, and one
+ * ring goes out from it: the machine just went live.
+ */
+.cloud-pair-stage {
+  transition: height 300ms var(--ease-glide);
+}
+
+.cloud-pair-view-out {
+  animation: cloud-pair-out 120ms var(--ease-snappy) forwards;
+}
+
+.cloud-pair-view-in .cloud-pair-rows > * {
+  animation: cloud-pair-in 300ms var(--ease-snappy) backwards;
+  animation-delay: calc(90ms + var(--pair-row, 0) * 60ms);
+}
+.cloud-pair-view-in .cloud-pair-rows > :nth-child(2) { --pair-row: 1; }
+.cloud-pair-view-in .cloud-pair-rows > :nth-child(3) { --pair-row: 2; }
+
+.cloud-pair-view-in .cloud-pair-rows > .cloud-pair-badge {
+  animation-name: cloud-pair-badge-in;
+}
+
+/* Glide, not snappy: snappy would have the stroke nearly drawn in its first
+   frames, and the drawing is the point. */
+.cloud-pair-view-in .cloud-pair-check path {
+  stroke-dasharray: 1;
+  animation: cloud-pair-check-draw 350ms var(--ease-glide) 220ms backwards;
+}
+
+/* Out of sight except while it travels. Glide again, so the ring is still
+   visible for most of its way out. */
+.cloud-pair-ring {
+  opacity: 0;
+}
+.cloud-pair-view-in .cloud-pair-ring {
+  animation: cloud-pair-ring 600ms var(--ease-glide) 300ms;
+}
+
+@keyframes cloud-pair-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(2px); }
+}
+@keyframes cloud-pair-out {
+  to { opacity: 0; filter: blur(2px); }
+}
+@keyframes cloud-pair-badge-in {
+  from { opacity: 0; transform: scale(0.9); }
+}
+/* The opacity keeps the round line cap from showing as a dot before the
+   stroke has any length. */
+@keyframes cloud-pair-check-draw {
+  from { stroke-dashoffset: 1; opacity: 0; }
+  25% { opacity: 1; }
+}
+@keyframes cloud-pair-ring {
+  from { opacity: 0.5; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.7); }
+}
+@keyframes cloud-pair-fade-in {
+  from { opacity: 0; }
+}
+@keyframes cloud-pair-fade-out {
+  to { opacity: 0; }
+}
+
+/* Reduced motion keeps the fades, which say the view changed, and drops what
+   travels: the rise, the glide, the drawn check and the ring. */
+@media (prefers-reduced-motion: reduce) {
+  .cloud-pair-stage {
+    transition-duration: 0ms;
+  }
+  .cloud-pair-view-out {
+    animation-name: cloud-pair-fade-out;
+  }
+  .cloud-pair-view-in .cloud-pair-rows > *,
+  .cloud-pair-view-in .cloud-pair-rows > .cloud-pair-badge {
+    animation-name: cloud-pair-fade-in;
+  }
+  .cloud-pair-view-in .cloud-pair-check path,
+  .cloud-pair-view-in .cloud-pair-ring {
+    animation: none;
   }
 }

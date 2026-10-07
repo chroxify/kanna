@@ -1,7 +1,8 @@
-import { useMemo } from "react"
+import { useMemo, useRef } from "react"
 import type { ChatAttachment } from "../../../shared/types"
+import { stripSystemMessages } from "../../../shared/message-preview"
 import { CornerUpLeft } from "lucide-react"
-import { TranscriptMarkdown } from "./shared"
+import { CLAMP_LINES, ClampedMessageText, FOLD_SURFACE_ATTRIBUTE } from "./ClampedMessageText"
 import { classifyAttachmentPreview } from "./attachmentPreview"
 import { AttachmentFileCard, AttachmentImageCard } from "./AttachmentCard"
 import { openViewer, viewerAttachmentFromChat } from "../../stores/viewerStore"
@@ -23,30 +24,28 @@ interface Props {
 }
 
 /**
- * Legacy compatibility: steered prompts used to persist the injected
- * <system-message> block inside the transcript content, hidden here at render
- * time. Injections are now wire-only (applied at the harness boundary in
- * startTurnForChat and never stored), so this strip only matters for
- * transcripts written before that change.
+ * Split a prompt into what is shown and whether anything was held back.
+ *
+ * A `<system-message>` block is for the agent, not the reader (see
+ * `stripSystemMessages`). Most of what Kanna tells an agent is wire-only and
+ * never stored. Two kinds are stored and so reach here: the header on a
+ * sub-chat's report, which the report has to carry, and the steer notice in
+ * transcripts written before that became wire-only.
  */
 function parseSystemMessage(content: string) {
-  const match = content.match(/^<system-message>\s*([\s\S]*?)\s*<\/system-message>\s*([\s\S]*)$/)
-  if (!match) {
-    return { systemMessage: null, body: content }
-  }
-
-  return {
-    systemMessage: match[1]?.trim() || null,
-    body: match[2] ?? "",
-  }
+  const body = stripSystemMessages(content)
+  return { systemMessage: body === content ? null : true, body }
 }
 
 /**
  * A prompt's attachments: images as previews, everything else as file cards.
  * Shared with QueuedUserMessage so a queued prompt shows its attachments the
  * way they will look once it is sent.
+ *
+ * `align` is the side of the column the prompt sits on: the end for one the
+ * user typed, the start for one that was sent to the chat (SourcedMessage).
  */
-export function UserMessageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+export function UserMessageAttachments({ attachments, align = "end" }: { attachments: ChatAttachment[]; align?: "start" | "end" }) {
   const renderOptions = useTranscriptRenderOptions()
   const shouldShowImagePlaceholders = renderOptions.attachmentMode === "metadata"
   const canInteractWithAttachments = !renderOptions.readonly || renderOptions.attachmentMode === "bundle"
@@ -78,7 +77,7 @@ export function UserMessageAttachments({ attachments }: { attachments: ChatAttac
   return (
     <>
       {imageAttachments.length > 0 ? (
-        <div className="flex max-w-[85%] sm:max-w-[80%] flex-wrap justify-end gap-3">
+        <div className={cn("flex max-w-[85%] sm:max-w-[80%] flex-wrap", align === "end" ? "justify-end" : "justify-start", "gap-3")}>
           {imageAttachments.map((attachment) => (
             <AttachmentImageCard
               key={attachment.id}
@@ -89,7 +88,7 @@ export function UserMessageAttachments({ attachments }: { attachments: ChatAttac
         </div>
       ) : null}
       {fileAttachments.length > 0 ? (
-        <div className="flex max-w-[85%] sm:max-w-[80%] flex-wrap justify-end gap-2">
+        <div className={cn("flex max-w-[85%] sm:max-w-[80%] flex-wrap", align === "end" ? "justify-end" : "justify-start", "gap-2")}>
           {fileAttachments.map((attachment) => (
             <AttachmentFileCard
               key={attachment.id}
@@ -103,8 +102,15 @@ export function UserMessageAttachments({ attachments }: { attachments: ChatAttac
   )
 }
 
+/**
+ * The look of a prompt's bubble. One string because a prompt that was sent to
+ * the chat (SourcedMessage) is the same bubble on the other side.
+ */
+export const USER_BUBBLE_CLASS = "min-w-0 rounded-2xl border border-border bg-muted text-primary prose prose-sm prose-invert"
+
 export function UserMessage({ content, attachments = [], steered = false, flash = false }: Props) {
   const parsedContent = useMemo(() => parseSystemMessage(content), [content])
+  const bubbleRef = useRef<HTMLDivElement | null>(null)
 
   return (
     <>
@@ -122,15 +128,16 @@ export function UserMessage({ content, attachments = [], steered = false, flash 
                 <CornerUpLeft className="h-4 w-4" />
               </span>
             ) : null}
-            {/* The flash is a class on the bubble, not a layer inside it: this
-                is a `prose` container, and an extra child displaces the
-                `:first-child` margin reset onto itself, which grew the bubble
-                by a paragraph's top margin for the length of the flash. */}
-            <div className={cn(
-              "min-w-0 flex-1 rounded-2xl border border-border bg-muted px-3.5 py-1.5 text-primary prose prose-sm prose-invert [&_p]:whitespace-pre-line",
+            {/* The flash is a class on the bubble, not a layer inside it: a
+                sibling of the text's first block displaces the `:first-child`
+                margin reset onto itself, which grew the bubble by a
+                paragraph's top margin for the length of the flash. */}
+            <div ref={bubbleRef} {...{ [FOLD_SURFACE_ATTRIBUTE]: "" }} className={cn(
+              USER_BUBBLE_CLASS,
+              "flex-1 px-3.5 py-1.5",
               flash && "kanna-jump-flash",
             )}>
-              <TranscriptMarkdown text={parsedContent.body} />
+              <ClampedMessageText text={parsedContent.body} lines={CLAMP_LINES.typed} scopeRef={bubbleRef} />
             </div>
           </div>
         ) : null}

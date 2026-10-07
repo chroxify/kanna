@@ -10,6 +10,11 @@ import {
 import { ArrowDown, Flower, Upload } from "lucide-react"
 import { DrainingIndicator } from "../../components/messages/DrainingIndicator"
 import { QueuedUserMessage } from "../../components/messages/QueuedUserMessage"
+import { delegationsFor, noteDelegation } from "../../components/messages/SourcedMessage"
+import { messageNamingParent, ParentChatLink } from "../../components/messages/ParentChatLink"
+import { ReplyQuoteProjectContext } from "../../components/messages/ChatToolMessage"
+import { useParentChatId, useProjectIdForChat } from "../../stores/sidebarStore"
+import type { ChatToolCall } from "../../components/messages/ChatToolMessage"
 import { OpenLocalLinkProvider, type OpenLocalLinkTarget } from "../../components/messages/shared"
 import { ProcessingMessage } from "../../components/messages/ProcessingMessage"
 import { ContextMenu, ContextMenuTrigger } from "../../components/ui/context-menu"
@@ -524,6 +529,15 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   }), [isProcessing, latestToolIds, localPath, messages])
   const resolvedRows = useStableResolvedRows(rawRows)
 
+  // The calls a queued report answers, for the quote in its bubble. The queue
+  // comes after everything loaded, so the newest call to each chat is the one.
+  const queuedDelegations = useMemo(() => {
+    if (!queuedMessages.some((message) => message.source?.kind === "report")) return null
+    const latest = new Map<string, ChatToolCall>()
+    for (const message of messages) noteDelegation(latest, message)
+    return latest
+  }, [messages, queuedMessages])
+
   useEffect(() => {
     setToolGroupExpanded({})
   }, [activeChatId])
@@ -852,6 +866,64 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     onReportReadAnchor(messageId, isAtEnd, () => measureReadAnchorLayout(viewportRef.current, row.id, headerOffsetPx))
   }, [headerOffsetPx, onReportReadAnchor])
 
+  /**
+   * The first loaded row and where it sat when older rows were asked for.
+   *
+   * The scroller keeps its position across prepends by watching its first
+   * child, but the first child here is the list header (which holds the
+   * button), so from its point of view nothing was prepended. The
+   * correction is done here instead: once older rows land, the row that was
+   * first is moved back to the same offset it had, in the same frame.
+   */
+  const prependAnchorRef = useRef<{ rowId: string; top: number } | null>(null)
+
+  const captureFirstRow = useCallback(() => {
+    const first = resolvedRowsRef.current[0]
+    const viewport = viewportRef.current
+    const row = first && viewport?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`)
+    if (!first || !viewport || !row) return
+    prependAnchorRef.current = { rowId: first.id, top: row.getBoundingClientRect().top - viewport.getBoundingClientRect().top }
+  }, [])
+
+  // Read from refs so the scroll listener is not re-attached every time a
+  // load starts or finishes.
+  const hasOlderMessagesRef = useRef(hasOlderMessages)
+  hasOlderMessagesRef.current = hasOlderMessages
+  const isLoadingOlderMessagesRef = useRef(isLoadingOlderMessages)
+  isLoadingOlderMessagesRef.current = isLoadingOlderMessages
+  const onLoadOlderMessagesRef = useRef(onLoadOlderMessages)
+  onLoadOlderMessagesRef.current = onLoadOlderMessages
+  /**
+   * The first row when the last automatic load was asked for.
+   *
+   * The older slice is pushed on the subscription, apart from the command's
+   * ack, so "not loading" does not yet mean the rows have landed. Until the
+   * first row changes, the reader is still at the same top and another scroll
+   * event would ask for the same page again. A load that fails or brings
+   * nothing leaves this set, so a failure is not retried on every scroll; the
+   * Load More button still works.
+   */
+  const autoLoadFirstRowIdRef = useRef<string | null>(null)
+
+  /**
+   * Load the page before the window once the reader nears the top.
+   *
+   * Half a screen early rather than at the very edge, so the page is usually
+   * in before the reader runs out of rows. Only the reader's own scrolling
+   * triggers it: a restore or jump that lands near the top did not ask for
+   * more history.
+   */
+  const maybeLoadOlderOnScroll = useCallback((scrollNode: HTMLElement) => {
+    if (!hasUserScrolledRef.current) return
+    if (!hasOlderMessagesRef.current || isLoadingOlderMessagesRef.current) return
+    if (scrollNode.scrollTop > scrollNode.clientHeight / 2) return
+    const firstRowId = resolvedRowsRef.current[0]?.id
+    if (!firstRowId || autoLoadFirstRowIdRef.current === firstRowId) return
+    autoLoadFirstRowIdRef.current = firstRowId
+    captureFirstRow()
+    void onLoadOlderMessagesRef.current?.()
+  }, [captureFirstRow])
+
   const handleScroll = useCallback(() => {
     const scrollNode = viewportRef.current
     if (!scrollNode) return
@@ -860,7 +932,8 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     onIsAtEndChange(isAtEnd)
     reportTopVisibleMessage(isAtEnd)
     setTranscriptOverflows(scrollNode.scrollHeight - scrollNode.clientHeight > OVERFLOW_EPSILON_PX)
-  }, [onIsAtEndChange, reportTopVisibleMessage])
+    maybeLoadOlderOnScroll(scrollNode)
+  }, [maybeLoadOlderOnScroll, onIsAtEndChange, reportTopVisibleMessage])
 
   useEffect(() => {
     const scrollNode = viewportRef.current
@@ -955,25 +1028,6 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     applyScrollTarget(prepareJumpToRow(rowId))
   }, [applyScrollTarget, prepareJumpToRow, resolvedRows, rowIndexByMessageId])
 
-  /**
-   * The first loaded row and where it sat when "Load More" was clicked.
-   *
-   * The scroller keeps its position across prepends by watching its first
-   * child, but the first child here is the list header (which holds the
-   * button), so from its point of view nothing was prepended. The
-   * correction is done here instead: once older rows land, the row that was
-   * first is moved back to the same offset it had, in the same frame.
-   */
-  const prependAnchorRef = useRef<{ rowId: string; top: number } | null>(null)
-
-  const captureFirstRow = useCallback(() => {
-    const first = resolvedRows[0]
-    const viewport = viewportRef.current
-    const row = first && viewport?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`)
-    if (!first || !viewport || !row) return
-    prependAnchorRef.current = { rowId: first.id, top: row.getBoundingClientRect().top - viewport.getBoundingClientRect().top }
-  }, [resolvedRows])
-
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current
     if (!anchor) return
@@ -1024,8 +1078,28 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     [transcriptPaddingBottom]
   )
 
+  // A sub-chat's way back to its parent is the quote on its opening message.
+  // Where that message is not on screen to carry it, the same quote stands
+  // alone as the first item. See ParentChatLink.
+  const parentChatId = useParentChatId(activeChatId)
+  // For a quote of another chat to say when that chat is in another project.
+  const currentProjectId = useProjectIdForChat(activeChatId)
+  const showsParentLink = useMemo(
+    () => parentChatId !== null && messageNamingParent(messages, parentChatId, hasOlderMessages) === null,
+    [hasOlderMessages, messages, parentChatId],
+  )
+
   const listHeader = (
-    <div className="mx-auto w-full max-w-[800px]" style={{ paddingTop: `${headerOffsetPx}px` }}>
+    <div style={{ paddingTop: `${headerOffsetPx}px` }}>
+      {parentChatId && showsParentLink ? (
+        // Above Load More, so it is the first thing however much is loaded.
+        // A row's box, and 20px clear of the row under it, as rows are of
+        // each other. From the left edge, as wide as what it says.
+        <div className="mx-auto flex w-full max-w-[816px] justify-start px-2 pb-3 pt-1">
+          <ParentChatLink parentChatId={parentChatId} />
+        </div>
+      ) : null}
+      <div className="mx-auto w-full max-w-[800px]">
       {hasOlderMessages ? (
         // Same box as a transcript row so the button lines up with the
         // column below it. The scroller treats what lands above the first
@@ -1035,12 +1109,13 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
             type="button"
             onClick={handleLoadOlderClick}
             disabled={isLoadingOlderMessages}
-            className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+            className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
           >
             {isLoadingOlderMessages ? "Loading…" : "Load More"}
           </button>
         </div>
       ) : null}
+      </div>
     </div>
   )
 
@@ -1051,13 +1126,19 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   // would sit 8px left of every tool icon above it.
   const listFooter = (
     <div className="mx-auto w-full max-w-[816px] px-2">
-      {isProcessing ? <ProcessingMessage status={runtimeStatus ?? undefined} /> : null}
+      {/* A chat waiting on a subagent has no turn to stop or queue behind, so
+          it is not processing. It is not finished either, and this line is
+          what says so here. A draining stream says it with its own, below. */}
+      {isProcessing || (runtimeStatus === "waiting_on_subagent" && !isDraining)
+        ? <ProcessingMessage status={runtimeStatus ?? undefined} />
+        : null}
       {queuedMessages.map((message) => (
         <QueuedUserMessage
           key={message.id}
           message={message}
-          onRemove={() => void onRemoveQueuedMessage(message.id)}
-          onSendNow={() => void onSteerQueuedMessage(message.id)}
+          delegations={queuedDelegations ? delegationsFor(queuedDelegations, message.source) : undefined}
+          onRemove={() => onRemoveQueuedMessage(message.id)}
+          onSendNow={() => onSteerQueuedMessage(message.id)}
         />
       ))}
       {!isProcessing && isDraining ? (
@@ -1074,9 +1155,11 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   return (
     <>
       <OpenLocalLinkProvider onOpenLocalLink={handleOpenLocalLinkClick}>
+        <ReplyQuoteProjectContext.Provider value={currentProjectId}>
         <MessageScroller className="h-full flex-1">
           <MessageScrollerViewport
             ref={viewportRef}
+            data-navbar-scroller
             className="h-full overflow-x-hidden overscroll-y-contain px-3 scrollbar-hide"
             style={{ scrollPaddingTop: headerOffsetPx }}
           >
@@ -1098,6 +1181,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
             </MessageScrollerContent>
           </MessageScrollerViewport>
         </MessageScroller>
+        </ReplyQuoteProjectContext.Provider>
       </OpenLocalLinkProvider>
 
       {showEmptyState ? null : (
@@ -1237,7 +1321,13 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
                       chat opens; a phone's column is a closed sheet. */}
                   {showEmptyStateUsage ? <EmptyStateUsageCards socket={socket} activeChatId={activeChatId} /> : null}
                   {emptyStateProjectId ? (
-                    <EmptyStateProjectChats projectId={emptyStateProjectId} activeChatId={activeChatId} />
+                    <EmptyStateProjectChats
+                      projectId={emptyStateProjectId}
+                      activeChatId={activeChatId}
+                      // Only on the entrance that types the hero line out;
+                      // a page that opens already typed shows the list as is.
+                      cascadeIn={emptyStateAnimatesIn && isEmptyStateTypingComplete}
+                    />
                   ) : null}
                 </div>
               </div>
