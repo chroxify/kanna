@@ -363,6 +363,8 @@ function ChatPreviewSession({ chatId, title, projectId: sidebarProjectId, projec
           hasSelectedProject
           runtimeStatus={session.runtimeStatus}
           canCancel={session.canCancel}
+          firstQueuedMessageId={session.queuedMessages[0]?.id ?? null}
+          onSteerQueuedMessage={session.handleSteerQueuedMessage}
           projectId={projectId}
           projectPath={projectPath}
           projectRepoLabel={projectRepoLabel}
