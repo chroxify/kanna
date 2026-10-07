@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react"
 import { ArrowLeft, MessageCircle, SquareArrowOutUpRight } from "lucide-react"
-import type { AgentProvider, ChatSchedule, ChatSkillsSnapshot, ProviderCatalogEntry, TranscriptEntry } from "../../../shared/types"
+import type { AgentProvider, ChatSchedule, ChatSkillsSnapshot, ProviderCatalogEntry, SubagentActivity, TranscriptEntry } from "../../../shared/types"
 import type { ChatInputHandle } from "../../components/chat-ui/ChatInput"
 import {
   ChatReferenceProvider,
@@ -48,6 +48,7 @@ export interface ChatPreviewContext {
 
 const EMPTY_TRANSCRIPT_ENTRIES: TranscriptEntry[] = []
 const EMPTY_SCHEDULES: readonly ChatSchedule[] = []
+const EMPTY_SUBAGENTS: readonly SubagentActivity[] = []
 /**
  * The transcript starts under the card's header, not beneath a navbar that
  * overlays it, so all it clears at the top is a little air.
@@ -369,6 +370,7 @@ function ChatPreviewSession({ chatId, title, projectId: sidebarProjectId, projec
           activeProvider={session.runtime?.provider ?? provider}
           availableProviders={session.availableProviders}
           contextWindowSnapshot={contextWindowSnapshot}
+          subagents={session.runtime?.subagents ?? EMPTY_SUBAGENTS}
           onSubmit={session.handleSend}
           onCancel={handleCancel}
           onEditModels={context.onEditModels}
