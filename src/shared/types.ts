@@ -240,6 +240,12 @@ export interface ChatSchedule {
   updatedAt: number
   /** The chat whose agent created it. Absent when a user did. */
   createdByChatId?: string
+  /**
+   * Set when a sub-chat scheduled this for itself in a turn its parent was
+   * owed a report for. The run is more of the same work, so the turn it
+   * starts is reported to the parent too.
+   */
+  reportsToParent?: true
   /** Null once nothing is left to run: a one-shot that fired, or `maxRuns` reached. */
   nextRunAt: number | null
   lastRunAt?: number
@@ -1036,12 +1042,31 @@ export function isNightlyVersion(version: string): boolean {
   return version.includes("-nightly.")
 }
 
+/**
+ * `waiting_on_subagent` is a chat whose own turn has ended while work it
+ * handed to another agent is still going: its provider's (a subagent, a
+ * workflow) or a Kanna sub-chat. That work comes back and starts the chat's
+ * next turn, so the chat has not finished. A shell or a monitor it left
+ * running is not that: a dev server is not something a chat is waiting for,
+ * and such a chat reads as its last turn ended.
+ * A chat whose turn is still running reads `running`, whatever it handed off.
+ */
 export type KannaStatus =
   | "idle"
   | "starting"
   | "running"
   | "waiting_for_user"
+  | "waiting_on_subagent"
   | "failed"
+
+/**
+ * Work is still going in the chat without needing the user: a turn in flight,
+ * or handed-off work the chat is waiting on. Such a chat is in progress, not
+ * ready to review, however its last turn ended.
+ */
+export function isWorkingStatus(status?: string | null): boolean {
+  return status === "starting" || status === "running" || status === "waiting_on_subagent"
+}
 
 export interface ProjectSummary {
   id: string
@@ -1135,6 +1160,12 @@ export interface SidebarChatRow {
    * stays in `chats` so anything that looks a chat up by id still finds it.
    */
   parentChatId?: string
+  /**
+   * Set when `parentChatId` came from the parent adopting the chat, not
+   * starting it. An adopted chat stays in every list: `isSubChat` in
+   * `shared/sub-chat.ts` is the rule. Never false; absent on every other row.
+   */
+  adopted?: true
 }
 
 /**
@@ -2474,12 +2505,13 @@ export type HydratedTranscriptMessage =
   | ({ id: string; messageId?: string; hidden?: boolean } & HydratedToolCall)
 
 /**
- * One unit of work a chat is still waiting on after the main agent stopped
- * talking: a subagent, a backgrounded shell, a monitor, a workflow.
+ * One task still going after the main agent stopped talking: a subagent, a
+ * backgrounded shell, a monitor, a workflow. The Tasks widget lists them all.
  *
- * A turn is not over while any of these is `running`. The main agent's result
- * arrives as soon as *it* is done, so without this the chat read as finished
- * while the work it delegated was still going.
+ * Only the ones that are work handed to another agent (a subagent, a
+ * workflow, a sub-chat) keep the chat from reading as finished: the main
+ * agent's result arrives as soon as *it* is done, and without them the chat
+ * read as finished while the work it delegated was still going.
  */
 export interface SubagentActivity {
   /** The provider's own id: Claude's task id (a subagent's `agent_id`), or the spawning tool call id. */
@@ -2581,6 +2613,15 @@ export interface ChatRuntime {
    * agent created, and the one whose run started it. Omitted when there are none.
    */
   schedules?: ChatSchedule[]
+  /**
+   * The chat this one reports to as a sub-chat, as it stands now. The same
+   * value as `SidebarChatRow.parentChatId`, here so a client can show the way
+   * back to the parent from the chat's own snapshot. Omitted for a chat with
+   * no parent. The parent's title and status are still the sidebar's to give.
+   */
+  parentChatId?: string
+  /** Set when that parent adopted the chat. The same value as `SidebarChatRow.adopted`. */
+  adopted?: true
 }
 
 export interface ChatSnapshot {
