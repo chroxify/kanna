@@ -1,5 +1,5 @@
-import type { ResolvedChatReadAnchor } from "../../../shared/types"
-import type { ChatJumpRole } from "../../lib/chat-navigation"
+import type { HydratedTranscriptMessage, ResolvedChatReadAnchor } from "../../../shared/types"
+import type { ChatJumpTarget } from "../../lib/chat-navigation"
 import type { ResolvedTranscriptRow } from "../KannaTranscript"
 import { getUserPromptSignature } from "../kannaStateHelpers"
 
@@ -43,6 +43,13 @@ export function buildRowIndexByMessageId(rows: ResolvedTranscriptRow[]): Map<str
     }
   })
   return map
+}
+
+/** Index of the row rendering a tool call (its own row, or its tool group's), or null. */
+export function findToolCallRowIndex(rows: ResolvedTranscriptRow[], toolId: string): number | null {
+  const isCall = (message: HydratedTranscriptMessage) => message.kind === "tool" && message.toolId === toolId
+  const index = rows.findIndex((row) => (row.kind === "single" ? isCall(row.message) : row.messages.some(isCall)))
+  return index === -1 ? null : index
 }
 
 /** Index of the row rendering the most recent user prompt, or null. */
@@ -139,7 +146,7 @@ export function findLatestAssistantTextRowIndex(rows: ResolvedTranscriptRow[]): 
  * spent, so a request survives exactly one landing.
  */
 export interface TranscriptJumpRequest {
-  role: ChatJumpRole
+  target: ChatJumpTarget
   requestId: string
 }
 
@@ -157,11 +164,13 @@ export interface TranscriptJumpRequest {
  */
 export function resolveJumpTarget(
   rows: ResolvedTranscriptRow[],
-  role: ChatJumpRole,
+  target: ChatJumpTarget,
 ): TranscriptScrollTarget | null {
-  const index = role === "prompt"
-    ? findLatestUserPromptRowIndex(rows)
-    : findLatestAssistantTextRowIndex(rows)
+  const index = typeof target !== "string"
+    ? findToolCallRowIndex(rows, target.toolId)
+    : target === "prompt"
+      ? findLatestUserPromptRowIndex(rows)
+      : findLatestAssistantTextRowIndex(rows)
   const rowId = index === null ? undefined : rows[index]?.id
   return rowId === undefined ? null : { kind: "pin", rowId }
 }

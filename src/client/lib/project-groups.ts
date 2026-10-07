@@ -1,4 +1,4 @@
-import type { LocalProjectSummary } from "../../shared/types"
+import type { LocalProjectSummary, SidebarProjectGroup } from "../../shared/types"
 import { getPathBasename } from "./formatters"
 
 /**
@@ -99,4 +99,63 @@ export function groupProjectsByRecency(
     compareProjectsAlphabetically,
     nowMs
   ).map(({ key, title, items }) => ({ key, title, projects: items }))
+}
+
+export function groupProjectsForNewChat({
+  projects,
+  projectGroups,
+  currentProjectId,
+  search = "",
+  pendingSendTimes = {},
+  nowMs = Date.now(),
+}: {
+  projects: LocalProjectSummary[]
+  projectGroups: SidebarProjectGroup[]
+  currentProjectId: string | null
+  search?: string
+  pendingSendTimes?: Readonly<Record<string, number>>
+  nowMs?: number
+}) {
+  const currentGroup = projectGroups.find((group) => group.groupKey === currentProjectId)
+  let candidates = projects
+  // The sidebar can receive a new project before the local project list does.
+  if (currentGroup && !projects.some((project) => project.localPath === currentGroup.localPath)) {
+    candidates = [...projects, {
+      localPath: currentGroup.localPath,
+      title: currentGroup.realTitle,
+      sidebarTitle: currentGroup.sidebarTitle,
+      source: "saved",
+      chatCount: currentGroup.chats.length,
+    }]
+  }
+
+  const lastSentByPath = new Map<string, number>()
+  for (const group of projectGroups) {
+    for (const chat of [...group.chats, ...(group.archivedChats ?? [])]) {
+      // Agent replies, folder edits, and empty chats must not change this order.
+      const lastSentAt = Math.max(chat.lastMessageAt ?? 0, pendingSendTimes[chat.chatId] ?? 0)
+      if (lastSentAt > (lastSentByPath.get(group.localPath) ?? 0)) {
+        lastSentByPath.set(group.localPath, lastSentAt)
+      }
+    }
+  }
+
+  const filtered = filterProjects(candidates, search)
+  const current = filtered.filter((project) => project.localPath === currentGroup?.localPath)
+  const remaining = filtered.filter((project) => project.localPath !== currentGroup?.localPath)
+  const compareByLastSent = (a: LocalProjectSummary, b: LocalProjectSummary) => (
+    (lastSentByPath.get(b.localPath) ?? 0) - (lastSentByPath.get(a.localPath) ?? 0)
+    || compareProjectsAlphabetically(a, b)
+  )
+  const groups = groupByRecency(
+    remaining,
+    (project) => lastSentByPath.get(project.localPath),
+    compareByLastSent,
+    nowMs,
+  ).map(({ key, title, items }) => ({ key, title, projects: items.sort(compareByLastSent) }))
+
+  return [
+    ...(current.length ? [{ key: "current", title: "Current project", projects: current }] : []),
+    ...groups,
+  ]
 }

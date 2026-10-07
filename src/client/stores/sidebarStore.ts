@@ -1,6 +1,6 @@
 import { create } from "zustand"
 import { useShallow } from "zustand/react/shallow"
-import type { SidebarChatRow, SidebarData } from "../../shared/types"
+import type { KannaStatus, SidebarChatRow, SidebarData } from "../../shared/types"
 import { stabilizeSidebarData } from "../app/sidebarStability"
 import { applySidebarProjectOrder } from "../app/kannaStateHelpers"
 import { formatProjectRepoBranch } from "../lib/project-label"
@@ -100,6 +100,27 @@ export function useProjectIdForChat(chatId: string | null): string | null {
   })
 }
 
+/**
+ * The chat whose agent this chat reports to, or null for a chat of the user's
+ * own. Read live rather than from how the chat began: the link can be moved
+ * to another chat after the fact. A string, so a subscriber hears about a
+ * change of parent and nothing else in the snapshot.
+ */
+export function useParentChatId(chatId: string | null): string | null {
+  return useSidebarStore((state) => parentChatIdOf(state.data, chatId))
+}
+
+/** `useParentChatId` on a snapshot. An archived sub-chat still has its parent. */
+export function parentChatIdOf(data: SidebarData, chatId: string | null): string | null {
+  if (!chatId) return null
+  for (const group of data.projectGroups) {
+    const chat = group.chats.find((candidate) => candidate.chatId === chatId)
+      ?? group.archivedChats?.find((candidate) => candidate.chatId === chatId)
+    if (chat) return chat.parentChatId ?? null
+  }
+  return null
+}
+
 export function useProjectRepoUrl(projectId: string | null): string | undefined {
   return useSidebarStore((state) => (
     projectId
@@ -118,6 +139,40 @@ export function useChatExists(chatId: string | null): boolean {
     return state.data.projectGroups.some((group) =>
       group.chats.some((chat) => chat.chatId === chatId)
       || (group.archivedChats ?? []).some((chat) => chat.chatId === chatId))
+  })
+}
+
+/**
+ * The chat's status as the sidebar last heard it. The sidebar is subscribed from
+ * app start, so this is known the moment a chat opens, well before that chat's
+ * own snapshot arrives.
+ */
+export function useSidebarChatStatus(chatId: string | null): KannaStatus | null {
+  return useSidebarStore((state) => {
+    if (!chatId) return null
+    for (const group of state.data.projectGroups) {
+      const chat = group.chats.find((row) => row.chatId === chatId)
+        ?? (group.archivedChats ?? []).find((row) => row.chatId === chatId)
+      if (chat) return chat.status
+    }
+    return null
+  })
+}
+
+/**
+ * Whether the sidebar has heard of a message in the chat. Known before the
+ * chat's own snapshot arrives, like the status above; false for an unknown
+ * chat.
+ */
+export function useSidebarChatHasMessages(chatId: string | null): boolean {
+  return useSidebarStore((state) => {
+    if (!chatId) return false
+    for (const group of state.data.projectGroups) {
+      const chat = group.chats.find((row) => row.chatId === chatId)
+        ?? (group.archivedChats ?? []).find((row) => row.chatId === chatId)
+      if (chat) return chat.lastMessageAt != null
+    }
+    return false
   })
 }
 

@@ -8,7 +8,8 @@ import type {
 } from "../../../../shared/types"
 import { Button } from "../../ui/button"
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../../ui/dialog"
-import { BranchListSection, BranchSearchInput } from "./BranchList"
+import { Skeleton } from "../../ui/skeleton"
+import { BranchListSection, BranchListSkeleton, BranchSearchInput } from "./BranchList"
 
 function getBranchCandidatePriority(entry: ChatBranchListEntry) {
   switch (entry.kind) {
@@ -197,28 +198,34 @@ export function MergeBranchModal({
             onChange={setQuery}
             placeholder="Search branches"
           />
-          <div className="max-h-[375px] space-y-3 overflow-y-auto pr-1">
-            <BranchListSection
-              title="Default Branch"
-              entries={visibleDefaultBranch ? [visibleDefaultBranch] : []}
-              emptyLabel="No default branch available."
-              selectedName={selectedName}
-              onSelect={(entry) => setSelectedName(entry.name)}
-            />
-            <BranchListSection
-              title="Recent Branches"
-              entries={visibleRecent}
-              emptyLabel="No recent branches."
-              selectedName={selectedName}
-              onSelect={(entry) => setSelectedName(entry.name)}
-            />
-            <BranchListSection
-              title="Other Branches"
-              entries={visibleOther}
-              emptyLabel="No other branches match this search."
-              selectedName={selectedName}
-              onSelect={(entry) => setSelectedName(entry.name)}
-            />
+          <div className="max-h-[375px] overflow-y-auto pr-1">
+            {/* Until the list arrives, its shape rather than three sections
+                claiming there are no branches. */}
+            {!branchList ? <BranchListSkeleton /> : (
+              <>
+                <BranchListSection
+                  title="Default Branch"
+                  entries={visibleDefaultBranch ? [visibleDefaultBranch] : []}
+                  emptyLabel="No default branch available."
+                  selectedName={selectedName}
+                  onSelect={(entry) => setSelectedName(entry.name)}
+                />
+                <BranchListSection
+                  title="Recent Branches"
+                  entries={visibleRecent}
+                  emptyLabel="No recent branches."
+                  selectedName={selectedName}
+                  onSelect={(entry) => setSelectedName(entry.name)}
+                />
+                <BranchListSection
+                  title="Other Branches"
+                  entries={visibleOther}
+                  emptyLabel="No other branches match this search."
+                  selectedName={selectedName}
+                  onSelect={(entry) => setSelectedName(entry.name)}
+                />
+              </>
+            )}
           </div>
           <div className="px-2">
             {!selectedEntry ? (
@@ -226,9 +233,13 @@ export function MergeBranchModal({
                 Select a branch to preview the merge.
               </div>
             ) : isPreviewLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <LoaderCircle className="size-3.5 animate-spin" />
-                <span>Checking merge preview…</span>
+              // The preview's own shape: a status glyph, a line, a detail line.
+              <div className="flex items-start gap-2" aria-busy aria-label="Checking merge preview">
+                <Skeleton className="mt-1 size-3.5 shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-1.5 pt-1">
+                  <Skeleton className="h-3 w-3/5" />
+                  <Skeleton className="h-2.5 w-2/5" />
+                </div>
               </div>
             ) : previewError ? (
               <div className="text-sm text-destructive">

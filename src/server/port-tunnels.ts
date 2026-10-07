@@ -3,8 +3,8 @@ import { startShareTunnel, type StartedShareTunnel } from "./share"
 /**
  * One cloudflared quick tunnel per exposed local port.
  *
- * The browser panel's iframe points at `http://localhost:<port>`, which in
- * cloud mode resolves to the viewer's own machine. A quick tunnel gives the
+ * A port's link is `http://localhost:<port>`, which in cloud mode resolves
+ * to the viewer's own machine. A quick tunnel gives the
  * port a public https URL that works from anywhere. Nothing here persists:
  * the tunnels are child processes, so they die with the server, and a
  * forgotten public share is the main risk of this feature.

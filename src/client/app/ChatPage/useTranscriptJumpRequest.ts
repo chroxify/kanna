@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { readChatJumpLocationState } from "../../lib/chat-navigation"
 import type { TranscriptJumpRequest } from "./transcriptScrollAnchors"
@@ -28,15 +28,19 @@ export function useTranscriptJumpRequest(): {
   const [jumpRequest, setJumpRequest] = useState<TranscriptJumpRequest | null>(null)
 
   const jump = readChatJumpLocationState(location.state)
-  const role = jump?.jumpToRole
-  const requestId = jump?.jumpRequestId
+  const requestId = jump?.requestId
   const { pathname, search } = location
 
+  // Keyed on the request id alone: the target is a fresh object each render,
+  // and one id never names two targets.
+  const targetRef = useRef(jump?.target)
+  targetRef.current = jump?.target
   useEffect(() => {
-    if (!role || !requestId) return
-    setJumpRequest({ role, requestId })
+    const target = targetRef.current
+    if (!target || !requestId) return
+    setJumpRequest({ target, requestId })
     navigate(`${pathname}${search}`, { replace: true, state: null })
-  }, [navigate, pathname, requestId, role, search])
+  }, [navigate, pathname, requestId, search])
 
   const onJumpRequestHandled = useCallback((handledId: string) => {
     setJumpRequest((current) => (current?.requestId === handledId ? null : current))

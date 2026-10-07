@@ -2,7 +2,7 @@ import { DEFAULT_KEYBINDINGS, type KeybindingAction, type KeybindingsSnapshot } 
 
 export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   toggleEmbeddedTerminal: "Toggle Embedded Terminal",
-  toggleRightSidebar: "Toggle Right Sidebar",
+  toggleRightSidebar: "Toggle Widgets",
   openInFinder: "Open In Finder",
   openInEditor: "Open In Editor",
   addSplitTerminal: "Add Split Terminal",

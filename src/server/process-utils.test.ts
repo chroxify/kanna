@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { resolveCommandPath, spawnDetached } from "./process-utils"
+import { mergePathLists, parseShellPathOutput, resolveCommandPath, spawnDetached } from "./process-utils"
 
 let fakeHome: string | null = null
 
@@ -29,6 +29,30 @@ describe("resolveCommandPath", () => {
   test("login-shell resolution still wins when it succeeds", () => {
     fakeHome = mkdtempSync(path.join(tmpdir(), "kanna-home-"))
     expect(resolveCommandPath("sh", fakeHome)).toMatch(/\/sh$/)
+  })
+})
+
+describe("mergePathLists", () => {
+  test("keeps the current order and appends only what the shell adds", () => {
+    expect(mergePathLists("/a:/usr/bin:/b", "/home/.local/bin:/usr/bin:/a::/c")).toBe(
+      "/a:/usr/bin:/b:/home/.local/bin:/c"
+    )
+  })
+
+  test("uses the shell PATH when the current one is empty", () => {
+    expect(mergePathLists("", "/x:/y")).toBe("/x:/y")
+  })
+})
+
+describe("parseShellPathOutput", () => {
+  test("ignores rc-file noise around the markers", () => {
+    const output = "Welcome!\n__KANNA_SHELL_PATH__\n/one:/two\n__KANNA_SHELL_PATH__\nbye\n"
+    expect(parseShellPathOutput(output)).toBe("/one:/two")
+  })
+
+  test("returns null when the shell printed nothing usable", () => {
+    expect(parseShellPathOutput("")).toBeNull()
+    expect(parseShellPathOutput("__KANNA_SHELL_PATH__\n\n__KANNA_SHELL_PATH__")).toBeNull()
   })
 })
 

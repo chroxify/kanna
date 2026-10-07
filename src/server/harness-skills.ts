@@ -8,46 +8,75 @@ import type { AgentProvider, GlobalSkillSummary, HarnessSkill, HarnessSkillSourc
  *
  * Discovery has two tiers per provider:
  *   - live: ask the running harness (claude supportedCommands, codex skills/list,
- *     pi resource loader). Authoritative — includes built-ins/plugins/enabled flags.
+ *     grok inspect --json, pi resource loader). Authoritative — includes
+ *     built-ins/plugins/enabled flags.
  *   - filesystem: Kanna scans the same directories the harness itself reads.
  *     Used for cold start (no session yet) and for cursor, which has no
  *     enumeration protocol at all.
  *
- * Invocation is translated per provider at the adapter boundary (the transcript
- * always keeps the user's typed text verbatim):
- *   - claude/pi: passthrough — both expand a message that *starts* with "/name".
- *   - codex: structured `{type:"skill", name, path}` input item + failsafe block.
+ * A prompt can name any number of skills, anywhere in the text. Invocation is
+ * translated per provider at the adapter boundary (the transcript always keeps
+ * the user's typed text verbatim):
+ *   - claude/grok/pi: a message that *starts* with "/name" expands natively, so
+ *     that one passes through; every other "/name" gets the failsafe block.
+ *   - codex: structured `{type:"skill", name, path}` input item per skill + failsafe block.
  *   - cursor: failsafe block only (no headless expansion exists).
  */
 
-/** Leading-slash invocation: `/name` optionally followed by whitespace + args. */
-const SKILL_INVOCATION_PATTERN = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/
-
-export interface SkillInvocation {
+export interface SkillMention {
   name: string
-  args: string
+  /** Opens the message, where claude/grok/pi expand it on their own. */
+  leading: boolean
 }
 
 /**
- * Parse a `/name args` invocation from prompt content. Anchored to the start
- * (after trimming) because every harness that expands slash text requires it
- * there — claude checks `trim().startsWith("/")`, pi checks `startsWith("/")`.
+ * Every `/name` token in the prompt that could be a skill: the "/" opens the
+ * message or follows whitespace, so paths like `src/foo` never count. These
+ * are candidates only; `resolveSkillMentions` keeps the ones the harness
+ * actually lists, which is what stops `/etc/hosts` from reading as a skill.
  */
-export function parseSkillInvocation(content: string): SkillInvocation | null {
-  const match = content.trim().match(SKILL_INVOCATION_PATTERN)
-  if (!match?.[1]) return null
-  return { name: match[1], args: match[2]?.trim() ?? "" }
+export function findSkillMentions(content: string): SkillMention[] {
+  const trimmed = content.trimStart()
+  const mentions: SkillMention[] = []
+  // The lookahead keeps `/etc/hosts` whole instead of yielding "etc".
+  for (const match of trimmed.matchAll(/(^|\s)\/([\w:.-]+)(?![\w:./-])/g)) {
+    // "run /review." ends a sentence; the period is not part of the name.
+    const name = match[2]!.replace(/[.:-]+$/, "")
+    if (!name) continue
+    mentions.push({ name, leading: match.index === 0 })
+  }
+  return mentions
+}
+
+export interface SkillReference {
+  name: string
+  path?: string
+}
+
+/** The mentions the harness knows, once each, in the order they were typed. */
+export function resolveSkillMentions(mentions: SkillMention[], skills: HarnessSkill[]): SkillReference[] {
+  const resolved: SkillReference[] = []
+  for (const mention of mentions) {
+    if (resolved.some((skill) => skill.name === mention.name)) continue
+    const match = findSkillByName(skills, mention.name)
+    if (match) resolved.push(match.path ? { name: match.name, path: match.path } : { name: match.name })
+  }
+  return resolved
 }
 
 /**
  * The non-deterministic failsafe appended (never prepended — that would break
- * claude/pi slash expansion) to the harness-bound prompt when invoking a skill
- * on providers without a fully deterministic path (codex, cursor). Mirrors the
- * steered-message pattern: visible to the harness, hidden from the transcript UI
- * (the transcript stores the user's typed text, not the wire text).
+ * claude/pi slash expansion) to the harness-bound prompt for every skill the
+ * harness won't expand on its own. Mirrors the steered-message pattern:
+ * visible to the harness, hidden from the transcript UI (the transcript
+ * stores the user's typed text, not the wire text). Claude's live list has no
+ * paths, so those go by name, which its Skill tool takes.
  */
-export function buildSkillSystemMessage(skillPath: string): string {
-  return `<system-message>the user would like to use the skill available at ${skillPath}</system-message>`
+export function buildSkillSystemMessage(skills: SkillReference[]): string {
+  const lines = skills.map((skill) => skill.path
+    ? `the user would like to use the skill available at ${skill.path}`
+    : `the user would like to use the /${skill.name} skill`)
+  return `<system-message>${lines.join("\n")}</system-message>`
 }
 
 export function appendSystemMessageBlock(content: string, block: string): string {
@@ -294,12 +323,30 @@ export function scanCursorSkills(args: ScanArgs): HarnessSkill[] {
   ])
 }
 
+/**
+ * Grok discovery: project + user `.grok/skills`, shared `.agents/skills`
+ * (repo → git root and $HOME), matching grok inspect's resource loader.
+ */
+export function scanGrokSkills(args: ScanArgs): HarnessSkill[] {
+  const home = args.home ?? homedir()
+  const repoRoots = collectAncestorDirsToRepoRoot(args.cwd)
+    .flatMap((dir) => [
+      path.join(dir, ".grok", "skills"),
+      path.join(dir, ".agents", "skills"),
+    ])
+  return dedupeSkillsByName([
+    ...repoRoots.flatMap(scanSkillsRoot),
+    ...scanSkillsRoot(path.join(home, ".grok", "skills")),
+    ...scanSkillsRoot(path.join(home, ".agents", "skills")),
+  ])
+}
+
 /** Resolve a typed `/name` against a skill list (exact match on the namespaced name). */
 export function findSkillByName(skills: HarnessSkill[], name: string): HarnessSkill | null {
   return skills.find((skill) => skill.name === name) ?? null
 }
 
-const PROVIDER_ORDER: readonly AgentProvider[] = ["claude", "codex", "cursor", "pi"]
+const PROVIDER_ORDER: readonly AgentProvider[] = ["claude", "codex", "cursor", "grok", "pi"]
 
 /**
  * User-level skill roots and the harnesses that read each of them. This is the
@@ -309,9 +356,10 @@ const PROVIDER_ORDER: readonly AgentProvider[] = ["claude", "codex", "cursor", "
 export function globalSkillRoots(home: string): { dir: string; providers: AgentProvider[] }[] {
   return [
     // The cross-harness standard dir: codex, cursor, and pi all read it natively.
-    { dir: path.join(home, ".agents", "skills"), providers: ["codex", "cursor", "pi"] },
+    { dir: path.join(home, ".agents", "skills"), providers: ["codex", "cursor", "grok", "pi"] },
     { dir: path.join(home, ".claude", "skills"), providers: ["claude"] },
     { dir: path.join(home, ".cursor", "skills"), providers: ["cursor"] },
+    { dir: path.join(home, ".grok", "skills"), providers: ["grok"] },
     // Deprecated codex location, but current codex builds still scan it.
     { dir: path.join(home, ".codex", "skills"), providers: ["codex"] },
   ]

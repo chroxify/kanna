@@ -32,13 +32,13 @@ export function TodoWriteMessage({ message }: Props) {
               <div
                 key={index}
                 className={cn(
-                  "flex items-center gap-3 px-4 py-2.5 bg-background",
+                  "flex items-center gap-3 px-4 py-2.5 bg-surface",
                   !isLast && "border-b border-border"
                 )}
               >
                 <Icon className={cn("h-4 w-4 flex-shrink-0", iconClass)} />
                 <span className={cn("text-sm", textClass)}>
-                  {todo.status === "in_progress" ? todo.activeForm : todo.content}
+                  {todo.status === "in_progress" ? (todo.activeForm || todo.content) : todo.content}
                 </span>
               </div>
             )

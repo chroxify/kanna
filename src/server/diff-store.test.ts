@@ -1090,6 +1090,42 @@ describe("DiffStore", () => {
     expect((await run(["git", "branch", "--show-current"], repoRoot)).trim()).toBe("feature/new")
   })
 
+  test("readCommit lists a commit's files against its first parent, renames included", async () => {
+    const repoRoot = await createRepo()
+    tempDirs.push(repoRoot)
+    await writeFile(path.join(repoRoot, "app.txt"), "one\ntwo\n", "utf8")
+    await writeFile(path.join(repoRoot, "old-name.txt"), "stays the same\nacross the move\n", "utf8")
+    await run(["git", "add", "."], repoRoot)
+    await run(["git", "commit", "-m", "init"], repoRoot)
+    await writeFile(path.join(repoRoot, "app.txt"), "one\nthree\nfour\n", "utf8")
+    await run(["git", "mv", "old-name.txt", "new-name.txt"], repoRoot)
+    await run(["git", "commit", "-am", "edit and move"], repoRoot)
+    const sha = (await run(["git", "rev-parse", "HEAD"], repoRoot)).trim()
+
+    const store = new DiffStore(repoRoot)
+    const details = await store.readCommit({ projectPath: repoRoot, sha })
+
+    expect(details.sha).toBe(sha)
+    expect(details.parentCount).toBe(1)
+    expect(details.totalFileCount).toBe(2)
+    expect(details.files).toContainEqual({ path: "app.txt", additions: 2, deletions: 1 })
+    expect(details.files).toContainEqual({ path: "new-name.txt", previousPath: "old-name.txt", additions: 0, deletions: 0 })
+    expect(details.additions).toBe(2)
+    expect(details.deletions).toBe(1)
+
+    const root = await store.readCommit({ projectPath: repoRoot, sha: (await run(["git", "rev-parse", "HEAD~1"], repoRoot)).trim() })
+    expect(root.parentCount).toBe(0)
+    expect(root.totalFileCount).toBe(2)
+  })
+
+  test("readCommit refuses anything but a hash", async () => {
+    const repoRoot = await createRepo()
+    tempDirs.push(repoRoot)
+    const store = new DiffStore(repoRoot)
+    await expect(store.readCommit({ projectPath: repoRoot, sha: "--output=/tmp/x" })).rejects.toThrow("Not a commit hash")
+    await expect(store.readCommit({ projectPath: repoRoot, sha: "HEAD~1" })).rejects.toThrow("Not a commit hash")
+  })
+
   test("syncBranch pull rebases divergent local commits onto the upstream branch", async () => {
     const repoRoot = await createRepo()
     const remoteRoot = await createBareRemote()

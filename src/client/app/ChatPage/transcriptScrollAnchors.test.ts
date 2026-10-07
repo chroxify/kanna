@@ -107,6 +107,18 @@ describe("resolveJumpTarget", () => {
     expect(resolveJumpTarget([promptRow("m1", "hi")], "reply")).toBeNull()
     expect(resolveJumpTarget([], "prompt")).toBeNull()
   })
+
+  test("a tool call lands on the tool group it was swept into", () => {
+    const withIds = [promptRow("m1", "hi"), {
+      ...toolGroupRow(["t1", "t2"]),
+      messages: [
+        { id: "t1", timestamp: new Date(0).toISOString(), kind: "tool", toolName: "Bash", toolId: "call-1" },
+        { id: "t2", timestamp: new Date(0).toISOString(), kind: "tool", toolName: "Agent", toolId: "call-2" },
+      ],
+    } as unknown as ResolvedTranscriptRow]
+    expect(resolveJumpTarget(withIds, { toolId: "call-2" })).toEqual({ kind: "pin", rowId: withIds[1]!.id })
+    expect(resolveJumpTarget(withIds, { toolId: "missing" })).toBeNull()
+  })
 })
 
 describe("getRowAnchorMessageId", () => {

@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react"
 import { isNightlyVersion } from "../../../shared/types"
-import { SegmentedControl } from "../../components/ui/segmented-control"
-import { SettingsHeaderButton } from "../../components/ui/settings-header-button"
+import { Switch } from "../../components/ui/switch"
 import type { KannaState } from "../useKannaState"
 import { SETTINGS_ROWS } from "./registry"
-import { ENABLED_DISABLED_OPTIONS, SettingsErrorBanner, SettingsRow } from "./shared"
+import { SettingsActionButton, SettingsErrorBanner, SettingsGroup, SettingsRow } from "./shared"
 
 export function LabsSection({
   state,
@@ -24,26 +23,26 @@ export function LabsSection({
   const { appSettings, handleWriteAppSettings, updateSnapshot } = state
   const [error, setError] = useState<string | null>(null)
 
-  async function handleRecentChatsChange(nextValue: "enabled" | "disabled") {
+  async function handleRecentChatsChange(enabled: boolean) {
     try {
       setError(null)
-      await handleWriteAppSettings({ newSidebarEnabled: nextValue === "enabled" })
+      await handleWriteAppSettings({ newSidebarEnabled: enabled })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to save Labs settings.")
     }
   }
 
-  async function handleWebglRendererChange(nextValue: "enabled" | "disabled") {
+  async function handleWebglRendererChange(enabled: boolean) {
     try {
       setError(null)
-      await handleWriteAppSettings({ terminal: { webglRenderer: nextValue === "enabled" } })
+      await handleWriteAppSettings({ terminal: { webglRenderer: enabled } })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to save Labs settings.")
     }
   }
 
-  const recentChatsValue = appSettings?.newSidebarEnabled === false ? "disabled" : "enabled"
-  const webglRendererValue = appSettings?.terminal.webglRenderer === true ? "enabled" : "disabled"
+  const newSidebarEnabled = appSettings?.newSidebarEnabled !== false
+  const webglRendererEnabled = appSettings?.terminal.webglRenderer === true
 
   const currentVersionLabel = updateSnapshot?.currentVersion ?? appVersion
   const isUpdating = updateSnapshot?.status === "updating" || updateSnapshot?.status === "restart_pending"
@@ -69,11 +68,11 @@ export function LabsSection({
   return (
     <>
       {error ? <SettingsErrorBanner message={error} /> : null}
-      <div className="border-b border-border">
+      <SettingsGroup>
         <SettingsRow
           def={SETTINGS_ROWS.nightlyBuilds}
-          bordered={false}
-          title={onNightly ? `Nightly build ${currentVersionLabel}` : undefined}
+          wideControl
+          title={onNightly ? `Nightly Build ${currentVersionLabel}` : undefined}
           description={
             onNightly
               ? (
@@ -91,60 +90,56 @@ export function LabsSection({
               : undefined
           }
         >
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-4 @2xl:justify-end">
             {onNightly && nightly?.status !== "available" ? (
-              <SettingsHeaderButton
+              <SettingsActionButton
                 onClick={() => { void checkForUpdates({ force: true }) }}
                 disabled={isUpdating || nightly?.status === "checking"}
               >
                 Check again
-              </SettingsHeaderButton>
+              </SettingsActionButton>
             ) : null}
             {onNightly ? (
-              <SettingsHeaderButton
-                variant="outline"
+              <SettingsActionButton
                 onClick={() => {
                   void state.handleInstallStable()
                 }}
                 disabled={isUpdating}
               >
                 Back to stable
-              </SettingsHeaderButton>
+              </SettingsActionButton>
             ) : null}
             {!onNightly || nightly?.status !== "up_to_date" ? (
-              <SettingsHeaderButton
-                variant="outline"
+              <SettingsActionButton
                 onClick={() => {
                   void state.handleInstallNightly()
                 }}
                 disabled={isUpdating}
               >
-                {isUpdating ? "Updating…" : "Build Latest"}
-              </SettingsHeaderButton>
+                {isUpdating ? "Updating…" : "Build latest"}
+              </SettingsActionButton>
             ) : null}
           </div>
         </SettingsRow>
         <SettingsRow def={SETTINGS_ROWS.recentChatsInSidebar}>
-          <SegmentedControl
-            value={recentChatsValue}
-            onValueChange={(value) => {
-              void handleRecentChatsChange(value)
+          <Switch
+            checked={newSidebarEnabled}
+            onCheckedChange={(checked) => {
+              void handleRecentChatsChange(checked)
             }}
-            options={ENABLED_DISABLED_OPTIONS}
-            size="sm"
+            aria-label={SETTINGS_ROWS.recentChatsInSidebar.title}
           />
         </SettingsRow>
         <SettingsRow def={SETTINGS_ROWS.terminalWebglRenderer}>
-          <SegmentedControl
-            value={webglRendererValue}
-            onValueChange={(value) => {
-              void handleWebglRendererChange(value)
+          <Switch
+            checked={webglRendererEnabled}
+            onCheckedChange={(checked) => {
+              void handleWebglRendererChange(checked)
             }}
-            options={ENABLED_DISABLED_OPTIONS}
-            size="sm"
+            aria-label={SETTINGS_ROWS.terminalWebglRenderer.title}
           />
         </SettingsRow>
-      </div>
+      </SettingsGroup>
     </>
   )
 }
