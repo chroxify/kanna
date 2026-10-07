@@ -90,6 +90,27 @@ const TIMESTAMP_AGE_STYLE: RelativeAgeStyle = {
   ],
 }
 
+const COMPACT_AGE_STYLE: RelativeAgeStyle = {
+  nowLabel: "now",
+  suffix: "",
+  round: Math.floor,
+  units: [
+    { ms: MINUTE_MS, label: "m" },
+    { ms: HOUR_MS, label: "h" },
+    { ms: DAY_MS, label: "d" },
+    { ms: WEEK_MS, label: "w" },
+    { ms: MONTH_MS, label: "mo" },
+    { ms: YEAR_MS, label: "y" },
+  ],
+}
+
+/** "3h", "2d", "4mo": an age for tight spaces, where "3hr ago" won't fit. */
+export function formatCompactAge(isoTimestamp: string): string {
+  const timestamp = Date.parse(isoTimestamp)
+  if (!Number.isFinite(timestamp)) return ""
+  return formatRelativeAge(Math.max(0, Date.now() - timestamp), COMPACT_AGE_STYLE)
+}
+
 export function formatSidebarAgeLabel(lastMessageAt: number | undefined, nowMs: number): string | null {
   if (lastMessageAt === undefined) return null
   return formatRelativeAge(Math.max(0, nowMs - lastMessageAt), SIDEBAR_AGE_STYLE)

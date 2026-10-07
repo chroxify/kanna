@@ -37,6 +37,7 @@ const CONTENT_TYPES_BY_EXTENSION: Record<string, string> = {
 }
 
 export interface WriteStandaloneTranscriptExportArgs {
+  sourceOrigin?: string
   chatId: string
   title: string
   localPath: string
@@ -119,7 +120,17 @@ export async function writeStandaloneTranscriptExport(
     resolveMediaPath: args.resolveMediaPath ?? (() => null),
   })
 
+  // Keep only the HTTP origin, never credentials, paths, or query parameters.
+  let sourceOrigin: string | undefined
+  try {
+    const url = new URL(args.sourceOrigin ?? "")
+    if (url.protocol === "http:" || url.protocol === "https:") sourceOrigin = url.origin
+  } catch {
+    // Older clients do not send an origin. Relative chat links still work.
+  }
+
   const bundle: StandaloneTranscriptBundle = {
+    sourceOrigin,
     version: STANDALONE_TRANSCRIPT_BUNDLE_VERSION,
     chatId: args.chatId,
     title: args.title,
@@ -198,7 +209,7 @@ async function prepareStandaloneMessages(
     // a request against a server that is not there.
     if (message.kind === "tool_result" && Array.isArray(message.content)) {
       for (const block of message.content as Array<{ type?: unknown; url?: unknown }>) {
-        if (!block || typeof block !== "object" || (block.type !== "image" && block.type !== "attachment") || typeof block.url !== "string" || !block.url) {
+        if (!block || typeof block !== "object" || (block.type !== "image" && block.type !== "attachment" && block.type !== "visualization") || typeof block.url !== "string" || !block.url) {
           continue
         }
         if (/^https?:\/\//.test(block.url)) continue

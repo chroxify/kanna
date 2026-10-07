@@ -1,6 +1,7 @@
 import type {
   ChatCommitChecks,
   ChatDiffSnapshot,
+  ChatRuntime,
   ChatSnapshot,
   ProviderCatalogEntry,
   QueuedChatMessage,
@@ -25,6 +26,38 @@ function sameRuntime(left: ChatSnapshot["runtime"] | null | undefined, right: Ch
     && left.planMode === right.planMode
     && left.autoPlan === right.autoPlan
     && left.sessionToken === right.sessionToken
+    && sameSubagents(left.subagents, right.subagents)
+}
+
+// Subagent activity changes on its own, without a transcript entry: a hook
+// fires and the server pushes a snapshot whose only difference is this list.
+// Leaving it out of the runtime check made that push look like a no-op, so
+// the pill appeared (and cleared) only on the next full snapshot.
+function sameSubagents(left: ChatRuntime["subagents"], right: ChatRuntime["subagents"]) {
+  if (left === right) return true
+  const leftList = left ?? []
+  const rightList = right ?? []
+  if (leftList.length !== rightList.length) return false
+  return leftList.every((agent, index) => {
+    const other = rightList[index]
+    return other !== undefined
+      && agent.id === other.id
+      && agent.status === other.status
+      && agent.label === other.label
+      && agent.type === other.type
+      && agent.startedAt === other.startedAt
+      && agent.endedAt === other.endedAt
+      && agent.toolUseId === other.toolUseId
+      && agent.description === other.description
+      && agent.summary === other.summary
+      && agent.workflowId === other.workflowId
+      && agent.stoppable === other.stoppable
+      && agent.usage?.totalTokens === other.usage?.totalTokens
+      && agent.usage?.toolUses === other.usage?.toolUses
+      // A workflow's progress is most of what changes while one runs, and a
+      // few KB at most: whole, rather than a field list that could miss one.
+      && (agent.workflow === other.workflow || JSON.stringify(agent.workflow) === JSON.stringify(other.workflow))
+  })
 }
 
 function sameTranscriptEntries(left: ChatSnapshot["messages"] | null | undefined, right: ChatSnapshot["messages"] | null | undefined) {
@@ -88,6 +121,14 @@ export function sameDiffs(left: ChatDiffSnapshot | null | undefined, right: Chat
   if (left.aheadCount !== right.aheadCount) return false
   if (left.behindCount !== right.behindCount) return false
   if (left.lastFetchedAt !== right.lastFetchedAt) return false
+  const leftPr = left.branchPullRequest
+  const rightPr = right.branchPullRequest
+  if (leftPr !== rightPr && (!leftPr || !rightPr
+    || leftPr.number !== rightPr.number
+    || leftPr.title !== rightPr.title
+    || leftPr.url !== rightPr.url
+    || leftPr.isDraft !== rightPr.isDraft
+    || leftPr.updatedAt !== rightPr.updatedAt)) return false
   const leftHistory = left.branchHistory?.entries ?? []
   const rightHistory = right.branchHistory?.entries ?? []
   if (leftHistory.length !== rightHistory.length) return false

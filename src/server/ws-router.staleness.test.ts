@@ -277,6 +277,8 @@ function createWorld(options?: { projectPath?: string }) {
     discardFile: async () => ({ snapshotChanged: false }),
     ignoreFile: async () => ({ snapshotChanged: false }),
     readPatch: async () => ({ patch: "" }),
+    readCommit: async () => ({ sha: "", parentCount: 1, files: [], totalFileCount: 0, additions: 0, deletions: 0 }),
+    readBranch: async () => ({}),
   }
 
   const agent = {

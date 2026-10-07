@@ -1,7 +1,19 @@
-import { query, type CanUseTool, type PermissionResult, type Query, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk"
+import {
+  query,
+  type BackgroundTaskSummary,
+  type CanUseTool,
+  type HookCallback,
+  type HookCallbackMatcher,
+  type HookEvent,
+  type PermissionResult,
+  type Query,
+  type SDKUserMessage,
+  type SlashCommand,
+} from "@anthropic-ai/claude-agent-sdk"
 import { homedir } from "node:os"
 import type {
   AgentProvider,
+  AskUserQuestionItem,
   ChatAttachment,
   ChatSkillsSnapshot,
   CodexReasoningEffort,
@@ -12,12 +24,16 @@ import type {
   PendingToolSnapshot,
   KannaStatus,
   QueuedChatMessage,
+  SubagentActivity,
+  MessageSource,
   TranscriptEntry,
 } from "../shared/types"
 import { normalizeToolCall } from "../shared/tools"
 import type { ClientCommand } from "../shared/protocol"
 import { AsyncQueue } from "./async-queue"
+import { resolveClaudeExecutable } from "./claude-executable"
 import { KannaToolRuntime, KannaToolEventFilter, type KannaToolHost } from "./kanna-tools"
+import type { ChatOrchestrator } from "./orchestrator"
 import { createClaudeKannaTools } from "./kanna-tool-adapters"
 import { EventStore } from "./event-store"
 import { STRUCTURED_RESULT_TOOL_KINDS } from "./events"
@@ -25,6 +41,7 @@ import type { AnalyticsReporter } from "./analytics"
 import { NoopAnalyticsReporter } from "./analytics"
 import { CodexAppServerManager } from "./codex-app-server"
 import { CursorCliManager } from "./cursor-cli"
+import { fetchGrokAccountUsage, GrokCliManager } from "./grok-cli"
 import { PiAgentManager, resolvePiConnection } from "./pi-agent"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import type { ClaudeRateLimitInfoRaw, ClaudeUsageRaw } from "./usage-limits"
@@ -32,28 +49,31 @@ import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-ty
 import {
   appendSystemMessageBlock,
   buildSkillSystemMessage,
-  findSkillByName,
-  parseSkillInvocation,
+  findSkillMentions,
+  resolveSkillMentions,
   scanClaudeSkills,
   scanCodexSkills,
   scanCursorSkills,
+  scanGrokSkills,
+  type SkillReference,
 } from "./harness-skills"
 import {
   buildKannaAgentCorrection,
   buildKannaAgentId,
-  buildKannaAttributionInstructions,
-  buildKannaAttributionSystemMessage,
 } from "./attribution"
+import { buildKannaSystemInstructions, buildKannaSystemMessage } from "./harness-instructions"
 import {
   applyClaudeSdkModels,
   applyCodexModels,
   applyCursorModels,
+  applyGrokModels,
   type ClaudeSdkModelInfo,
   cursorModelIdForOptions,
   getServerProviderCatalog,
   normalizeClaudeModelOptions,
   normalizeCodexModelOptions,
   normalizeCursorModelOptions,
+  normalizeGrokModelOptions,
   normalizePiModelOptions,
   normalizeServerModel,
   serviceTierFromModelOptions,
@@ -64,6 +84,18 @@ import { asNumber, asRecord } from "../shared/json"
 import { buildHandoffContext, buildHandoffMessageContent, type HandoffContext } from "./handoff"
 import { checkSessionArtifact, type SessionArtifactStatus } from "./session-artifacts"
 import { timestamped } from "./transcript"
+import {
+  findWorkflowOf,
+  finishActivity,
+  isDelegatedTask,
+  linkWorkflowAgents,
+  normalizeClaudeTaskMessage,
+  pruneTaskLog,
+  type SubagentActivityUpdate,
+  type TaskStart,
+} from "./background-tasks"
+
+export type { SubagentActivityUpdate } from "./background-tasks"
 
 /**
  * Tools every Claude session gets. `EnterPlanMode` is deliberately absent — it
@@ -160,6 +192,8 @@ interface ActiveTurn {
   hasFinalResult: boolean
   cancelRequested: boolean
   cancelRecorded: boolean
+  /** The user approved this turn's plan, so it is no longer read-only whatever `planMode` says. */
+  planExited?: boolean
 }
 
 interface ClaudeSessionHandle {
@@ -168,8 +202,13 @@ interface ClaudeSessionHandle {
   getAccountInfo?: () => Promise<any>
   getUsage?: () => Promise<ClaudeUsageRaw | null>
   interrupt: () => Promise<void>
+  /** Stops one background task; the CLI then reports it ended as `stopped`. */
+  stopTask?: (taskId: string) => Promise<void>
   close: () => void
-  sendPrompt: (content: string) => Promise<void>
+  /** `promptId` rides on the message and comes back on the result that answers it. */
+  sendPrompt: (content: string, promptId?: string) => Promise<void>
+  /** Whether results are known to echo prompt ids before any has arrived. */
+  echoesPromptIds?: boolean
   setModel: (model: string) => Promise<void>
   setPermissionMode: (planMode: boolean) => Promise<void>
   setFastMode?: (fastMode: boolean) => Promise<void>
@@ -197,7 +236,10 @@ interface ClaudeSessionState {
   sessionToken: string | null
   accountInfoLoaded: boolean
   nextPromptSeq: number
-  pendingPromptSeqs: number[]
+  /** Prompts sent and not yet answered, oldest first. */
+  pendingPrompts: Array<{ seq: number; id: string }>
+  /** Results carry the ids of the prompts they answer (see takeAnsweredClaudePrompts). */
+  echoesPromptIds: boolean
   /**
    * Set while a cancel is settling so in-flight stream entries (emitted
    * between cancel() and the interrupt landing) don't re-register an
@@ -222,6 +264,7 @@ interface AgentCoordinatorArgs {
   analytics?: AnalyticsReporter
   codexManager?: CodexAppServerManager
   cursorManager?: CursorCliManager
+  grokManager?: GrokCliManager
   piManager?: PiAgentManager
   resolvePiConnection?: () => Promise<import("./pi-agent").PiConnection | null>
   generateTitle?: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
@@ -237,6 +280,7 @@ interface AgentCoordinatorArgs {
     customTools?: KannaToolHost
     onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
     onRateLimitEvent?: (info: ClaudeRateLimitInfoRaw) => void
+    onSubagentActivity?: (update: SubagentActivityUpdate) => void
   }) => Promise<ClaudeSessionHandle>
   /**
    * Probe whether a provider's native session artifact still exists on disk.
@@ -249,6 +293,14 @@ interface AgentCoordinatorArgs {
   ) => SessionArtifactStatus
 }
 
+
+/**
+ * Whether a provider's subagents are known only from its transcript. See
+ * `AgentCoordinator.trackSubagentFromEntry`.
+ */
+function tracksSubagentsFromTranscript(provider: AgentProvider) {
+  return provider !== "claude" && provider !== "codex"
+}
 
 function isClaudeSteerLoggingEnabled() {
   return process.env.KANNA_LOG_CLAUDE_STEER === "1"
@@ -277,6 +329,22 @@ export const RESUME_AFTER_RESTART_MESSAGE = `<system-message>
 Kanna restarted while you were working on this, so your process was stopped mid-task and is now back up. Continue the task you were on from where it left off.
 Whatever you were doing last may not have completed — re-check the state of any file you were editing and any command you had running before assuming it finished.
 </system-message>`
+
+interface StartTurnArgs {
+  chatId: string
+  provider: AgentProvider
+  content: string
+  attachments: ChatAttachment[]
+  model: string
+  effort?: string
+  serviceTier?: "fast"
+  planMode: boolean
+  autoPlan: boolean
+  appendUserPrompt: boolean
+  steered?: boolean
+  /** Who sent the prompt, when not the user. Stamped on the transcript entry. */
+  source?: MessageSource
+}
 
 interface SendMessageOptions {
   provider?: AgentProvider
@@ -368,6 +436,21 @@ export function buildPromptText(content: string, attachments: ChatAttachment[]) 
     trimmed || "Please inspect the attached files.",
     attachmentHint,
   ].join("\n\n").trim()
+}
+
+/**
+ * The user's answers to an AskUserQuestion, as the prompt of a follow-up
+ * turn for harnesses that cannot take the answer mid-turn. Answers are keyed
+ * by question id when the question has one, else by its text.
+ */
+export function formatQuestionAnswersFollowUp(questions: AskUserQuestionItem[], result: unknown) {
+  const answers = asRecord(asRecord(result)?.answers) ?? {}
+  const lines = questions.map((question) => {
+    const raw = (question.id ? answers[question.id] : undefined) ?? answers[question.question]
+    const picked = (Array.isArray(raw) ? raw : raw == null ? [] : [raw]).map(String).filter(Boolean)
+    return `- ${question.question}\n  ${picked.length > 0 ? picked.join(", ") : "(no answer)"}`
+  })
+  return `Here are my answers to your questions:\n\n${lines.join("\n")}`
 }
 
 function discardedToolResult(
@@ -608,11 +691,23 @@ function normalizeClaudeStreamMessageEntries(
   return []
 }
 
+function claudeResultPromptIds(message: any): string[] | undefined {
+  if (Array.isArray(message.user_message_uuids)) {
+    const ids = message.user_message_uuids.filter((id: unknown): id is string => typeof id === "string")
+    if (ids.length > 0) return ids
+  }
+  return typeof message.user_message_uuid === "string" && message.user_message_uuid
+    ? [message.user_message_uuid]
+    : undefined
+}
+
 async function* createClaudeHarnessStream(
   q: Query,
   hooks?: {
     onCommandsChanged?: (commands: SlashCommand[]) => void
     onRateLimitEvent?: (info: ClaudeRateLimitInfoRaw) => void
+    /** A background task started, reported progress, or ended. */
+    onTaskActivity?: (update: SubagentActivityUpdate) => void
   }
 ): AsyncGenerator<HarnessEvent> {
   let seenAssistantUsageIds = new Set<string>()
@@ -638,6 +733,14 @@ async function* createClaudeHarnessStream(
     // Subscription rate-limit utilization pushed on turns (claude.ai plans).
     if (sdkMessage?.type === "rate_limit_event" && sdkMessage.rate_limit_info) {
       hooks?.onRateLimitEvent?.(sdkMessage.rate_limit_info as ClaudeRateLimitInfoRaw)
+    }
+
+    // Task reports are live state, not conversation: they go to the chat's
+    // task registry and never into the transcript. A workflow reports every
+    // few seconds for as long as it runs.
+    if (hooks?.onTaskActivity) {
+      const task = normalizeClaudeTaskMessage(sdkMessage)
+      if (task) hooks.onTaskActivity(task)
     }
 
     // Per-step usage lives on the nested API message (`sdkMessage.message.usage`);
@@ -724,15 +827,60 @@ async function* createClaudeHarnessStream(
       latestUsageSnapshot = null
     }
 
+    const promptIds = sdkMessage?.type === "result" ? claudeResultPromptIds(sdkMessage) : undefined
     for (const entry of normalizeClaudeStreamMessage(sdkMessage, { structuredToolIds })) {
       if (entry.kind === "tool_call" && STRUCTURED_RESULT_TOOL_KINDS.has(entry.tool.toolKind)) {
         structuredToolIds.add(entry.tool.toolId)
       }
-      yield { type: "transcript", entry }
+      yield promptIds ? { type: "transcript", entry, promptIds } : { type: "transcript", entry }
     }
   }
 }
 
+/**
+ * SDK hooks that back up the task stream (see background-tasks.ts).
+ *
+ * The stream announces every task as it starts and ends. The hooks are the
+ * safety net for an end that never lands. `SubagentStop` closes a Task
+ * subagent. `Stop` fires when the main agent stops and carries
+ * `background_tasks`, the work still registered on the session. That is the
+ * sweep: whatever it doesn't name has ended, however it ended.
+ *
+ * There is no `SubagentStart`: `task_started` announces the same agent under
+ * the same id, with its tool call. The hook also fires for every agent a
+ * workflow runs, which belong on the workflow's card, not as rows of their own.
+ *
+ * Every hook returns `{}`: these observe, they never block or steer the model.
+ */
+function subagentHooks(
+  onActivity: (update: SubagentActivityUpdate) => void
+): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  const one = (hook: HookCallback): HookCallbackMatcher[] => [{ hooks: [hook] }]
+
+  const sweep = (input: { background_tasks?: BackgroundTaskSummary[] }) => {
+    onActivity({
+      kind: "inFlight",
+      ids: (input.background_tasks ?? []).map((task) => ({
+        id: task.id,
+        type: task.type,
+        label: task.agent_type || task.name || task.command || task.description || task.type,
+      })),
+    })
+  }
+
+  return {
+    SubagentStop: one(async (input) => {
+      if (input.hook_event_name !== "SubagentStop") return {}
+      onActivity({ kind: "stopped", id: input.agent_id, failed: false })
+      return {}
+    }),
+    Stop: one(async (input) => {
+      if (input.hook_event_name !== "Stop") return {}
+      sweep(input)
+      return {}
+    }),
+  }
+}
 
 async function startClaudeSession(args: {
   localPath: string
@@ -746,6 +894,12 @@ async function startClaudeSession(args: {
   customTools?: KannaToolHost
   onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
   onRateLimitEvent?: (info: ClaudeRateLimitInfoRaw) => void
+  /**
+   * Delegated work starting, progressing, finishing, or — on Stop — the
+   * authoritative list of what is still in flight. Driven by the task stream
+   * (background-tasks.ts) and SDK hooks (`subagentHooks`).
+   */
+  onSubagentActivity?: (update: SubagentActivityUpdate) => void
 }): Promise<ClaudeSessionHandle> {
   const canUseTool: CanUseTool = async (toolName, input, options) => {
     if (toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode") {
@@ -802,6 +956,9 @@ async function startClaudeSession(args: {
     } satisfies PermissionResult
   }
 
+  // The user's own `claude`, never the SDK's pinned copy (claude-executable.ts).
+  const claudeExecutable = await resolveClaudeExecutable()
+  if (!claudeExecutable.ok) throw new Error(claudeExecutable.message)
   const promptQueue = new AsyncQueue<SDKUserMessage>()
   let promptQueueClosed = false
 
@@ -819,25 +976,26 @@ async function startClaudeSession(args: {
         mcpServers: { kanna: createClaudeKannaTools(args.customTools) },
       } : {}),
       tools: claudeToolset(args.autoPlan),
+      ...(args.onSubagentActivity ? { hooks: subagentHooks(args.onSubagentActivity) } : {}),
       // By default the SDK forwards only a subagent's tool calls. Its text
       // (what it is doing, and its final report) completes the nested view
       // under the Agent row; the normalizer stamps it with parent_tool_use_id
       // like the rest.
       forwardSubagentText: true,
       settingSources: ["user", "project", "local"],
-      // Append-only: the claude_code preset stays intact, Kanna's git
-      // attribution rides on the end of it (see attribution.ts).
+      // Append-only: the claude_code preset stays intact, Kanna's session
+      // instructions ride on the end of it (see harness-instructions.ts).
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: buildKannaAttributionInstructions(buildKannaAgentId("claude", args.model)),
+        append: buildKannaSystemInstructions(buildKannaAgentId("claude", args.model)),
       },
       // fastMode must go through the flag-settings layer: the CLI only allows
       // fast mode in Agent SDK sessions when flagSettings.fastMode is true,
       // and an explicit false keeps a user-level settings.json from silently
       // enabling it while the UI shows "Standard".
       settings: { enableWorkflows: true, fastMode: args.serviceTier === "fast" },
-      pathToClaudeCodeExecutable: process.env.CLAUDE_EXECUTABLE?.replace(/^~(?=\/|$)/, homedir()) || undefined,
+      pathToClaudeCodeExecutable: claudeExecutable.path,
       env: (() => { const { CLAUDECODE: _, ...env } = process.env; return env })(),
     },
   })
@@ -848,11 +1006,15 @@ async function startClaudeSession(args: {
 
   return {
     provider: "claude",
+    // A readable version passed the minimum-version gate, and every CLI from
+    // that version on echoes prompt ids. An override wrapper reports none.
+    echoesPromptIds: claudeExecutable.version !== null,
     stream: createClaudeHarnessStream(q, {
       onCommandsChanged: (commands) => {
         commandsRef.current = commands
       },
       onRateLimitEvent: args.onRateLimitEvent,
+      onTaskActivity: args.onSubagentActivity,
     }),
     getAccountInfo: async () => {
       try {
@@ -880,7 +1042,10 @@ async function startClaudeSession(args: {
     interrupt: async () => {
       await q.interrupt()
     },
-    sendPrompt: async (content: string) => {
+    stopTask: async (taskId: string) => {
+      await q.stopTask(taskId)
+    },
+    sendPrompt: async (content: string, promptId?: string) => {
       if (promptQueueClosed) {
         throw new Error("Cannot push to a closed queue")
       }
@@ -892,6 +1057,7 @@ async function startClaudeSession(args: {
         },
         parent_tool_use_id: null,
         session_id: args.sessionToken ?? "",
+        ...(promptId ? { uuid: promptId as SDKUserMessage["uuid"] } : {}),
       })
     },
     setModel: async (model: string) => {
@@ -919,6 +1085,7 @@ export class AgentCoordinator {
   private readonly analytics: AnalyticsReporter
   private readonly codexManager: CodexAppServerManager
   private readonly cursorManager: CursorCliManager
+  private readonly grokManager: GrokCliManager
   private readonly piManager: PiAgentManager
   private readonly resolvePiConnection: () => Promise<import("./pi-agent").PiConnection | null>
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
@@ -927,17 +1094,61 @@ export class AgentCoordinator {
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
   private cursorModelCatalogApplied = false
+  private grokModelCatalogApplied = false
   private codexModelCatalogRefresh: Promise<void> | null = null
   readonly activeTurns = new Map<string, ActiveTurn>()
   readonly drainingStreams = new Map<string, { turn: HarnessTurn }>()
+  /**
+   * Delegated work per chat, keyed by the provider's agent id: a log that
+   * runs across turns. Finished entries stay, so the widgets can say what ran
+   * whether its turn is going or over, until newer ones push them out
+   * (`pruneTaskLog`). In memory only: a restart starts it empty.
+   */
+  private readonly subagents = new Map<string, Map<string, SubagentActivity>>()
+  /**
+   * Tasks the CLI called housekeeping when they started, per chat. The Stop
+   * sweep lists them with everything else and can't say which they are, so
+   * without this it would surface them as work.
+   */
+  private readonly ambientTaskIds = new Map<string, Set<string>>()
+  /**
+   * Foreground shells per chat, held back from the log with the time they
+   * started, so one moved to the background gets its row from its real start.
+   * Each leaves at its end, or at the Stop sweep, when no foreground step can
+   * still be running.
+   */
+  private readonly foregroundTasks = new Map<string, Map<string, { task: TaskStart; startedAt: number }>>()
   readonly claudeSessions = new Map<string, ClaudeSessionState>()
+  /**
+   * Chats with a turn on its way: a start in progress, a queue drain, a steer
+   * between its cancel and its new turn. `activeTurns` has a gap at each of
+   * those, and a chat read as idle inside one would be reported finished.
+   */
+  private readonly startingTurns = new Map<string, number>()
+  private shuttingDown = false
+  /**
+   * Chats, schedules and the links between them. Set after construction,
+   * because the orchestrator is built on top of this coordinator.
+   */
+  orchestration: ChatOrchestrator | null = null
+  /**
+   * Fired when a chat has no turn left to run: its turn ended and nothing
+   * queued started another. Not fired for a steer or a shutdown, where the
+   * turn that ended is about to be replaced.
+   */
+  onChatSettled?: (chatId: string) => void
+  /** Fired when someone stops a chat on purpose, as against a steer or a shutdown. */
+  onChatStopped?: (chatId: string) => void
 
   constructor(args: AgentCoordinatorArgs) {
     this.store = args.store
     this.onStateChange = args.onStateChange
     this.analytics = args.analytics ?? NoopAnalyticsReporter
     this.codexManager = args.codexManager ?? new CodexAppServerManager()
+    // Optional: test stand-ins for the manager predate it.
+    this.codexManager.setTaskActivityListener?.((chatId, update) => this.applySubagentActivity(chatId, update))
     this.cursorManager = args.cursorManager ?? new CursorCliManager()
+    this.grokManager = args.grokManager ?? new GrokCliManager()
     this.piManager = args.piManager ?? new PiAgentManager()
     this.resolvePiConnection = args.resolvePiConnection ?? resolvePiConnection
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
@@ -991,6 +1202,23 @@ export class AgentCoordinator {
     return await this.codexManager.readAccountRateLimits(homedir())
   }
 
+  async fetchGrokUsage() {
+    return await fetchGrokAccountUsage()
+  }
+
+  async refreshGrokModelCatalog() {
+    if (this.grokModelCatalogApplied) return
+    try {
+      const models = await this.grokManager.listModels()
+      this.grokModelCatalogApplied = true
+      if (applyGrokModels(models)) {
+        this.emitStateChange(undefined, { immediate: true })
+      }
+    } catch {
+      // grok missing or signed out — keep the static catalog.
+    }
+  }
+
   getCodexManager() {
     return this.codexManager
   }
@@ -1022,6 +1250,36 @@ export class AgentCoordinator {
     return statuses
   }
 
+  /**
+   * What the sidebar and the chat page show: the turns in flight, plus every
+   * chat whose own turn has ended while work it handed off is still going.
+   *
+   * Read off the task log, but not every running row there counts: a chat is
+   * waiting on work it gave another agent (`hasDelegatedWork`), not on a
+   * shell or a monitor it left running, which the Tasks widget still lists.
+   */
+  getChatStatuses() {
+    const statuses = this.getActiveStatuses()
+    for (const [chatId, byId] of this.subagents) {
+      if (statuses.has(chatId)) continue
+      for (const activity of byId.values()) {
+        if (activity.status !== "running" || !isDelegatedTask(activity.type)) continue
+        statuses.set(chatId, "waiting_on_subagent")
+        break
+      }
+    }
+    // What only the coordinator knows to be going. The orchestrator adds the
+    // rest (queues, reports on their way) and finds the chats above them.
+    const unsettled = new Set([...this.activeTurns.keys(), ...this.startingTurns.keys(), ...this.drainingStreams.keys()])
+    for (const chatId of this.subagents.keys()) {
+      if (this.hasDelegatedWork(chatId)) unsettled.add(chatId)
+    }
+    for (const chatId of this.orchestration?.getChatsWaitingOnSubchats(unsettled) ?? []) {
+      if (!statuses.has(chatId)) statuses.set(chatId, "waiting_on_subagent")
+    }
+    return statuses
+  }
+
   getPendingTool(chatId: string): PendingToolSnapshot | null {
     const pending = this.activeTurns.get(chatId)?.pendingTool
     if (!pending) return null
@@ -1034,6 +1292,274 @@ export class AgentCoordinator {
 
   getDrainingChatIds(): Set<string> {
     return new Set(this.drainingStreams.keys())
+  }
+
+  /** Delegated work for a chat, oldest first. Empty when it has spawned none. */
+  getSubagents(chatId: string): SubagentActivity[] {
+    const native = [...(this.subagents.get(chatId)?.values() ?? [])]
+    // Sub-chats are derived from the store on each read rather than kept in
+    // the registry: its sweeps close anything the provider does not name, and
+    // a sub-chat outlives the turn that started it.
+    const chats = this.orchestration?.getChildActivities(chatId) ?? []
+    return [...native, ...chats].sort((a, b) => a.startedAt - b.startedAt)
+  }
+
+  /** A turn is running or about to. See `startingTurns`. */
+  isBusy(chatId: string) {
+    return this.activeTurns.has(chatId) || this.startingTurns.has(chatId)
+  }
+
+  /** A turn gave its result and its stream is still open. */
+  isDraining(chatId: string) {
+    return this.drainingStreams.has(chatId)
+  }
+
+  /**
+   * Work the chat handed to another agent of its provider's is still going: a
+   * subagent, a workflow, a Codex agent. This is what the chat is waiting on
+   * once its own turn is over (`isDelegatedTask`).
+   */
+  hasDelegatedWork(chatId: string) {
+    for (const activity of this.subagents.get(chatId)?.values() ?? []) {
+      if (activity.status === "running" && isDelegatedTask(activity.type)) return true
+    }
+    return false
+  }
+
+  /**
+   * The kinds of task still running here that the chat is not waiting on: a
+   * shell, a monitor. The other half of the task log from `hasDelegatedWork`,
+   * and for a different question. A chat with only these is at rest, but any
+   * of them can start another turn in it (a shell by ending, a monitor each
+   * time it fires), and that turn is still one its parent is owed.
+   */
+  getLeftRunning(chatId: string) {
+    const types = new Set<string>()
+    for (const activity of this.subagents.get(chatId)?.values() ?? []) {
+      if (activity.status === "running" && !isDelegatedTask(activity.type)) types.add(activity.type)
+    }
+    return [...types]
+  }
+
+  /** Whether the chat is read-only right now. */
+  isPlanning(chatId: string) {
+    const active = this.activeTurns.get(chatId)
+    if (active) return active.planMode && !active.planExited
+    return Boolean(this.store.getChat(chatId)?.planMode)
+  }
+
+  private markStarting(chatId: string) {
+    this.startingTurns.set(chatId, (this.startingTurns.get(chatId) ?? 0) + 1)
+  }
+
+  private unmarkStarting(chatId: string) {
+    const count = (this.startingTurns.get(chatId) ?? 1) - 1
+    if (count > 0) this.startingTurns.set(chatId, count)
+    else this.startingTurns.delete(chatId)
+  }
+
+  private notifySettled(chatId: string) {
+    if (this.shuttingDown || this.isBusy(chatId)) return
+    this.onChatSettled?.(chatId)
+  }
+
+  /**
+   * Fold one hook report into the registry.
+   *
+   * `inFlight` is a sweep, not an increment: anything running that the sweep
+   * does not name has ended without its stop hook landing, so it is closed
+   * here. That is what keeps a crashed or killed agent from pinning the chat
+   * in "waiting" forever.
+   */
+  applySubagentActivity(chatId: string, update: SubagentActivityUpdate, now = Date.now()) {
+    if (update.kind === "ambient") {
+      let ambient = this.ambientTaskIds.get(chatId)
+      if (!ambient) {
+        ambient = new Set()
+        this.ambientTaskIds.set(chatId, ambient)
+      }
+      ambient.add(update.id)
+      return
+    }
+    if (update.kind === "foreground") {
+      let held = this.foregroundTasks.get(chatId)
+      if (!held) {
+        held = new Map()
+        this.foregroundTasks.set(chatId, held)
+      }
+      held.set(update.task.id, { task: update.task, startedAt: now })
+      return
+    }
+    if (update.kind === "backgrounded") {
+      const held = this.foregroundTasks.get(chatId)?.get(update.id)
+      if (!held) return
+      this.foregroundTasks.get(chatId)?.delete(update.id)
+      this.applySubagentActivity(chatId, { kind: "started", ...held.task }, held.startedAt)
+      return
+    }
+    if (update.kind === "stopped") this.foregroundTasks.get(chatId)?.delete(update.id)
+    if (update.kind === "inFlight") this.foregroundTasks.delete(chatId)
+
+    let byId = this.subagents.get(chatId)
+    if (!byId) {
+      byId = new Map()
+      this.subagents.set(chatId, byId)
+    }
+
+    if (update.kind === "started") {
+      const existing = byId.get(update.id)
+      const next: SubagentActivity = {
+        id: update.id,
+        type: update.type,
+        label: update.label,
+        status: "running",
+        // The Stop sweep can list a task before its start event lands, and
+        // it started when the sweep first saw it, not now.
+        startedAt: existing?.status === "running" ? existing.startedAt : now,
+        ...(update.toolUseId ? { toolUseId: update.toolUseId } : {}),
+        ...(update.description ? { description: update.description } : {}),
+        ...(update.stoppable ? { stoppable: true } : {}),
+        ...(update.type === "workflow"
+          ? { workflow: { ...(update.workflowName ? { name: update.workflowName } : {}), phases: [], agents: [] } }
+          : {}),
+      }
+      const workflowId = findWorkflowOf(byId, update.id)
+      if (workflowId) next.workflowId = workflowId
+      byId.set(update.id, next)
+    } else if (update.kind === "progress") {
+      let existing = byId.get(update.id)
+      // A workflow already running when the session (re)attached reports
+      // progress with no start before it. Its progress says what it is.
+      if (!existing && update.workflow) {
+        existing = { id: update.id, type: "workflow", label: "Workflow", status: "running", startedAt: now, stoppable: true }
+      }
+      if (!existing || existing.status !== "running") return
+      const next: SubagentActivity = { ...existing }
+      if (update.usage) next.usage = update.usage
+      if (update.summary) next.summary = update.summary
+      if (update.workflow) {
+        next.workflow = { ...(existing.workflow?.name ? { name: existing.workflow.name } : {}), ...update.workflow }
+        linkWorkflowAgents(byId, update.id, update.workflow.agents)
+      }
+      byId.set(update.id, next)
+    } else if (update.kind === "stopped") {
+      const existing = byId.get(update.id)
+      if (!existing) return
+      const reported = {
+        ...(update.usage ? { usage: update.usage } : {}),
+        ...(update.summary ? { summary: update.summary } : {}),
+      }
+      if (existing.status !== "running") {
+        // Two reports can end one task (task_updated, then the notification
+        // with its totals), or the sweep can close it first. The outcome and
+        // time already stand; the totals are still worth having.
+        if (!update.usage && !update.summary) return
+        byId.set(update.id, { ...existing, ...reported })
+      } else {
+        const status = update.stopped ? "stopped" : update.failed ? "failed" : "completed"
+        byId.set(update.id, finishActivity({ ...existing, ...reported }, status, now))
+      }
+    } else {
+      const named = new Set(update.ids.map((task) => task.id))
+      const ambient = this.ambientTaskIds.get(chatId)
+      for (const task of update.ids) {
+        if (ambient?.has(task.id)) continue
+        const existing = byId.get(task.id)
+        // The sweep also *discovers* work whose start event never reached
+        // us, so Stop is the first we hear of it.
+        if (!existing) {
+          byId.set(task.id, { id: task.id, type: task.type, label: task.label, status: "running", startedAt: now })
+        } else if (existing.status !== "running") {
+          byId.set(task.id, { ...existing, status: "running", endedAt: undefined })
+        }
+      }
+      for (const [id, activity] of byId) {
+        if (activity.status === "running" && !named.has(id)) {
+          byId.set(id, finishActivity(activity, "completed", now))
+        }
+      }
+    }
+
+    pruneTaskLog(byId)
+    this.emitStateChange(chatId)
+    // Outside a turn there is no turn start to tell the chats above this one
+    // that it is back at work.
+    if (update.kind === "started" && !this.isBusy(chatId)) this.orchestration?.handleBackgroundWorkStarted(chatId)
+    // A chat whose turn ended with background work still going is finished
+    // only now, and no turn end is coming to say so.
+    if (update.kind === "stopped" || update.kind === "inFlight") this.notifySettled(chatId)
+  }
+
+  /**
+   * Stops one background task without cancelling the turn: the Stop in a
+   * Tasks row's menu, or on a workflow's card. The CLI answers with the
+   * task's end, reported as `stopped`, which is what updates the row.
+   */
+  async stopBackgroundTask(chatId: string, taskId: string) {
+    if (await this.orchestration?.stopChildTask(chatId, taskId)) return
+    const task = this.subagents.get(chatId)?.get(taskId)
+    if (!task || task.status !== "running") return
+    if (task.stoppable && this.store.getChat(chatId)?.provider === "codex") {
+      // Codex does not tell a turn that the agent it is waiting on was
+      // stopped: its wait runs out after two minutes and it waits again. So
+      // an agent is stopped on its own only once the chat's turn is over.
+      if (this.isBusy(chatId)) {
+        throw new Error("This chat's turn is still using this agent. Stop the chat to end both.")
+      }
+      // A Codex agent is a thread with a turn of its own to interrupt.
+      if (await this.codexManager.stopAgent?.(chatId, taskId)) return
+    }
+    const stopTask = this.claudeSessions.get(chatId)?.session.stopTask
+    if (!task.stoppable || !stopTask) {
+      throw new Error("This task can't be stopped on its own. Stop the chat to end it.")
+    }
+    await stopTask(taskId)
+  }
+
+  /**
+   * Derive delegated work from the transcript, for providers that report it
+   * nowhere else (Grok, which normalizes its spawn call to `subagent_task`).
+   * Weaker than a task stream: a subagent is "running" from its tool call
+   * until its tool result, which is all such a provider reports.
+   *
+   * Claude and Codex are deliberately excluded. Each reports its tasks itself
+   * (Claude's hooks and task stream, Codex's agent threads) under ids that are
+   * not the tool call's, so running both would list every agent twice. And a
+   * Codex `wait` or `closeAgent` is a `subagent_task` call that is no agent.
+   */
+  private trackSubagentFromEntry(chatId: string, provider: AgentProvider, entry: TranscriptEntry) {
+    if (!tracksSubagentsFromTranscript(provider)) return
+    if (entry.kind === "tool_call" && entry.tool.toolKind === "subagent_task") {
+      const input = entry.tool.input as { subagentType?: unknown; description?: unknown }
+      const label = typeof input.subagentType === "string" && input.subagentType
+        ? input.subagentType
+        : typeof input.description === "string" && input.description
+          ? input.description
+          : "Agent"
+      this.applySubagentActivity(chatId, { kind: "started", id: entry.tool.toolId, type: "subagent", label })
+      return
+    }
+    if (entry.kind === "tool_result" && this.subagents.get(chatId)?.has(entry.toolId)) {
+      this.applySubagentActivity(chatId, { kind: "stopped", id: entry.toolId, failed: Boolean(entry.isError) })
+    }
+  }
+
+  /**
+   * Close everything still marked running, as failed: it was cut off, not
+   * finished. For when the turn ends without the Stop hook's sweep — an
+   * interrupt, or a Claude session that died — which would otherwise leave
+   * the chat showing agents running forever.
+   */
+  private closeRunningSubagents(chatId: string, now = Date.now()) {
+    const byId = this.subagents.get(chatId)
+    if (!byId) return
+    let changed = false
+    for (const [id, activity] of byId) {
+      if (activity.status !== "running") continue
+      byId.set(id, finishActivity(activity, "failed", now))
+      changed = true
+    }
+    if (changed) this.emitStateChange(chatId)
   }
 
   private emitStateChange(chatId?: string, options?: { immediate?: boolean }) {
@@ -1157,6 +1683,17 @@ export class AgentCoordinator {
       }
     }
 
+    if (provider === "grok") {
+      const modelOptions = normalizeGrokModelOptions(options.modelOptions, options.effort)
+      return {
+        model: normalizeServerModel(provider, options.model),
+        effort: modelOptions.reasoningEffort,
+        serviceTier: undefined,
+        planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
+        autoPlan: false,
+      }
+    }
+
     if (provider === "pi") {
       const modelOptions = normalizePiModelOptions(options.modelOptions, options.effort)
       return {
@@ -1179,15 +1716,22 @@ export class AgentCoordinator {
     }
   }
 
-  private async enqueueMessage(chatId: string, content: string, attachments: ChatAttachment[], options?: SendMessageOptions) {
+  private async enqueueMessage(
+    chatId: string,
+    content: string,
+    attachments: ChatAttachment[],
+    options?: SendMessageOptions & { source?: MessageSource },
+  ) {
     const queued = await this.store.enqueueMessage(chatId, {
       content,
       attachments,
       provider: options?.provider,
       model: options?.model,
       modelOptions: options?.modelOptions,
+      effort: options?.effort,
       planMode: options?.planMode,
       autoPlan: options?.autoPlan,
+      source: options?.source,
     })
     this.emitStateChange(chatId)
     return queued
@@ -1210,16 +1754,24 @@ export class AgentCoordinator {
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
       steered: options?.steered,
+      source: queuedMessage.source,
     })
   }
 
   private async maybeStartNextQueuedMessage(chatId: string) {
-    if (this.activeTurns.has(chatId)) return false
+    if (this.isBusy(chatId)) return false
     const nextQueuedMessage = typeof this.store.getQueuedMessages === "function"
       ? this.store.getQueuedMessages(chatId)[0]
       : undefined
     if (!nextQueuedMessage) return false
-    await this.dequeueAndStartQueuedMessage(chatId, nextQueuedMessage)
+    // Marked before the first await: two callers that both saw the chat idle
+    // would otherwise both take the head of the queue.
+    this.markStarting(chatId)
+    try {
+      await this.dequeueAndStartQueuedMessage(chatId, nextQueuedMessage)
+    } finally {
+      this.unmarkStarting(chatId)
+    }
     return true
   }
 
@@ -1316,6 +1868,11 @@ export class AgentCoordinator {
       }
       case "cursor":
         return this.checkSessionArtifactFn("cursor", { cwd: args.cwd, sessionToken: args.sessionToken }) === "missing"
+      case "grok":
+        return this.checkSessionArtifactFn("grok", {
+          cwd: args.cwd,
+          sessionToken: args.pendingForkSessionToken ?? args.sessionToken,
+        }) === "missing"
       case "codex": {
         // No token → nothing to resume; a fork in progress must not be disturbed.
         if (!args.sessionToken || args.pendingForkSessionToken) return false
@@ -1369,19 +1926,16 @@ export class AgentCoordinator {
     return restore
   }
 
-  private async startTurnForChat(args: {
-    chatId: string
-    provider: AgentProvider
-    content: string
-    attachments: ChatAttachment[]
-    model: string
-    effort?: string
-    serviceTier?: "fast"
-    planMode: boolean
-    autoPlan: boolean
-    appendUserPrompt: boolean
-    steered?: boolean
-  }) {
+  private async startTurnForChat(args: StartTurnArgs) {
+    this.markStarting(args.chatId)
+    try {
+      await this.startTurn(args)
+    } finally {
+      this.unmarkStarting(args.chatId)
+    }
+  }
+
+  private async startTurn(args: StartTurnArgs) {
 
     // Close any lingering draining stream before starting a new turn.
     const draining = this.drainingStreams.get(args.chatId)
@@ -1456,7 +2010,13 @@ export class AgentCoordinator {
 
     if (args.appendUserPrompt) {
       const userPromptEntry = timestamped(
-        { kind: "user_prompt", content: args.content, attachments: args.attachments, steered: args.steered },
+        {
+          kind: "user_prompt",
+          content: args.content,
+          attachments: args.attachments,
+          steered: args.steered,
+          ...(args.source ? { source: args.source } : {}),
+        },
         Date.now()
       )
       await this.store.appendMessage(args.chatId, userPromptEntry)
@@ -1486,6 +2046,7 @@ export class AgentCoordinator {
             this.emitStateChange(args.chatId)
           },
           requestInput: (request, callSignal) => this.requestToolInput(args.chatId, request, callSignal),
+          orchestration: this.orchestration ?? undefined,
         })
         return active.customTools.execute(name, input, signal)
       },
@@ -1505,12 +2066,29 @@ export class AgentCoordinator {
     //
     // Handoff: after a harness switch, the rendered transcript context leads
     // the first prompt sent to the new harness (see handoff.ts).
+    //
+    // Skills: every "/name" in the prompt, translated per provider:
+    //   claude/grok/pi — a leading "/name" passes through (they expand it);
+    //                    the rest get the <system-message> failsafe.
+    //   codex          — structured skill input item each + failsafe (added
+    //                    by the codex manager, after attachments).
+    //   cursor         — <system-message> failsafe only (no headless expansion).
+    const skills = await this.resolvePromptSkills(args.provider, args.chatId, args.content)
     let wireContent = args.steered ? buildSteeredMessageContent(args.content) : args.content
+    if (args.provider !== "codex" && skills.length > 0) {
+      wireContent = appendSystemMessageBlock(wireContent, buildSkillSystemMessage(skills))
+    }
     const concurrentAgentsNotice = buildConcurrentAgentsNotice(
       this.collectConcurrentProjectChats(args.chatId, project.localPath)
     )
     if (concurrentAgentsNotice) {
       wireContent = appendSystemMessageBlock(wireContent, concurrentAgentsNotice)
+    }
+    // Orchestration: who sent this prompt when it was not the user, and which
+    // sub-chats of this one are still running. The second matters most after a
+    // steer, which ends the turn that was tracking them.
+    for (const notice of this.orchestration?.buildTurnNotices(args.chatId, args.source) ?? []) {
+      wireContent = appendSystemMessageBlock(wireContent, notice)
     }
 
     // Harness switch or session restore: lead with the rebuilt transcript so
@@ -1520,14 +2098,6 @@ export class AgentCoordinator {
     if (contextBlock) {
       wireContent = buildHandoffMessageContent(contextBlock.text, wireContent)
     }
-
-    // "/name" skill invocation, translated per provider:
-    //   claude/pi — passthrough; both harnesses expand a leading "/name".
-    //   codex     — structured skill input item + <system-message> failsafe.
-    //   cursor    — <system-message> failsafe only (no headless expansion).
-    const skillInvocation = (args.provider === "codex" || args.provider === "cursor")
-      ? parseSkillInvocation(args.content)
-      : null
 
     let turn: HarnessTurn
     if (args.provider === "claude") {
@@ -1549,17 +2119,11 @@ export class AgentCoordinator {
       // fetch never succeeded (e.g. the user just logged in to cursor-agent).
       void this.refreshCursorModelCatalog()
       let cursorContent = buildPromptText(wireContent, args.attachments)
-      if (skillInvocation) {
-        const match = findSkillByName(scanCursorSkills({ cwd: project.localPath }), skillInvocation.name)
-        if (match?.path) {
-          cursorContent = appendSystemMessageBlock(cursorContent, buildSkillSystemMessage(match.path))
-        }
-      }
       // Cursor builds its system prompt server-side and exposes no append hook,
-      // so its share of the git attribution rides the user-text path instead.
+      // so Kanna's session instructions ride the user-text path instead.
       cursorContent = appendSystemMessageBlock(
         cursorContent,
-        buildKannaAttributionSystemMessage(buildKannaAgentId("cursor", args.model))
+        buildKannaSystemMessage(buildKannaAgentId("cursor", args.model))
       )
       // Cursor cannot fork (see canForkChat), so a turn always resumes its own session.
       turn = await this.cursorManager.startTurn({
@@ -1568,6 +2132,24 @@ export class AgentCoordinator {
         content: cursorContent,
         model: args.model,
         sessionToken: chat.sessionToken,
+      })
+    } else if (args.provider === "grok") {
+      void this.refreshGrokModelCatalog()
+      let grokContent = buildPromptText(wireContent, args.attachments)
+      grokContent = appendSystemMessageBlock(
+        grokContent,
+        // Grok is not handed the Kanna tools, so it is not told about them.
+        buildKannaSystemMessage(buildKannaAgentId("grok", args.model), { tools: false }),
+      )
+      turn = await this.grokManager.startTurn({
+        cwd: project.localPath,
+        content: grokContent,
+        model: args.model,
+        effort: args.effort,
+        planMode: args.planMode,
+        sessionToken: chat.pendingForkSessionToken ?? chat.sessionToken,
+        forkSession: Boolean(chat.pendingForkSessionToken),
+        onToolRequest,
       })
     } else if (args.provider === "pi") {
       // A missing connection or session boot failure surfaces as an error
@@ -1602,9 +2184,7 @@ export class AgentCoordinator {
       turn = await this.codexManager.startTurn({
         chatId: args.chatId,
         content: buildPromptText(wireContent, args.attachments),
-        skill: skillInvocation
-          ? await this.resolveCodexSkill(args.chatId, project.localPath, skillInvocation.name)
-          : undefined,
+        skills: skills.flatMap((skill) => skill.path ? [{ name: skill.name, path: skill.path }] : []),
         model: args.model,
         effort: args.effort as CodexReasoningEffort | undefined,
         serviceTier: args.serviceTier,
@@ -1659,8 +2239,9 @@ export class AgentCoordinator {
       }
       session.suppressResume = false
       const promptSeq = session.nextPromptSeq + 1
+      const promptId = crypto.randomUUID()
       session.nextPromptSeq = promptSeq
-      session.pendingPromptSeqs.push(promptSeq)
+      session.pendingPrompts.push({ seq: promptSeq, id: promptId })
       active.claudePromptSeq = promptSeq
       logClaudeSteer("claude_prompt_sent", {
         chatId: args.chatId,
@@ -1668,7 +2249,7 @@ export class AgentCoordinator {
         promptSeq,
         activeStatus: active.status,
         contentPreview: wireContent.slice(0, 160),
-        pendingPromptSeqs: [...session.pendingPromptSeqs],
+        pendingPromptSeqs: session.pendingPrompts.map((prompt) => prompt.seq),
       })
       // setModel() swaps the model on the live session without restarting it,
       // so the agent id in the session prompt can be stale. Re-state it on the
@@ -1679,7 +2260,8 @@ export class AgentCoordinator {
       await session.session.sendPrompt(
         session.promptAgentId === claudeAgentId
           ? claudePrompt
-          : appendSystemMessageBlock(claudePrompt, buildKannaAgentCorrection(claudeAgentId))
+          : appendSystemMessageBlock(claudePrompt, buildKannaAgentCorrection(claudeAgentId)),
+        promptId,
       )
       return
     }
@@ -1730,6 +2312,7 @@ export class AgentCoordinator {
         onToolRequest: args.onToolRequest,
         customTools: args.customTools,
         onRateLimitEvent: (info) => this.onClaudeRateLimit?.(info),
+        onSubagentActivity: (update) => this.applySubagentActivity(args.chatId, update),
       })
       this.refreshClaudeModelCatalog(started)
 
@@ -1747,7 +2330,8 @@ export class AgentCoordinator {
         sessionToken: args.sessionToken,
         accountInfoLoaded: false,
         nextPromptSeq: 0,
-        pendingPromptSeqs: [],
+        pendingPrompts: [],
+        echoesPromptIds: started.echoesPromptIds ?? false,
         suppressResume: false,
         cancelledPromptSeqs: new Set(),
       }
@@ -1779,7 +2363,12 @@ export class AgentCoordinator {
     }
   }
 
-  async send(command: Extract<ClientCommand, { type: "chat.send" }>) {
+  /**
+   * `source` names the sender when it is not the user: another chat's agent,
+   * a sub-chat's report, a schedule. It rides the queue and lands on the
+   * transcript entry.
+   */
+  async send(command: Extract<ClientCommand, { type: "chat.send" }>, extras?: { source?: MessageSource }) {
     let chatId = command.chatId
 
 
@@ -1798,8 +2387,11 @@ export class AgentCoordinator {
     if (chat.archivedAt) {
       await this.store.unarchiveChat(chatId)
     }
-    if (this.activeTurns.has(chatId)) {
-      this.analytics.track("message_sent")
+    // `isBusy`, not just a running turn: two sends can reach an idle chat
+    // together (a report and a schedule, say), and the second must queue
+    // behind the turn the first is still starting rather than start its own.
+    if (this.isBusy(chatId)) {
+      if (!extras?.source) this.analytics.track("message_sent")
       const queuedMessage = await this.enqueueMessage(chatId, command.content, command.attachments ?? [], {
         provider: command.provider,
         model: command.model,
@@ -1807,13 +2399,15 @@ export class AgentCoordinator {
         effort: command.effort,
         planMode: command.planMode,
         autoPlan: command.autoPlan,
+        source: extras?.source,
       })
       return { chatId, queuedMessageId: queuedMessage.id, queued: true as const }
     }
 
     const provider = this.resolveProvider(command, chat.provider)
     const settings = this.getProviderSettings(provider, command)
-    this.analytics.track("message_sent")
+    // The count is of messages people send.
+    if (!extras?.source) this.analytics.track("message_sent")
     await this.startTurnForChat({
       chatId,
       provider,
@@ -1825,20 +2419,26 @@ export class AgentCoordinator {
       planMode: settings.planMode,
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
+      source: extras?.source,
     })
 
 
     return { chatId }
   }
 
-  async enqueue(command: Extract<ClientCommand, { type: "message.enqueue" }>) {
-    this.analytics.track("message_sent")
+  async enqueue(
+    command: Extract<ClientCommand, { type: "message.enqueue" }>,
+    extras?: { source?: MessageSource; effort?: string },
+  ) {
+    if (!extras?.source) this.analytics.track("message_sent")
     const queuedMessage = await this.enqueueMessage(command.chatId, command.content, command.attachments ?? [], {
       provider: command.provider,
       model: command.model,
       modelOptions: command.modelOptions,
+      effort: extras?.effort,
       planMode: command.planMode,
       autoPlan: command.autoPlan,
+      source: extras?.source,
     })
     if (command.steer) {
       // The same path as "Send now" on a queued message, so the two can't
@@ -1869,20 +2469,26 @@ export class AgentCoordinator {
       queuedMessagePreview: queuedMessage.content.slice(0, 160),
     })
 
-    if (this.activeTurns.has(command.chatId)) {
-      await this.cancel(command.chatId, { hideInterrupted: true })
+    // The chat is not idle between the cancel and the turn that replaces it.
+    this.markStarting(command.chatId)
+    try {
+      if (this.activeTurns.has(command.chatId)) {
+        await this.cancel(command.chatId, { hideInterrupted: true })
+      }
+
+      logClaudeSteer("steer_after_cancel", {
+        chatId: command.chatId,
+        stillActive: this.activeTurns.has(command.chatId),
+      })
+
+      if (this.activeTurns.has(command.chatId)) {
+        throw new Error("Chat is still running")
+      }
+
+      await this.dequeueAndStartQueuedMessage(command.chatId, queuedMessage, { steered: true })
+    } finally {
+      this.unmarkStarting(command.chatId)
     }
-
-    logClaudeSteer("steer_after_cancel", {
-      chatId: command.chatId,
-      stillActive: this.activeTurns.has(command.chatId),
-    })
-
-    if (this.activeTurns.has(command.chatId)) {
-      throw new Error("Chat is still running")
-    }
-
-    await this.dequeueAndStartQueuedMessage(command.chatId, queuedMessage, { steered: true })
   }
 
   async dequeue(command: Extract<ClientCommand, { type: "message.dequeue" }>) {
@@ -1951,6 +2557,13 @@ export class AgentCoordinator {
         // Cursor has no enumeration protocol; the scan mirrors the CLI's own
         // skill discovery roots, and invocation is failsafe-only by design.
         return { provider: "cursor", skills: scanCursorSkills({ cwd }), origin: "filesystem" }
+      case "grok": {
+        const live = await this.grokManager.listSkills({ cwd })
+        if (live.length > 0) {
+          return { provider: "grok", skills: live, origin: "live" }
+        }
+        return { provider: "grok", skills: scanGrokSkills({ cwd }), origin: "filesystem" }
+      }
       case "pi": {
         const skills = await this.piManager.listSkills({ chatId: command.chatId, cwd })
         return { provider: "pi", skills, origin: "live" }
@@ -1972,24 +2585,19 @@ export class AgentCoordinator {
   }
 
   /**
-   * Resolve a typed `/name` to a codex skill for the structured input item.
-   * Live skills/list is authoritative (paths must exact-match the server's own
-   * discovery for the item to inject); the fs scan of the same roots covers
-   * codex versions that predate skills/list. Unresolved names degrade to plain
-   * text — codex silently ignores unknown skill items anyway.
+   * The skills a prompt names that the harness won't expand by itself,
+   * resolved against the same list the "/" menu shows (for codex, live
+   * skills/list paths are what its structured item must exact-match).
+   * Unresolved names stay plain text. The list is only fetched when some
+   * mention needs it, so an ordinary leading "/name" on claude/grok/pi costs
+   * nothing extra.
    */
-  private async resolveCodexSkill(
-    chatId: string,
-    cwd: string,
-    name: string
-  ): Promise<{ name: string; path: string } | undefined> {
-    const live = await this.codexManager.listSkills({ chatId, cwd })
-    if (live) {
-      const match = live.find((skill) => skill.name === name)
-      return match ? { name: match.name, path: match.path } : undefined
-    }
-    const scanned = findSkillByName(scanCodexSkills({ cwd }), name)
-    return scanned?.path ? { name: scanned.name, path: scanned.path } : undefined
+  private async resolvePromptSkills(provider: AgentProvider, chatId: string, content: string): Promise<SkillReference[]> {
+    const expandsLeading = provider === "claude" || provider === "grok" || provider === "pi"
+    const mentions = findSkillMentions(content).filter((mention) => !(expandsLeading && mention.leading))
+    if (mentions.length === 0) return []
+    const { skills } = await this.listSkills({ type: "chat.listSkills", provider, chatId })
+    return resolveSkillMentions(mentions, skills)
   }
 
   /**
@@ -2009,6 +2617,8 @@ export class AgentCoordinator {
    * a plan nobody approved. Those chats stay interrupted so the user re-asks.
    */
   async interruptForShutdown() {
+    // These turns come back on the next boot, so none of them has settled.
+    this.shuttingDown = true
     for (const [chatId, active] of [...this.activeTurns.entries()]) {
       if (!active.pendingTool) {
         try {
@@ -2068,7 +2678,7 @@ export class AgentCoordinator {
     return true
   }
 
-  async forkChat(chatId: string) {
+  async forkChat(chatId: string, lineage?: { parentChatId?: string; createdByChatId?: string }) {
     const chat = this.store.requireChat(chatId)
     if (!chat.provider) {
       throw new Error("Chat must have a provider before forking")
@@ -2082,17 +2692,52 @@ export class AgentCoordinator {
     // tool calls whose results have not arrived. Nothing here touches the
     // source's turn — it keeps running.
     const running = this.activeTurns.has(chatId) || this.drainingStreams.has(chatId)
-    const forked = await this.store.forkChat(chatId, { atLastCompletedTurn: running })
+    const forked = await this.store.forkChat(chatId, { atLastCompletedTurn: running, ...lineage })
     this.analytics.track("chat_created")
     return { chatId: forked.id }
+  }
+
+  /**
+   * Removes and returns the seqs of the prompts a turn-ending entry answers.
+   *
+   * The CLI also runs turns nobody sent. A task notification starts one, and
+   * a resumed session opens with one about background commands the previous
+   * process left running. Such a turn can end while the user's prompt waits
+   * behind it in the CLI's queue. Crediting its result to the oldest pending
+   * prompt ended the user's turn before the CLI had started it: "turn done"
+   * with no reply. So each prompt carries an id, and the CLI echoes the ids a
+   * turn consumed on its result.
+   *
+   * A result without ids answers none of ours, unless this CLI has never
+   * echoed (a CLAUDE_EXECUTABLE wrapper), where oldest-first is all there
+   * is. Error and interrupt results can come back without ids too (an
+   * interrupted or failed turn), and they still go oldest-first so a failed
+   * turn can't leave the chat spinning.
+   */
+  private takeAnsweredClaudePrompts(
+    session: ClaudeSessionState,
+    promptIds: string[] | undefined,
+    endedEarly: boolean,
+  ): number[] {
+    if (promptIds?.length) {
+      session.echoesPromptIds = true
+      const answered = session.pendingPrompts.filter((prompt) => promptIds.includes(prompt.id))
+      session.pendingPrompts = session.pendingPrompts.filter((prompt) => !promptIds.includes(prompt.id))
+      return answered.map((prompt) => prompt.seq)
+    }
+    const head = session.pendingPrompts[0]
+    if (!head) return []
+    if (session.echoesPromptIds && !endedEarly) return []
+    session.pendingPrompts.shift()
+    return [head.seq]
   }
 
   /**
    * Re-registers an active turn for a Claude session that produced new
    * activity after its previous turn finished (e.g. a Monitor or Cron
    * wakeup continued the session). The resumed turn has no prompt seq, so
-   * the next result entry (pendingPromptSeqs empty → null === null) closes
-   * it through the normal completion path in runClaudeSession.
+   * the next result that answers none of our prompts closes it through the
+   * normal completion path in runClaudeSession.
    */
   private async resumeBackgroundTurn(session: ClaudeSessionState) {
     const active: ActiveTurn = {
@@ -2136,22 +2781,22 @@ export class AgentCoordinator {
 
         if (!event.entry || customToolEvents.skip(event.entry)) continue
 
+        const completedPromptSeqs = event.entry.kind === "result" || event.entry.kind === "interrupted"
+          ? this.takeAnsweredClaudePrompts(session, event.promptIds, event.entry.kind === "interrupted" || event.entry.isError)
+          : []
+
         // After an escape/cancel or steer, the SDK ends the cancelled turn
         // with a result of subtype error_during_execution (is_error, usually
         // no text). The cancel already appended an "interrupted" entry, so
         // persisting this would render a spurious "An unknown error
-        // occurred." in the UI. Attribute the result to the prompt it
-        // completes (pendingPromptSeqs[0]) rather than relying on
-        // suppressResume, which a steered follow-up prompt clears before the
-        // interrupt error lands.
-        const completingPromptSeq = event.entry.kind === "result" || event.entry.kind === "interrupted"
-          ? (session.pendingPromptSeqs[0] ?? null)
-          : null
+        // occurred." in the UI. Attribute the result to the prompts it
+        // answers rather than relying on suppressResume, which a steered
+        // follow-up prompt clears before the interrupt error lands.
         const isCancelledPromptErrorResult =
           event.entry.kind === "result"
           && event.entry.isError
-          && completingPromptSeq !== null
-          && session.cancelledPromptSeqs.has(completingPromptSeq)
+          && completedPromptSeqs.length > 0
+          && completedPromptSeqs.every((seq) => session.cancelledPromptSeqs.has(seq))
         if (!isCancelledPromptErrorResult) {
           await this.store.appendMessage(session.chatId, event.entry)
         }
@@ -2190,15 +2835,12 @@ export class AgentCoordinator {
             chatId: session.chatId,
             sessionId: session.id,
             activePromptSeq: active.claudePromptSeq ?? null,
-            pendingPromptSeqs: [...session.pendingPromptSeqs],
+            pendingPromptSeqs: session.pendingPrompts.map((prompt) => prompt.seq),
           })
         }
 
-        const completedClaudePromptSeq = event.entry.kind === "result" || event.entry.kind === "interrupted"
-          ? (session.pendingPromptSeqs.shift() ?? null)
-          : null
-        if (completedClaudePromptSeq !== null) {
-          session.cancelledPromptSeqs.delete(completedClaudePromptSeq)
+        for (const seq of completedPromptSeqs) {
+          session.cancelledPromptSeqs.delete(seq)
         }
 
         logClaudeSteer("claude_event", {
@@ -2206,12 +2848,17 @@ export class AgentCoordinator {
           sessionId: session.id,
           entryKind: event.entry.kind,
           activePromptSeq: active?.claudePromptSeq ?? null,
-          completedPromptSeq: completedClaudePromptSeq,
+          completedPromptSeqs,
           activeStatus: active?.status ?? null,
-          pendingPromptSeqs: [...session.pendingPromptSeqs],
+          pendingPromptSeqs: session.pendingPrompts.map((prompt) => prompt.seq),
         })
 
-        if (event.entry.kind === "result" && active && completedClaudePromptSeq === (active.claudePromptSeq ?? null)) {
+        // A turn resumed by background activity has no prompt, so any result
+        // that answers none of ours ends it.
+        const completesActive = active?.claudePromptSeq == null
+          ? completedPromptSeqs.length === 0
+          : completedPromptSeqs.includes(active.claudePromptSeq)
+        if (event.entry.kind === "result" && active && completesActive) {
           active.hasFinalResult = true
           if (event.entry.isError) {
             await this.store.recordTurnFailed(session.chatId, event.entry.result || "Turn failed")
@@ -2223,6 +2870,7 @@ export class AgentCoordinator {
           if (!active.cancelRequested) {
             await this.maybeStartNextQueuedMessage(session.chatId)
           }
+          this.notifySettled(session.chatId)
         }
 
         this.emitStateChange(session.chatId)
@@ -2259,8 +2907,16 @@ export class AgentCoordinator {
         }
         this.activeTurns.delete(session.chatId)
       }
+      // The session is gone, so nothing it spawned can report back. Only when
+      // it is still the chat's session: a restart's replacement owns them now.
+      if (!this.claudeSessions.has(session.chatId)) {
+        this.closeRunningSubagents(session.chatId)
+        this.ambientTaskIds.delete(session.chatId)
+        this.foregroundTasks.delete(session.chatId)
+      }
       session.session.close()
       this.emitStateChange(session.chatId)
+      this.notifySettled(session.chatId)
     }
   }
 
@@ -2310,6 +2966,7 @@ export class AgentCoordinator {
 
         if (!event.entry || customToolEvents.skip(event.entry)) continue
         await this.store.appendMessage(active.chatId, event.entry)
+        this.trackSubagentFromEntry(active.chatId, active.provider, event.entry)
 
         if (event.entry.kind === "system_init") {
           active.status = active.pendingTool ? "waiting_for_user" : "running"
@@ -2363,6 +3020,14 @@ export class AgentCoordinator {
       }
       // Stream has fully ended — no longer draining.
       this.drainingStreams.delete(active.chatId)
+      // These providers report a subagent only on this stream, so one still
+      // marked running can never be closed and would hold the chat in
+      // "waiting on subagent" for good. Not when a newer turn has started:
+      // the log is that turn's now. Claude's tasks and Codex's agents outlive
+      // the turn, and each has its own way of saying one has ended.
+      if (tracksSubagentsFromTranscript(active.provider) && !this.activeTurns.has(active.chatId)) {
+        this.closeRunningSubagents(active.chatId)
+      }
       this.emitStateChange(active.chatId)
 
       if (active.postToolFollowUp && !active.cancelRequested) {
@@ -2414,10 +3079,19 @@ export class AgentCoordinator {
           this.emitStateChange(active.chatId)
         }
       }
+      // Here rather than at the result: the stream is closed and any follow-up
+      // or queued turn has had its chance to start.
+      this.notifySettled(active.chatId)
     }
   }
 
   async cancel(chatId: string, options?: { hideInterrupted?: boolean }) {
+    // A steer hides its interrupt and replaces the turn, and a shutdown brings
+    // it back, so neither is a stop. Fired even when nothing is running here:
+    // an idle chat can still have sub-chats to stop.
+    const stopped = !options?.hideInterrupted && !this.shuttingDown
+    if (stopped) this.onChatStopped?.(chatId)
+
     // Also clean up any draining stream for this chat.
     const draining = this.drainingStreams.get(chatId)
     if (draining) {
@@ -2465,7 +3139,11 @@ export class AgentCoordinator {
           content: result,
         })
       )
-      if (active.provider === "codex" && pendingTool.tool.toolKind === "exit_plan_mode") {
+      // These adapters hold their stream open until the request resolves.
+      if (
+        (active.provider === "codex" && pendingTool.tool.toolKind === "exit_plan_mode")
+        || active.provider === "grok"
+      ) {
         pendingTool.resolve(result)
       }
     }
@@ -2478,7 +3156,17 @@ export class AgentCoordinator {
     // Remove from activeTurns immediately so the UI reflects the cancellation
     // right away, rather than waiting for interrupt() which may hang.
     this.activeTurns.delete(chatId)
+    if (active.provider === "codex") {
+      // Codex's agents run on after the turn that spawned them is interrupted,
+      // and each still reports its own end, so their rows stay as they are. A
+      // stop is meant for them too. A steer is not: its new turn can go on
+      // waiting for them.
+      if (stopped) void this.codexManager.stopAgents?.(chatId)
+    } else {
+      this.closeRunningSubagents(chatId)
+    }
     this.emitStateChange(chatId)
+    if (stopped) this.notifySettled(chatId)
     logClaudeSteer("cancel_active_turn_deleted", {
       chatId,
       provider: active.provider,
@@ -2562,12 +3250,20 @@ export class AgentCoordinator {
         clearContext?: boolean
         message?: string
       }
+      if (result.confirmed) {
+        active.planExited = true
+        // The chat is no longer read-only, and the record is what a turn Kanna
+        // starts on its own reads: a sub-chat's report, a schedule, a resume.
+        await this.store.setPlanMode(command.chatId, false)
+      }
       if (result.confirmed && result.clearContext) {
         await this.store.setSessionToken(command.chatId, null)
         await this.store.appendMessage(command.chatId, timestamped({ kind: "context_cleared" }))
       }
 
-      if (active.provider === "codex") {
+      // Neither can hand the answer back to the running agent, so it goes in
+      // a follow-up turn on the same session (see grok-cli startTurn).
+      if (active.provider === "codex" || active.provider === "grok") {
         active.postToolFollowUp = result.confirmed
           ? {
               content: result.message
@@ -2581,6 +3277,11 @@ export class AgentCoordinator {
                 : "Revise the plan using this feedback.",
               planMode: true,
             }
+      }
+    } else if (pending.tool.toolKind === "ask_user_question" && active.provider === "grok") {
+      active.postToolFollowUp = {
+        content: formatQuestionAnswersFollowUp(pending.tool.input.questions, command.result),
+        planMode: active.planMode,
       }
     }
 

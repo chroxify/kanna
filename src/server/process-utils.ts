@@ -115,7 +115,9 @@ export function resolveCommandPath(command: string, homeDir = homedir()): string
   // shell exists to cover — so it is a fast path, not a replacement.
   // Deliberately not memoized: callers that need to re-resolve after an install
   // (provider-auth's `fresh` option) must not be served a stale path.
-  const direct = Bun.which(command)
+  // PATH is passed explicitly because Bun.which otherwise reads the startup
+  // environment and misses what `inheritShellPath` added.
+  const direct = Bun.which(command, { PATH: process.env.PATH ?? "" })
   if (direct) return direct
 
   const result = spawnSync("sh", ["-lc", `command -v -- ${command}`], {
@@ -127,6 +129,71 @@ export function resolveCommandPath(command: string, homeDir = homedir()): string
     if (resolved.startsWith("/")) return resolved
   }
   return findInUserBinDirs(command, homeDir)
+}
+
+const SHELL_PATH_MARKER = "__KANNA_SHELL_PATH__"
+export const SHELL_ENV_IMPORTED_ENV_VAR = "KANNA_SHELL_ENV_IMPORTED"
+const SHELL_PATH_TIMEOUT_MS = 5_000
+
+/**
+ * `current` in its own order, then every `shell` entry it lacks. Appending
+ * rather than replacing means a command the server already found keeps
+ * resolving to the same binary (e.g. `bun run dev`'s node_modules/.bin).
+ */
+export function mergePathLists(current: string, shell: string) {
+  const entries = [...current.split(path.delimiter), ...shell.split(path.delimiter)]
+  return [...new Set(entries.filter(Boolean))].join(path.delimiter)
+}
+
+/** The PATH between the two markers, ignoring whatever the rc files print. */
+export function parseShellPathOutput(output: string) {
+  const [, between] = output.split(SHELL_PATH_MARKER)
+  return between?.trim() || null
+}
+
+/**
+ * Add the user's interactive login shell PATH to this process's PATH.
+ *
+ * Agents inherit `process.env` whole, and a server started by launchd, a
+ * detached `kanna`, or the desktop app gets a PATH that skips ~/.zshrc, where
+ * installers like to put ~/.local/bin. Skills then fail with "command not
+ * found" for CLIs that work in the user's terminal. `resolveCommandPath`
+ * covers the few binaries Kanna runs itself; this covers what agents run.
+ *
+ * `-i` is what reads ~/.zshrc. `printenv` rather than `$PATH` so fish, which
+ * joins list variables with spaces, prints the same thing.
+ */
+export async function inheritShellPath() {
+  if (process.platform === "win32") return
+  // The Mac app already started this process with the whole login-shell
+  // environment (macos/src/shell-env.ts); a heavy ~/.zshrc costs
+  // seconds, so don't pay for it twice.
+  if (process.env[SHELL_ENV_IMPORTED_ENV_VAR] === "1") return
+  const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/sh")
+  const script = `echo ${SHELL_PATH_MARKER}; printenv PATH; echo ${SHELL_PATH_MARKER}`
+  const output = await new Promise<string>((resolve) => {
+    let stdout = ""
+    let child
+    try {
+      child = spawn(shell, ["-ilc", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        // oh-my-zsh otherwise asks whether to update, and nobody can answer.
+        env: { ...process.env, DISABLE_AUTO_UPDATE: "true" },
+      })
+    } catch {
+      resolve("")
+      return
+    }
+    // A slow or hung rc file must not stall boot.
+    const timer = setTimeout(() => child.kill("SIGKILL"), SHELL_PATH_TIMEOUT_MS)
+    child.stdout.setEncoding("utf8")
+    child.stdout.on("data", (chunk: string) => { stdout += chunk })
+    child.once("error", () => { clearTimeout(timer); resolve("") })
+    child.once("close", () => { clearTimeout(timer); resolve(stdout) })
+  })
+  const shellPath = parseShellPathOutput(output)
+  if (!shellPath) return
+  process.env.PATH = mergePathLists(process.env.PATH ?? "", shellPath)
 }
 
 export function canOpenMacApp(appName: string) {

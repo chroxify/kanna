@@ -1,4 +1,4 @@
-import type { ChatSnapshot, KannaStatus } from "../shared/types"
+import type { ChatSnapshot, KannaStatus, SubagentActivity } from "../shared/types"
 import type { AppSettingsManager } from "./app-settings"
 import type { EventStore } from "./event-store"
 import { deriveChatSnapshot } from "./read-models"
@@ -20,7 +20,14 @@ import { deriveChatSnapshot } from "./read-models"
  */
 export interface ChatWindowRouteDeps {
   store: Pick<EventStore, "state" | "getChat" | "getClientTranscript" | "getInitialTranscriptWindowStart"> & Partial<Pick<EventStore, "prepareTranscript">>
-  agent: { getActiveStatuses: () => Map<string, KannaStatus>; getDrainingChatIds: () => Set<string> }
+  agent: {
+    getActiveStatuses: () => Map<string, KannaStatus>
+    /** Optional for the same reason as `getSubagents`. Preferred: it also has the chats waiting on a subagent. */
+    getChatStatuses?: () => Map<string, KannaStatus>
+    getDrainingChatIds: () => Set<string>
+    /** Optional: older callers and test fakes predate delegated-work tracking. */
+    getSubagents?: (chatId: string) => SubagentActivity[]
+  }
   appSettings: Pick<AppSettingsManager, "getSnapshot">
 }
 
@@ -34,10 +41,11 @@ export function readChatWindow(chatId: string, deps: ChatWindowRouteDeps): ChatS
     : 0
   const full = deriveChatSnapshot(
     store.state,
-    agent.getActiveStatuses(),
+    agent.getChatStatuses?.() ?? agent.getActiveStatuses(),
     agent.getDrainingChatIds(),
     chatId,
-    (id) => store.getClientTranscript(id, windowStart)
+    (id) => store.getClientTranscript(id, windowStart),
+    agent.getSubagents?.(chatId)
   )
   if (!full) return null
   const offset = Math.max(0, Math.min(windowStart - full.startIndex, full.messages.length))

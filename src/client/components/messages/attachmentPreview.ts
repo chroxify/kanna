@@ -31,6 +31,7 @@ export type AttachmentIconKind =
 
 export type AttachmentPreviewKind =
   | "image"
+  | "video"
   | "pdf"
   | "markdown"
   | "text"
@@ -56,25 +57,31 @@ export interface TablePreviewData {
   truncatedColumns: boolean
 }
 
-export function classifyAttachmentPreview(attachment: ChatAttachment): AttachmentPreviewTarget {
+/** What classifying needs of an attachment, whichever surface it came from. */
+export type PreviewableAttachment = Pick<ChatAttachment, "mimeType" | "displayName"> & { size: number | null }
+
+export function classifyAttachmentPreview(attachment: PreviewableAttachment): AttachmentPreviewTarget {
   const mimeType = attachment.mimeType.toLowerCase()
   const extension = getFileExtension(attachment.displayName)
 
   if (mimeType.startsWith("image/")) {
     return { kind: "image", openInNewTab: false }
   }
+  if (mimeType.startsWith("video/") || VIDEO_EXTENSIONS.has(extension)) {
+    return { kind: "video", openInNewTab: false }
+  }
   if (mimeType === "application/pdf") {
     return { kind: "pdf", openInNewTab: false }
   }
   if (mimeType === "application/json") {
-    return attachment.size <= JSON_PREVIEW_LIMIT_BYTES
+    return attachment.size === null || attachment.size <= JSON_PREVIEW_LIMIT_BYTES
       ? { kind: "json", openInNewTab: false }
       : { kind: "external", openInNewTab: true }
   }
   if (extension === ".md") {
     return { kind: "markdown", openInNewTab: false }
   }
-  if (mimeType === "text/csv" || mimeType === "text/tab-separated-values") {
+  if (mimeType === "text/csv" || mimeType === "text/tab-separated-values" || extension === ".csv" || extension === ".tsv") {
     return { kind: "table", openInNewTab: false }
   }
   if (mimeType.startsWith("text/")) {
@@ -188,15 +195,19 @@ export function prettifyJson(content: string): string {
   }
 }
 
-export function parseDelimitedPreview(content: string, delimiter: "," | "\t"): TablePreviewData {
+export function parseDelimitedPreview(
+  content: string,
+  delimiter: "," | "\t",
+  limits: { rows: number; columns: number } = { rows: TABLE_PREVIEW_ROW_LIMIT, columns: TABLE_PREVIEW_COLUMN_LIMIT },
+): TablePreviewData {
   const rows = parseDelimitedRows(content, delimiter)
   const rowCount = rows.length
   const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0)
-  const truncatedRows = rowCount > TABLE_PREVIEW_ROW_LIMIT
-  const truncatedColumns = columnCount > TABLE_PREVIEW_COLUMN_LIMIT
+  const truncatedRows = rowCount > limits.rows
+  const truncatedColumns = columnCount > limits.columns
 
   return {
-    rows: rows.slice(0, TABLE_PREVIEW_ROW_LIMIT).map((row) => row.slice(0, TABLE_PREVIEW_COLUMN_LIMIT)),
+    rows: rows.slice(0, limits.rows).map((row) => row.slice(0, limits.columns)),
     rowCount,
     columnCount,
     truncatedRows,

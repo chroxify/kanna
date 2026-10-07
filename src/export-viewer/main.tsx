@@ -5,6 +5,8 @@ import "@fontsource-variable/bricolage-grotesque"
 import { ChatTranscriptViewport, type TranscriptScrollHandle } from "../client/app/ChatPage/ChatTranscriptViewport"
 import { getLatestToolIds } from "../client/app/derived"
 import { TranscriptRenderOptionsProvider } from "../client/components/messages/render-context"
+import { TooltipProvider } from "../client/components/ui/tooltip"
+import { ViewerLayer } from "../client/components/viewer/ViewerLayer"
 import { processTranscriptMessages } from "../client/lib/parseTranscript"
 import { syncThemeMetadata } from "../client/hooks/useTheme"
 import type { AskUserQuestionItem } from "../client/components/messages/types"
@@ -123,10 +125,15 @@ function StandaloneTranscriptApp() {
       value={{
         readonly: true,
         localLinkMode: "text",
+        sourceOrigin: state.bundle.sourceOrigin ?? null,
         attachmentMode: state.bundle.attachmentMode,
       }}
     >
-      <div className="h-full bg-background">
+      <TooltipProvider>
+      <div className="relative h-full bg-background">
+        {/* The same viewer the app has, for the attachments and charts in the
+            transcript, over the whole page since there's no chat column here. */}
+        <ViewerLayer className="fixed" />
         <div className="flex h-full min-h-0 flex-col overflow-hidden">
           <header className="flex-shrink-0 border-b border-border px-4">
             <div className="mx-auto flex h-16 w-full items-center gap-2 min-w-0">
@@ -202,6 +209,7 @@ function StandaloneTranscriptApp() {
           </div>
         </div>
       </div>
+      </TooltipProvider>
     </TranscriptRenderOptionsProvider>
   )
 }

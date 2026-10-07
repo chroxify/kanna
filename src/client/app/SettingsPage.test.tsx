@@ -15,7 +15,7 @@ import {
   shouldPreviewChatSoundChange,
   SkillsSection,
 } from "./SettingsPage"
-import { SettingsHeaderButton } from "../components/ui/settings-header-button"
+import { SettingsActionButton } from "./settings/shared"
 import type { UpdateSnapshot } from "../../shared/types"
 import { LabsSection } from "./settings/LabsSection"
 
@@ -97,9 +97,9 @@ describe("nightly status in Labs", () => {
       expect(html).not.toContain("Last checked")
     }
     if (nightly?.status === "up_to_date") {
-      expect(html).not.toContain("Build Latest")
+      expect(html).not.toContain("Build latest")
     } else {
-      expect(html).toContain("Build Latest")
+      expect(html).toContain("Build latest")
     }
     if (nightly?.status !== "up_to_date") expect(html).not.toContain("Latest nightly installed")
   })
@@ -192,6 +192,10 @@ describe("resolveSettingsSectionId", () => {
     expect(resolveSettingsSectionId("nope")).toBeNull()
     expect(resolveSettingsSectionId(undefined)).toBeNull()
   })
+
+  test("This Mac exists only in Kanna for Mac", () => {
+    expect(resolveSettingsSectionId("mac")).toBeNull()
+  })
 })
 
 describe("SkillsSection", () => {
@@ -207,7 +211,7 @@ describe("SkillsSection", () => {
       />
     )
 
-    expect(html).toContain("Installed")
+    expect(html).toContain("No global skills installed yet")
     expect(html).toContain("Add skills from skills.sh")
     expect(html).toContain("searchbox")
   })
@@ -247,28 +251,30 @@ describe("resolveChatBrowserNotificationPreferenceAfterPermission", () => {
   })
 })
 
-describe("SettingsHeaderButton", () => {
-  test("renders shared header button content and icon", () => {
+describe("SettingsActionButton", () => {
+  test("renders the label and icon as plain text, with no box", () => {
     const html = renderToStaticMarkup(
-      <SettingsHeaderButton icon={<RefreshCw className="size-3.5" />}>
+      <SettingsActionButton icon={<RefreshCw />}>
         Check for updates
-      </SettingsHeaderButton>
+      </SettingsActionButton>
     )
 
     expect(html).toContain("Check for updates")
     expect(html).toContain("lucide-refresh-cw")
-    expect(html).toContain("gap-1.5")
+    expect(html).toContain("text-foreground")
+    expect(html).not.toContain("border")
+    expect(html).not.toContain("bg-")
   })
 
-  test("supports the default variant for the update action", () => {
+  test("tints the prominent action with the brand colour", () => {
     const html = renderToStaticMarkup(
-      <SettingsHeaderButton variant="default" >
+      <SettingsActionButton prominent>
         Update
-      </SettingsHeaderButton>
+      </SettingsActionButton>
     )
 
     expect(html).toContain("Update")
-    expect(html).toContain("bg-primary")
+    expect(html).toContain("text-logo")
   })
 })
 

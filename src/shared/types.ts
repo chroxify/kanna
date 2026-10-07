@@ -4,7 +4,7 @@ export type { TerminalPreset }
 export const STORE_VERSION = 2 as const
 export const PROTOCOL_VERSION = 1 as const
 
-export type AgentProvider = "claude" | "codex" | "cursor" | "pi"
+export type AgentProvider = "claude" | "codex" | "cursor" | "grok" | "pi"
 export type LlmProviderKind = "openai" | "openrouter" | "custom"
 export type AppThemePreference = "light" | "dark" | "system"
 export type ChatSoundPreference = "never" | "unfocused" | "always"
@@ -18,6 +18,11 @@ export type DefaultProviderPreference = "last_used" | AgentProvider
  * does the other one, so either is one keystroke away whatever the default.
  */
 export type SubmitWhileRunning = "queue" | "steer"
+/**
+ * Whose open/closed state a pane beside the chat follows: each chat keeps its
+ * own, or every chat in a project shares one.
+ */
+export type PaneVisibilityScope = "chat" | "project"
 export type EditorPreset = "cursor" | "vscode" | "zed" | "xcode" | "windsurf" | "custom"
 export const DEFAULT_OPENAI_SDK_MODEL = "gpt-5.4-mini"
 export const DEFAULT_OPENROUTER_SDK_MODEL = "moonshotai/kimi-k2.5:nitro"
@@ -78,16 +83,17 @@ export interface InstalledSkillsSnapshot {
 /**
  * A skill found in one of the user-level ("global") skill roots, attributed to
  * the harnesses that read that root:
- *   ~/.agents/skills — codex, cursor, pi
+ *   ~/.agents/skills — codex, cursor, grok, pi
  *   ~/.claude/skills — claude
  *   ~/.cursor/skills — cursor
+ *   ~/.grok/skills   — grok
  *   ~/.codex/skills  — codex (deprecated root, still scanned by codex)
  * The same name in multiple roots merges into one entry with the provider union.
  */
 export interface GlobalSkillSummary {
   name: string
   description: string
-  /** Harnesses that can invoke this skill (ordered claude, codex, cursor, pi). */
+  /** Harnesses that can invoke this skill (ordered claude, codex, cursor, grok, pi). */
   providers: AgentProvider[]
   /** Absolute SKILL.md paths where the skill was found (one per root). */
   paths: string[]
@@ -105,6 +111,7 @@ export interface GlobalSkillsSnapshot {
  *   - claude: built-in commands, .claude/commands, .claude/skills, plugins
  *   - codex:  agent skills (skills/list)
  *   - cursor: SKILL.md dirs scanned from disk (no enumeration protocol)
+ *   - grok:   grok inspect --json, falling back to ~/.grok/skills + .agents
  *   - pi:     prompt templates + skills from the resource loader
  */
 export type HarnessSkillSource = "builtin" | "command" | "skill" | "plugin" | "extension"
@@ -138,6 +145,8 @@ export interface ChatAttachment {
 }
 
 export interface StandaloneTranscriptBundle {
+  /** Source Kanna origin for recognizing absolute chat references in exports. */
+  sourceOrigin?: string
   version: 1
   chatId: string
   title: string
@@ -177,6 +186,19 @@ export type StandaloneTranscriptExportCommandResult =
   | StandaloneTranscriptExportResult
   | StandaloneTranscriptExportFailureResult
 
+/**
+ * Who sent a message, when it was not typed into the composer. Absent means
+ * the user. Carried from the queue onto the transcript's `user_prompt`, so a
+ * client can show an agent's message as something other than the user's own.
+ */
+export type MessageSource =
+  /** Another chat's agent sent it (`send_message`, or the first message of a chat it created). */
+  | { kind: "agent"; chatId: string }
+  /** Sub-chats reporting their results to the chat that started them. */
+  | { kind: "report"; chatIds: string[] }
+  /** A schedule fired. */
+  | { kind: "schedule"; scheduleId: string }
+
 export interface QueuedChatMessage {
   id: string
   content: string
@@ -185,8 +207,62 @@ export interface QueuedChatMessage {
   provider?: AgentProvider
   model?: string
   modelOptions?: ModelOptions
+  /** Kept from the sender so a queued message runs with the effort it was sent with. */
+  effort?: string
   planMode?: boolean
   autoPlan?: boolean
+  source?: MessageSource
+}
+
+/** When a schedule sends its message. Wall-clock times are in the server's time zone. */
+export type ScheduleTrigger =
+  | { kind: "once"; at: number }
+  | { kind: "interval"; everyMs: number }
+  /** `weekdays` uses 0 for Sunday. Omitted means every day. */
+  | { kind: "daily"; timeOfDay: string; weekdays?: number[] }
+
+/**
+ * A stored trigger that sends a message later: into an existing chat, or into
+ * a new chat it creates for each run.
+ */
+export interface ChatSchedule {
+  id: string
+  name: string
+  content: string
+  target: { kind: "chat"; chatId: string } | { kind: "new_chat"; projectId: string }
+  trigger: ScheduleTrigger
+  provider?: AgentProvider
+  model?: string
+  effort?: string
+  planMode?: boolean
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+  /** The chat whose agent created it. Absent when a user did. */
+  createdByChatId?: string
+  /**
+   * Set when a sub-chat scheduled this for itself in a turn its parent was
+   * owed a report for. The run is more of the same work, so the turn it
+   * starts is reported to the parent too.
+   */
+  reportsToParent?: true
+  /** Null once nothing is left to run: a one-shot that fired, or `maxRuns` reached. */
+  nextRunAt: number | null
+  lastRunAt?: number
+  /** The chat the last run went to. For a `new_chat` target, the chat it created. */
+  lastRunChatId?: string
+  runCount: number
+  maxRuns?: number
+  /** The latest runs, oldest first. Capped, so a schedule that fires for months stays small. */
+  runs?: ScheduleRun[]
+}
+
+export interface ScheduleRun {
+  at: number
+  /** `skipped`: the previous run was still going. `failed`: the message could not be sent. */
+  outcome: "sent" | "skipped" | "failed"
+  /** The chat the message went to, when it was sent. */
+  chatId?: string
 }
 
 export interface ProviderModelOption {
@@ -282,7 +358,14 @@ export const PI_REASONING_OPTIONS = [
   { id: "xhigh", label: "Extra High" },
 ] as const satisfies readonly ProviderEffortOption[]
 
+export const GROK_REASONING_OPTIONS = [
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+] as const satisfies readonly ProviderEffortOption[]
+
 export type PiReasoningEffort = (typeof PI_REASONING_OPTIONS)[number]["id"]
+export type GrokReasoningEffort = (typeof GROK_REASONING_OPTIONS)[number]["id"]
 
 export type ClaudeReasoningEffort = (typeof CLAUDE_REASONING_OPTIONS)[number]["id"]
 export type ClaudeContextWindow = "200k" | "1m"
@@ -307,10 +390,15 @@ export interface PiModelOptions {
   reasoningEffort: PiReasoningEffort
 }
 
+export interface GrokModelOptions {
+  reasoningEffort: GrokReasoningEffort
+}
+
 export interface ProviderModelOptionsByProvider {
   claude: ClaudeModelOptions
   codex: CodexModelOptions
   cursor: CursorModelOptions
+  grok: GrokModelOptions
   pi: PiModelOptions
 }
 
@@ -362,6 +450,7 @@ export type ChatProviderPreferences = {
   claude: ProviderPreference<ClaudeModelOptions>
   codex: ProviderPreference<CodexModelOptions>
   cursor: ProviderPreference<CursorModelOptions>
+  grok: ProviderPreference<GrokModelOptions>
   pi: ProviderPreference<PiModelOptions>
 }
 
@@ -385,10 +474,15 @@ export const DEFAULT_CURSOR_MODEL_OPTIONS = {
 } as const satisfies CursorModelOptions
 
 export const DEFAULT_PI_MODEL = "~anthropic/claude-fable-latest"
+export const DEFAULT_GROK_MODEL = "grok-4.6"
 
 export const DEFAULT_PI_MODEL_OPTIONS = {
   reasoningEffort: "medium",
 } as const satisfies PiModelOptions
+
+export const DEFAULT_GROK_MODEL_OPTIONS = {
+  reasoningEffort: "high",
+} as const satisfies GrokModelOptions
 
 export function isClaudeReasoningEffort(value: unknown): value is ClaudeReasoningEffort {
   return CLAUDE_REASONING_OPTIONS.some((option) => option.id === value)
@@ -400,6 +494,19 @@ export function isPiReasoningEffort(value: unknown): value is PiReasoningEffort 
 
 export function normalizePiReasoningEffort(effort?: unknown): PiReasoningEffort {
   return isPiReasoningEffort(effort) ? effort : DEFAULT_PI_MODEL_OPTIONS.reasoningEffort
+}
+
+export function isGrokReasoningEffort(value: unknown): value is GrokReasoningEffort {
+  return GROK_REASONING_OPTIONS.some((option) => option.id === value)
+}
+
+export function normalizeGrokReasoningEffort(effort?: unknown): GrokReasoningEffort {
+  return isGrokReasoningEffort(effort) ? effort : DEFAULT_GROK_MODEL_OPTIONS.reasoningEffort
+}
+
+export function normalizeGrokModelId(modelId?: unknown, fallbackModelId = DEFAULT_GROK_MODEL): string {
+  const trimmed = typeof modelId === "string" ? modelId.trim() : ""
+  return trimmed || fallbackModelId
 }
 
 // Pi accepts any OpenRouter model id verbatim — unlike the other providers there
@@ -687,6 +794,32 @@ export const PROVIDERS: ProviderCatalogEntry[] = [
     efforts: [],
   },
   {
+    id: "grok",
+    label: "Grok Build",
+    defaultModel: DEFAULT_GROK_MODEL,
+    defaultEffort: "high",
+    supportsPlanMode: true,
+    supportsAutoPlanMode: false,
+    // Static fallback — the real list is discovered at runtime via `grok models`
+    // (see applyGrokModels in provider-catalog). Both current models support
+    // reasoning effort and a 500k window (models_cache.json).
+    models: [
+      {
+        id: "grok-4.6",
+        label: deriveModelLabel("grok-4.6"),
+        supportsEffort: true,
+        contextWindowTokens: 500_000,
+      },
+      {
+        id: "grok-4.5",
+        label: deriveModelLabel("grok-4.5"),
+        supportsEffort: true,
+        contextWindowTokens: 500_000,
+      },
+    ],
+    efforts: [...GROK_REASONING_OPTIONS],
+  },
+  {
     // Pi (badlogic's pi-coding-agent) runs in-process against the Model
     // Registry. The catalog is DEFAULT_PI_FAVE_MODELS until the user edits
     // their Default Models — any registry model id remains valid (see
@@ -739,6 +872,9 @@ export function normalizeProviderModelId(
   }
   if (provider === "cursor") {
     return normalizeCursorModelId(modelId, fallbackModelId ?? getProviderCatalog(provider).defaultModel)
+  }
+  if (provider === "grok") {
+    return normalizeGrokModelId(modelId, fallbackModelId ?? getProviderCatalog(provider).defaultModel)
   }
   const match = getProviderModelMatch(provider, modelId)
   if (match) return match.id
@@ -906,12 +1042,31 @@ export function isNightlyVersion(version: string): boolean {
   return version.includes("-nightly.")
 }
 
+/**
+ * `waiting_on_subagent` is a chat whose own turn has ended while work it
+ * handed to another agent is still going: its provider's (a subagent, a
+ * workflow) or a Kanna sub-chat. That work comes back and starts the chat's
+ * next turn, so the chat has not finished. A shell or a monitor it left
+ * running is not that: a dev server is not something a chat is waiting for,
+ * and such a chat reads as its last turn ended.
+ * A chat whose turn is still running reads `running`, whatever it handed off.
+ */
 export type KannaStatus =
   | "idle"
   | "starting"
   | "running"
   | "waiting_for_user"
+  | "waiting_on_subagent"
   | "failed"
+
+/**
+ * Work is still going in the chat without needing the user: a turn in flight,
+ * or handed-off work the chat is waiting on. Such a chat is in progress, not
+ * ready to review, however its last turn ended.
+ */
+export function isWorkingStatus(status?: string | null): boolean {
+  return status === "starting" || status === "running" || status === "waiting_on_subagent"
+}
 
 export interface ProjectSummary {
   id: string
@@ -999,6 +1154,18 @@ export interface SidebarChatRow {
   pinnedAt?: number
   hasAutomation: boolean
   canFork?: boolean
+  /**
+   * The chat whose agent started this one as a sub-chat. Lists of chats leave
+   * these out: a sub-chat is shown with its parent, the way a subagent is. It
+   * stays in `chats` so anything that looks a chat up by id still finds it.
+   */
+  parentChatId?: string
+  /**
+   * Set when `parentChatId` came from the parent adopting the chat, not
+   * starting it. An adopted chat stays in every list: `isSubChat` in
+   * `shared/sub-chat.ts` is the rule. Never false; absent on every other row.
+   */
+  adopted?: true
 }
 
 /**
@@ -1052,6 +1219,11 @@ export interface SidebarProjectGroup {
   realTitle: string
   sidebarTitle?: string
   /**
+   * When the project was pinned in the Channels view (epoch ms). Absent when
+   * it isn't. Pinned projects are listed in the order they were pinned.
+   */
+  pinnedAt?: number
+  /**
    * Basename of the git repo root, absent when the project isn't in a repo.
    * Not always the project's folder name — a project can be a subdirectory of
    * its repo. Together with `branchName` this is the New Sidebar's `repo/branch`
@@ -1082,6 +1254,13 @@ export interface SidebarProjectGroup {
    * repo apart from a GitHub one.
    */
   repoUrl?: string
+  /**
+   * The project's own icon, found in its files and stored small (see
+   * `project-icons.ts`). The file name changes with the icon, so the URL can
+   * be cached forever. Absent when the project has none, or it hasn't been
+   * looked for yet: draw the monogram.
+   */
+  iconUrl?: string
   localPath: string
   chats: SidebarChatRow[]
   previewChats: SidebarChatRow[]
@@ -1189,9 +1368,31 @@ export interface AppSettingsSnapshot {
   defaultProvider: DefaultProviderPreference
   /** Default action for Enter while a turn is running. ⌘Enter does the other. */
   submitWhileRunning: SubmitWhileRunning
+  /** Whether the widget column and the terminal open and close per chat or per project. */
+  paneVisibility: {
+    widgets: PaneVisibilityScope
+    terminal: PaneVisibilityScope
+  }
   providerDefaults: ChatProviderPreferences
   /** Labs: the tabbed Chats/Projects "New Sidebar". On by default; false opts back into the legacy sidebar. */
   newSidebarEnabled: boolean
+  /**
+   * Draw each chat's project icon in the sidebar's Chats view, where the
+   * agent's icon otherwise sits. On unless false, and absent when on.
+   */
+  projectIconsInChats?: boolean
+  /**
+   * Show the chats you have open as tabs in the chat's title bar, in place of
+   * the one chat's title. Off unless true, and absent when off. The tabs
+   * themselves are each browser's own; this is only whether to show them.
+   */
+  chatTabsEnabled?: boolean
+  /**
+   * Show the closed widget column over the chat while the mouse is at the
+   * window's right edge (the peek, as the collapsed sidebar has on the left).
+   * Off unless true, and absent when off.
+   */
+  widgetsPeekEnabled?: boolean
   /** Base directory where cloned and newly created projects are placed. */
   newProjectsDirectory: string
   /**
@@ -1243,6 +1444,9 @@ export interface AppSettingsPatch {
   chatBrowserNotificationPreference?: ChatBrowserNotificationPreference
   submitWhileRunning?: SubmitWhileRunning
   newSidebarEnabled?: boolean
+  projectIconsInChats?: boolean
+  chatTabsEnabled?: boolean
+  widgetsPeekEnabled?: boolean
   newProjectsDirectory?: string
   setupShown?: boolean
   setupCompleted?: boolean
@@ -1250,6 +1454,7 @@ export interface AppSettingsPatch {
   terminal?: Partial<AppSettingsSnapshot["terminal"]>
   editor?: Partial<AppSettingsSnapshot["editor"]>
   transcript?: Partial<AppSettingsSnapshot["transcript"]>
+  paneVisibility?: Partial<AppSettingsSnapshot["paneVisibility"]>
   defaultProvider?: DefaultProviderPreference
   providerDefaults?: {
     claude?: Partial<Omit<ProviderPreference<ClaudeModelOptions>, "modelOptions">> & {
@@ -1259,6 +1464,9 @@ export interface AppSettingsPatch {
       modelOptions?: Partial<CodexModelOptions>
     }
     cursor?: Partial<ProviderPreference<CursorModelOptions>>
+    grok?: Partial<Omit<ProviderPreference<GrokModelOptions>, "modelOptions">> & {
+      modelOptions?: Partial<GrokModelOptions>
+    }
     pi?: Partial<Omit<ProviderPreference<PiModelOptions>, "modelOptions">> & {
       modelOptions?: Partial<PiModelOptions>
     }
@@ -1346,14 +1554,15 @@ export interface UsageLimitsSnapshot {
 // the coding-agent CLIs (claude, codex, cursor-agent), gh, and OpenRouter.
 // ---------------------------------------------------------------------------
 
-export type AuthServiceId = "claude" | "codex" | "cursor" | "gh" | "openrouter"
+export type AuthServiceId = "claude" | "codex" | "cursor" | "grok" | "gh" | "openrouter"
 
-export const AUTH_SERVICE_ORDER: AuthServiceId[] = ["claude", "codex", "cursor", "gh", "openrouter"]
+export const AUTH_SERVICE_ORDER: AuthServiceId[] = ["claude", "codex", "cursor", "grok", "gh", "openrouter"]
 
 export const AUTH_SERVICE_LABELS: Record<AuthServiceId, string> = {
   claude: "Claude Code",
   codex: "Codex",
   cursor: "Cursor",
+  grok: "Grok Build",
   gh: "GitHub",
   openrouter: "OpenRouter",
 }
@@ -1417,7 +1626,7 @@ export interface ProviderAuthSnapshot {
  * OpenAI-compatible endpoint — don't conflate it with the OpenRouter card).
  */
 export function authServiceForProvider(provider: AgentProvider): AuthServiceId | null {
-  if (provider === "claude" || provider === "codex" || provider === "cursor") return provider
+  if (provider === "claude" || provider === "codex" || provider === "cursor" || provider === "grok") return provider
   return null
 }
 
@@ -1560,6 +1769,8 @@ export interface TodoItem {
   content: string
   status: "pending" | "in_progress" | "completed"
   activeForm: string
+  /** The harness's own row id, when it sends one; Grok's merge patches address rows by it. */
+  id?: string
 }
 
 interface TranscriptEntryBase {
@@ -1658,6 +1869,22 @@ export interface DisplayToolCall
 export interface UnknownToolCall
   extends ToolCallBase<"unknown_tool", { payload?: Record<string, unknown> }> { }
 
+/**
+ * A Kanna tool that started another chat or sent one a message (`create_chat`,
+ * `fork_chat`, `send_message`). Drawn inline as a card for that chat, so its
+ * input and result travel with the transcript like a display tool's.
+ */
+export interface ChatToolCall
+  extends ToolCallBase<"chat", { payload: Record<string, unknown> }> { }
+
+/**
+ * A Kanna tool that set, changed or deleted a schedule (`set_schedule`,
+ * `delete_schedule`). Drawn inline as a card for that schedule, like a chat
+ * tool's card for its chat.
+ */
+export interface ScheduleToolCall
+  extends ToolCallBase<"schedule", { payload: Record<string, unknown> }> { }
+
 export type NormalizedToolCall =
   | AskUserQuestionToolCall
   | ExitPlanModeToolCall
@@ -1675,6 +1902,8 @@ export type NormalizedToolCall =
   | McpGenericToolCall
   | UnknownToolCall
   | DisplayToolCall
+  | ChatToolCall
+  | ScheduleToolCall
 
 export interface ToolResultEntry extends TranscriptEntryBase {
   kind: "tool_result"
@@ -1700,6 +1929,8 @@ export interface UserPromptEntry extends TranscriptEntryBase {
   content: string
   attachments?: ChatAttachment[]
   steered?: boolean
+  /** Set when something other than the user sent it. See `MessageSource`. */
+  source?: MessageSource
 }
 
 export interface SystemInitEntry extends TranscriptEntryBase {
@@ -1768,6 +1999,11 @@ export interface ChatDiffFile {
   patchDigest: string
   mimeType?: string
   size?: number
+  /**
+   * Binary content by git's own test (a NUL in the first 8000 bytes, or
+   * numstat's "-"): no line counts, and no text diff worth drawing.
+   */
+  binary?: boolean
 }
 
 export type ChatCommitChecksState = "pending" | "success" | "failure"
@@ -1780,6 +2016,27 @@ export interface ChatCommitChecks {
   total: number
   /** Actions run to open on click. Absent when GitHub reports no link. */
   url?: string
+}
+
+/** A single check's outcome. `skipped` and `neutral` count neither way. */
+export type ChatCheckRunState = "pending" | "success" | "failure" | "skipped" | "neutral"
+
+/**
+ * One check behind a rollup (an Actions job or a commit status), for the
+ * hover cards. Kept off `ChatCommitChecks` so the History snapshot, pushed on
+ * every refresh, carries only the counts.
+ */
+export interface ChatCheckRun {
+  name: string
+  /** The Actions workflow the job ran in ("CI"). Unset for a commit status. */
+  workflowName?: string
+  state: ChatCheckRunState
+  startedAt?: string
+  completedAt?: string
+  /** The job's page, or a status's target. */
+  url?: string
+  /** A commit status's own line ("Deployment has completed"). */
+  description?: string
 }
 
 export interface ChatBranchHistoryEntry {
@@ -1795,6 +2052,38 @@ export interface ChatBranchHistoryEntry {
 
 export interface ChatBranchHistorySnapshot {
   entries: ChatBranchHistoryEntry[]
+}
+
+/** One file a commit touched, against its first parent. */
+export interface ChatCommitFile {
+  path: string
+  /** Set when git saw a rename. */
+  previousPath?: string
+  additions: number
+  deletions: number
+  /** Git sees binary content: no line counts, no text diff. */
+  binary?: boolean
+}
+
+/**
+ * What a History row's hover card shows beyond the row: who committed it,
+ * whether it merged anything, and the files it changed. Fetched per commit
+ * when the card opens; the row itself stays on `ChatBranchHistoryEntry`.
+ */
+export interface ChatCommitDetails {
+  sha: string
+  authorEmail?: string
+  /** Set only when someone other than the author committed it. */
+  committerName?: string
+  committedAt?: string
+  parentCount: number
+  /** Capped by the server; `totalFileCount` says what was left out. */
+  files: ChatCommitFile[]
+  totalFileCount: number
+  additions: number
+  deletions: number
+  /** Every check GitHub ran on the commit. Unset when it has none or GitHub can't be read. */
+  checkRuns?: ChatCheckRun[]
 }
 
 export type ChatBranchListEntryKind = "local" | "remote" | "pull_request"
@@ -1813,6 +2102,62 @@ export type SelectedBranch =
       remoteRef?: string
     }
 
+/** A branch's latest commit, for its hover card. */
+export interface ChatBranchTipCommit {
+  sha: string
+  summary: string
+  authorName?: string
+  authoredAt: string
+}
+
+/** Commits on one side and not the other of two refs. */
+export interface ChatBranchDivergence {
+  /** The ref compared against: the default branch, or an upstream. */
+  name: string
+  ahead: number
+  behind: number
+}
+
+/** A pull request, read on its own for its hover card (the list carries less). */
+export interface ChatPullRequestDetails {
+  number: number
+  title: string
+  body?: string
+  url: string
+  authorLogin?: string
+  isDraft: boolean
+  baseRefName?: string
+  createdAt?: string
+  updatedAt?: string
+  additions?: number
+  deletions?: number
+  changedFiles?: number
+  commits?: number
+  comments?: number
+  /** GitHub's word for it: `clean`, `dirty` (conflicts), `blocked`, `behind`, `unstable`… */
+  mergeableState?: string
+  checks?: ChatCommitChecks
+  /** The checks behind `checks`, on the PR's head commit. */
+  checkRuns?: ChatCheckRun[]
+  labels: string[]
+}
+
+/**
+ * What a branch picker row's hover card shows: the branch's tip and where it
+ * stands against the default branch and its upstream, or, for a pull request,
+ * the PR as GitHub has it. Fetched when the card opens.
+ */
+export interface ChatBranchDetails {
+  lastCommit?: ChatBranchTipCommit
+  /** Against the default branch. Unset on the default branch itself. */
+  base?: ChatBranchDivergence
+  /** A local branch's upstream. */
+  upstream?: ChatBranchDivergence & { gone: boolean }
+  /** A remote branch you already have locally, by that local name. */
+  localBranchName?: string
+  pullRequest?: ChatPullRequestDetails
+}
+
 export interface ChatBranchListEntry {
   id: string
   kind: ChatBranchListEntryKind
@@ -1823,6 +2168,10 @@ export interface ChatBranchListEntry {
   remoteRef?: string
   prNumber?: number
   prTitle?: string
+  /** A pull request's author, by GitHub login. */
+  authorLogin?: string
+  /** That author's display name on GitHub, when they've set one. */
+  authorName?: string
   headRefName?: string
   headLabel?: string
   headRepoCloneUrl?: string
@@ -1867,12 +2216,27 @@ export interface UpstreamStatus {
   lastFetchedAt?: string
 }
 
+/** The open pull request whose head is the checked-out branch, as the Branch card pins it. */
+export interface ChatBranchPullRequest {
+  number: number
+  title: string
+  url: string
+  isDraft: boolean
+  /** Moves on a push or an edit, so a card's cached details know to read again. */
+  updatedAt?: string
+}
+
 export interface ChatDiffSnapshot extends BranchMetadata, UpstreamStatus {
   status: "unknown" | "ready" | "no_repo"
   /** Set when the checked-out branch is a pull request checked out through Kanna. */
   checkedOutPrNumber?: number
   files: ChatDiffFile[]
   branchHistory?: ChatBranchHistorySnapshot
+  /**
+   * The checked-out branch's open PR on GitHub, when there is one. Read in the
+   * background and attached from cache, so it can land a poll or two late.
+   */
+  branchPullRequest?: ChatBranchPullRequest
 }
 
 export interface BranchActionSuccess {
@@ -2124,7 +2488,7 @@ export type HydratedToolCall = {
 }[NormalizedToolCall["toolKind"]]
 
 export type HydratedTranscriptMessage =
-  | ({ kind: "user_prompt"; content: string; attachments?: ChatAttachment[]; steered?: boolean; id: string; messageId?: string; timestamp: string; hidden?: boolean })
+  | ({ kind: "user_prompt"; content: string; attachments?: ChatAttachment[]; steered?: boolean; source?: MessageSource; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "system_init"; model: string; tools: string[]; agents: string[]; slashCommands: string[]; mcpServers: McpServerInfo[]; provider: AgentProvider; id: string; messageId?: string; timestamp: string; hidden?: boolean; debugRaw?: string })
   | ({ kind: "account_info"; accountInfo: AccountInfo; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "assistant_text"; text: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
@@ -2140,6 +2504,93 @@ export type HydratedTranscriptMessage =
   | ({ kind: "unknown"; json: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ id: string; messageId?: string; hidden?: boolean } & HydratedToolCall)
 
+/**
+ * One task still going after the main agent stopped talking: a subagent, a
+ * backgrounded shell, a monitor, a workflow. The Tasks widget lists them all.
+ *
+ * Only the ones that are work handed to another agent (a subagent, a
+ * workflow, a sub-chat) keep the chat from reading as finished: the main
+ * agent's result arrives as soon as *it* is done, and without them the chat
+ * read as finished while the work it delegated was still going.
+ */
+export interface SubagentActivity {
+  /** The provider's own id: Claude's task id (a subagent's `agent_id`), or the spawning tool call id. */
+  id: string
+  /** `subagent`, `shell`, `monitor`, `workflow`, … Free-form: providers add kinds. */
+  type: string
+  /** Subagent type name ("code-reviewer") when known, else the task description. */
+  label: string
+  /** `stopped` is someone stopping it (the user, or the agent's TaskStop), not a failure. */
+  status: "running" | "completed" | "failed" | "stopped"
+  startedAt: number
+  /** Unset while running. */
+  endedAt?: number
+  /** The tool call that started it, when the provider names it. Claude's task events do. */
+  toolUseId?: string
+  /** What it was started to do: a subagent's task, a monitor's or a shell's description. */
+  description?: string
+  /** Its latest one-line status, when the provider reports one (an MCP task's own message). */
+  summary?: string
+  /** Tokens and tool calls so far, when the provider counts them. */
+  usage?: { totalTokens: number; toolUses: number }
+  /** A workflow's phases and agents. Only on `workflow`. */
+  workflow?: WorkflowProgress
+  /**
+   * The workflow this agent runs inside. Its work is on the workflow's row
+   * and card, so it gets no row of its own.
+   */
+  workflowId?: string
+  /** The provider can stop this one task without cancelling the turn (Claude's `stopTask`). */
+  stoppable?: boolean
+  /** Set when the task is a Kanna chat this one started (`type: "chat"`): the chat to open. */
+  chatId?: string
+}
+
+/**
+ * A running Claude workflow: the phases its script announced and every
+ * agent() call so far. Replaced wholesale on each progress report, as the
+ * CLI sends it.
+ */
+export interface WorkflowProgress {
+  /** The script's `meta.name` ("review-changes"). */
+  name?: string
+  phases: WorkflowPhase[]
+  agents: WorkflowAgent[]
+}
+
+export interface WorkflowPhase {
+  index: number
+  title: string
+}
+
+export type WorkflowAgentState = "queued" | "running" | "done" | "failed" | "skipped"
+
+/** One agent() call in a workflow. */
+export interface WorkflowAgent {
+  /** The call's index in the run, and its identity across reports. */
+  index: number
+  label: string
+  phaseIndex?: number
+  state: WorkflowAgentState
+  /** The CLI's agent id, once it has started: the same id a subagent's task carries. */
+  agentId?: string
+  model?: string
+  tokens?: number
+  toolCalls?: number
+  /** Epoch ms, from the machine's clock. */
+  startedAt?: number
+  /** Epoch ms of its latest report: its end, once it has ended. */
+  lastProgressAt?: number
+  durationMs?: number
+  /** The start of its prompt, as the CLI previews it. Clipped. */
+  promptPreview?: string
+  /** The start of its result. Clipped. */
+  resultPreview?: string
+  error?: string
+  /** Replayed from an earlier run of the same workflow rather than run again. */
+  cached?: boolean
+}
+
 export interface ChatRuntime {
   chatId: string
   projectId: string
@@ -2151,6 +2602,26 @@ export interface ChatRuntime {
   planMode: boolean
   autoPlan: boolean
   sessionToken: string | null
+  /**
+   * The chat's task log: delegated work running now and the latest to have
+   * finished, across turns, oldest first. Omitted when the chat has never
+   * spawned any, so a chat that doesn't delegate costs nothing on the wire.
+   */
+  subagents?: SubagentActivity[]
+  /**
+   * Schedules to do with this chat: the ones that send to it, the ones its
+   * agent created, and the one whose run started it. Omitted when there are none.
+   */
+  schedules?: ChatSchedule[]
+  /**
+   * The chat this one reports to as a sub-chat, as it stands now. The same
+   * value as `SidebarChatRow.parentChatId`, here so a client can show the way
+   * back to the parent from the chat's own snapshot. Omitted for a chat with
+   * no parent. The parent's title and status are still the sidebar's to give.
+   */
+  parentChatId?: string
+  /** Set when that parent adopted the chat. The same value as `SidebarChatRow.adopted`. */
+  adopted?: true
 }
 
 export interface ChatSnapshot {

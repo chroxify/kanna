@@ -13,7 +13,7 @@ const HOUR_MS = 60 * MINUTE_MS
 const DAY_MS = 24 * HOUR_MS
 
 /** "in 40m" / "in 3h" / "in 2d" — future counterpart of formatRelativeTime. */
-function formatUntil(isoTimestamp: string): string | null {
+export function formatUntil(isoTimestamp: string): string | null {
   const timestamp = Date.parse(isoTimestamp)
   if (!Number.isFinite(timestamp)) return null
   const delta = timestamp - Date.now()
@@ -23,7 +23,7 @@ function formatUntil(isoTimestamp: string): string | null {
   return `in ${Math.round(delta / DAY_MS)}d`
 }
 
-function formatPercent(value: number | null): string {
+export function formatPercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—"
   if (value > 0 && value < 1) return "<1%"
   return `${Math.round(value)}%`
@@ -81,7 +81,7 @@ function creditsSummary(credits: NonNullable<ProviderUsageSnapshot["credits"]>):
   return parts.length > 0 ? parts.join(" · ") : null
 }
 
-function providerLabel(providerId: string): string {
+export function providerLabel(providerId: string): string {
   return PROVIDERS.find((entry) => entry.id === providerId)?.label ?? providerId
 }
 
@@ -107,7 +107,7 @@ function barColorClass(usedPercent: number | null): string {
   return "bg-emerald-500"
 }
 
-function UsageBar({ usedPercent }: { usedPercent: number | null }) {
+export function UsageBar({ usedPercent }: { usedPercent: number | null }) {
   const width = usedPercent === null ? 0 : Math.max(usedPercent > 0 ? 1.5 : 0, Math.min(100, usedPercent))
   return (
     <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -122,6 +122,30 @@ function UsageBar({ usedPercent }: { usedPercent: number | null }) {
 /** Shared grid so every window row lines up like a table (settings + empty state). */
 const WINDOW_ROW_GRID = "grid grid-cols-[minmax(0,1fr)_5rem_minmax(4rem,1.4fr)_2.375rem] items-center gap-3"
 
+// The widget column's rows: a bare reset time ("2h"), a bar 40% narrower, and
+// the percent right-aligned so the numbers line up down the card. The narrow
+// columns stay fixed rather than hugging their text so the bars still line up
+// row to row.
+const COMPACT_WINDOW_ROW_GRID = "grid grid-cols-[minmax(0,1fr)_1.75rem_minmax(2.4rem,0.84fr)_2.25rem] items-center gap-2"
+
+/**
+ * When a window resets. Full ("Resets in 2h") normally; compact shows just
+ * the time and keeps the full sentence for its tooltip.
+ */
+function ResetTime({ resets, compact, className }: { resets: string | null; compact: boolean; className?: string }) {
+  if (!resets) return <div className={className} />
+  const full = `Resets ${resets}`
+  if (!compact) return <div className={cn("truncate text-xs text-muted-foreground", className)}>{full}</div>
+  return (
+    <Tooltip delayDuration={0}>
+      <TooltipTrigger asChild>
+        <div className={cn("truncate text-xs text-muted-foreground", className)}>{resets.replace(/^in /, "")}</div>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="center">{full}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 /**
  * Same grid for a collapsed card's header, minus the reset column on narrow
  * screens — the provider name plus a meter is all that fits on a phone, and the
@@ -134,16 +158,48 @@ const COLLAPSED_HEADER_GRID = cn(
   "md:grid-cols-[minmax(0,1fr)_5rem_minmax(4rem,1fr)_2.375rem]",
 )
 
-function WindowRow({ window }: { window: UsageLimitWindow }) {
+function WindowRow({ window, compact = false }: { window: UsageLimitWindow; compact?: boolean }) {
   const resets = window.resetsAt ? formatUntil(window.resetsAt) : null
   return (
-    <div className={WINDOW_ROW_GRID}>
+    <div className={compact ? COMPACT_WINDOW_ROW_GRID : WINDOW_ROW_GRID}>
       <div className="min-w-0 truncate text-sm text-foreground">{window.label}</div>
-      <div className="truncate text-xs text-muted-foreground">{resets ? `Resets ${resets}` : ""}</div>
+      <ResetTime resets={resets} compact={compact} />
       <UsageBar usedPercent={window.usedPercent} />
-      <div className="text-right text-sm font-medium tabular-nums text-foreground">
+      <div className={cn("tabular-nums", compact ? "text-right text-xs text-muted-foreground" : "text-right text-sm font-medium text-foreground")}>
         {formatPercent(window.usedPercent)}
       </div>
+    </div>
+  )
+}
+
+/** Scope and plan as one label ("Personal max"), or "" when neither is known. */
+export function planLabel(snapshot: ProviderUsageSnapshot): string {
+  return [accountScopeLabel(snapshot.plan), snapshot.plan].filter(Boolean).join(" ")
+}
+
+/**
+ * A provider's limit windows, credits and detail line. Compact is the widget
+ * column's density: a bare reset time and a narrower bar.
+ */
+export function UsageWindowRows({ snapshot, compact = false, className }: {
+  snapshot: ProviderUsageSnapshot
+  compact?: boolean
+  className?: string
+}) {
+  return (
+    <div className={cn("space-y-2.5", className)}>
+      {snapshot.windows.map((window) => (
+        <WindowRow key={window.id} window={window} compact={compact} />
+      ))}
+      {snapshot.credits ? (
+        <div className="flex items-baseline justify-between gap-3 border-t border-border pt-3 text-sm">
+          <span className="text-foreground">{snapshot.credits.label}</span>
+          <span className="text-muted-foreground">{creditsSummary(snapshot.credits)}</span>
+        </div>
+      ) : null}
+      {snapshot.detail ? (
+        <div className="text-xs text-muted-foreground">{snapshot.detail}</div>
+      ) : null}
     </div>
   )
 }
@@ -204,7 +260,7 @@ export function ProviderCard({
 
   // Scope and plan share one pill ("Personal Pro"); `capitalize` title-cases the
   // raw plan string ("max" → "Max").
-  const planBadgeText = [accountScopeLabel(snapshot.plan), snapshot.plan].filter(Boolean).join(" ")
+  const planBadgeText = planLabel(snapshot)
 
   const identity = (
     <div className="flex min-w-0 items-center gap-2.5">
@@ -212,10 +268,12 @@ export function ProviderCard({
         // Harness icon by default; on card hover it cross-fades (scale/fade/
         // blur, like the sidebar logo) to a chevron indicating expand state.
         <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
-          <Icon className="absolute inset-0 h-4 w-4 text-foreground transition-all duration-150 ease-out opacity-100 scale-100 blur-none group-hover/usage-card:opacity-0 group-hover/usage-card:scale-50 group-hover/usage-card:blur-[1px]" />
+          {/* From 75%, not 50%: at half size the icon reads as vanishing
+              rather than turning into the chevron. */}
+          <Icon className="absolute inset-0 h-4 w-4 text-foreground transition-[opacity,scale,filter] duration-150 ease-out opacity-100 scale-100 blur-none group-hover/usage-card:opacity-0 group-hover/usage-card:scale-75 group-hover/usage-card:blur-[1px]" />
           <ChevronRight
             className={cn(
-              "absolute inset-0 h-4 w-4 text-muted-foreground transition-all duration-150 ease-out opacity-0 scale-50 blur-[1px] group-hover/usage-card:opacity-100 group-hover/usage-card:scale-100 group-hover/usage-card:blur-none",
+              "absolute inset-0 h-4 w-4 text-muted-foreground transition-[opacity,scale,filter,rotate] duration-150 ease-out opacity-0 scale-75 blur-[1px] group-hover/usage-card:opacity-100 group-hover/usage-card:scale-100 group-hover/usage-card:blur-none",
               expanded ? "rotate-90" : undefined,
             )}
           />
@@ -249,9 +307,7 @@ export function ProviderCard({
   ) : (
     <div className={COLLAPSED_HEADER_GRID}>
       {identity}
-      <div className="hidden truncate text-xs text-muted-foreground md:block">
-        {summaryResets ? `Resets ${summaryResets}` : ""}
-      </div>
+      <ResetTime resets={summaryResets} compact={false} className="hidden md:block" />
       {summaryWindow ? (
         <Tooltip delayDuration={0}>
           <TooltipTrigger asChild>
@@ -277,20 +333,7 @@ export function ProviderCard({
 
   const body = showBody ? (
     hasContent ? (
-      <div className="mt-4 space-y-2.5">
-        {snapshot.windows.map((window) => (
-          <WindowRow key={window.id} window={window} />
-        ))}
-        {snapshot.credits ? (
-          <div className="flex items-baseline justify-between gap-3 border-t border-border pt-3 text-sm">
-            <span className="text-foreground">{snapshot.credits.label}</span>
-            <span className="text-muted-foreground">{creditsSummary(snapshot.credits)}</span>
-          </div>
-        ) : null}
-        {snapshot.detail ? (
-          <div className="text-xs text-muted-foreground">{snapshot.detail}</div>
-        ) : null}
-      </div>
+      <UsageWindowRows snapshot={snapshot} className="mt-4" />
     ) : (
       <div className="mt-3 text-sm text-muted-foreground">
         {snapshot.detail
@@ -328,10 +371,16 @@ export function ProviderCard({
 /** How often an open usage view re-checks; server-side TTL coalesces the reads. */
 const USAGE_POLL_MS = 60_000
 
-export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
-  const socket = state.socket
+/**
+ * The live usage-limits snapshot plus a refresh, for any view that shows it.
+ * Subscribing gets the cached snapshot at once; while `active`, the view also
+ * refreshes on open and every minute. Those refreshes respect the server's
+ * TTL, so however many views poll there is at most one real read a minute.
+ */
+export function useUsageLimits(socket: KannaState["socket"], active = true) {
   const [snapshot, setSnapshot] = useState<UsageLimitsSnapshot | null>(null)
-  const [refreshing, setRefreshing] = useState(true)
+  // An active view refreshes the moment it mounts, so it starts out refreshing.
+  const [refreshing, setRefreshing] = useState(active)
 
   // Live subscription: the immediate push shows cached/stale data right away,
   // and turn-pushed updates land here while the view is open.
@@ -339,7 +388,7 @@ export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
     return socket.subscribe<UsageLimitsSnapshot>({ type: "usage-limits" }, setSnapshot)
   }, [socket])
 
-  const runRefresh = useCallback(
+  const refresh = useCallback(
     async (force: boolean) => {
       setRefreshing(true)
       try {
@@ -354,18 +403,22 @@ export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
     [socket],
   )
 
-  // Keep the view current on its own: refresh on open and every minute while
-  // visible. Both are TTL-respecting (force=false), so the server coalesces to
-  // at most one real read per minute regardless of how many views poll.
   useEffect(() => {
-    void runRefresh(false)
+    if (!active) return
+    void refresh(false)
     const interval = setInterval(() => {
       if (typeof document === "undefined" || document.visibilityState === "visible") {
-        void runRefresh(false)
+        void refresh(false)
       }
     }, USAGE_POLL_MS)
     return () => clearInterval(interval)
-  }, [runRefresh])
+  }, [active, refresh])
+
+  return { snapshot, refreshing, refresh }
+}
+
+export function UsageSection({ state }: { state: Pick<KannaState, "socket"> }) {
+  const { snapshot, refreshing, refresh: runRefresh } = useUsageLimits(state.socket)
 
   return (
     <div className="space-y-4">
