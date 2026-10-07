@@ -77,6 +77,14 @@ export type SubscriptionTopic =
      * was rewritten — from being spliced onto unrelated history.
      */
     cachedSpan?: { start: number; end: number; endEntryId: string }
+    /**
+     * Held for a running chat the client is not showing, so opening it later
+     * costs no fetch. The server pushes these at most once per
+     * `BACKGROUND_CHAT_PUSH_INTERVAL_MS`: the client only needs the chat
+     * roughly current before it is opened, and the open itself subscribes at
+     * full rate. Optional so the iOS app is unaffected.
+     */
+    background?: boolean
   }
   | { type: "project-git"; projectId: string }
   | { type: "terminal"; terminalId: string }
@@ -122,6 +130,12 @@ export type ClientCommand =
   | { type: "project.create"; localPath: string; title?: string }
   | { type: "project.rename"; projectId: string; title: string }
   | { type: "project.rename"; localPath: string; title: string }
+  /**
+   * Pins a project in the Channels view, or unpins it. `pinnedAt` (epoch ms)
+   * back-dates the pin: sent once by a client carrying over the pins it used
+   * to keep for itself, so they land in the order they were made.
+   */
+  | { type: "project.setPinned"; projectId: string; pinned: boolean; pinnedAt?: number }
   | { type: "project.clone"; cloneUrl: string; localPath: string; fallbackPath?: string; title: string }
   | { type: "github.listRecentRepos" }
   | { type: "project.remove"; projectId: string }

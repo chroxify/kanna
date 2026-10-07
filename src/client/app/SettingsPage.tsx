@@ -7,19 +7,18 @@ import {
 } from "lucide-react"
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom"
 import { getKeybindingsFilePathDisplay, SDK_CLIENT_APP } from "../../shared/branding"
-import { SettingsHeaderButton } from "../components/ui/settings-header-button"
-import { useScrollbarGutterVar } from "../hooks/useScrollbarGutterVar"
 import { getResolvedKeybindings } from "../lib/keybindings"
 import { cn } from "../lib/utils"
 import { ChangelogSection, useChangelog } from "./settings/ChangelogSection"
 import { GeneralSection } from "./settings/GeneralSection"
 import { KeybindingsSection } from "./settings/KeybindingsSection"
 import { LabsSection } from "./settings/LabsSection"
+import { MacSection } from "./settings/MacSection"
 import { ProvidersSection } from "./settings/ProvidersSection"
-import { SETTINGS_SECTIONS } from "./settings/registry"
+import { SETTINGS_SECTIONS, visibleSettingsSections } from "./settings/registry"
 import { SkillsSection } from "./settings/SkillsSection"
 import { UsageSection } from "./settings/UsageSection"
-import { getKeybindingsSubtitle, SETTINGS_INSET_X_CLASS, SettingsNotice, SettingsPlaceholder } from "./settings/shared"
+import { getKeybindingsSubtitle, SETTINGS_INSET_X_CLASS, SettingsActionButton, SettingsNotice, SettingsPlaceholder } from "./settings/shared"
 import type { KannaState } from "./useKannaState"
 
 // Sections live under ./settings/; these re-exports keep the historical
@@ -40,8 +39,10 @@ export {
   shouldPreviewChatSoundChange,
 } from "./settings/shared"
 
-const sidebarItems = SETTINGS_SECTIONS
-type SidebarItem = (typeof sidebarItems)[number]
+// This Mac shows only in Kanna for Mac (registry.isSettingsSectionVisible);
+// the answer is a property of the page, so it's read once.
+const sidebarItems = visibleSettingsSections()
+type SidebarItem = (typeof SETTINGS_SECTIONS)[number]
 type SidebarPageId = SidebarItem["id"]
 
 export function resolveSettingsSectionId(sectionId: string | undefined): SidebarPageId | null {
@@ -142,19 +143,23 @@ export function SettingsPage() {
     }
   }, [])
 
-  // The status footer overlays the section scroller, so it ends at that
-  // scroller's gutter rather than dimming the scrollbar through its backdrop
-  // blur. See useScrollbarGutterVar for why z-index can't do this.
-  const pageRef = useRef<HTMLDivElement>(null)
-  const sectionScrollRef = useRef<HTMLDivElement>(null)
-  useScrollbarGutterVar(sectionScrollRef, pageRef, "--settings-scrollbar-w")
-
   const selectedSection = sidebarItems.find((item) => item.id === selectedPage) ?? sidebarItems[0]
   const selectedSectionSubtitle =
     selectedPage === "keybindings"
       ? getKeybindingsSubtitle(keybindingsFilePathDisplay)
       : selectedSection.subtitle
   const showFooter = !isConnecting
+
+  // Picking another section fades its content in, so the swap reads as one
+  // page changing rather than a cut. Opening Settings doesn't: that is often
+  // ⌘, and a shortcut should land at once.
+  const shownSectionRef = useRef(selectedPage)
+  const sectionSwitchedRef = useRef(false)
+  if (shownSectionRef.current !== selectedPage) {
+    shownSectionRef.current = selectedPage
+    sectionSwitchedRef.current = true
+  }
+  const sectionSwitched = sectionSwitchedRef.current
 
   async function handleSidebarSignOut() {
     if (signingOut) return
@@ -167,10 +172,20 @@ export function SettingsPage() {
   }
 
   return (
-    <div ref={pageRef} className="relative flex h-full flex-1 min-w-0 bg-background">
+    <div data-settings-page className="relative flex h-full flex-1 min-w-0 bg-background">
+      {/* The Mac app's title bar across the settings page: it drags the window.
+          Only the sidebar's "Settings" heading and the content's md:pt-16
+          reach up under it, so it covers nothing clickable. */}
+      <div
+        data-window-drag
+        aria-hidden
+        className="hidden mac-app:md:block absolute inset-x-0 top-0 z-10 h-[calc(var(--mac-traffic-lights-center)*2)]"
+      />
       <div className="flex min-w-0 flex-1">
         <aside className={`hidden w-[200px] shrink-0 md:block ${showFooter ? "pb-[89px]" : ""}`}>
-          <div className="flex flex-col gap-1 px-4 py-6">
+          {/* In the Mac app the traffic lights and the pinned sidebar toggle sit
+              over this column's top when the app sidebar is collapsed. */}
+          <div className="flex flex-col gap-1 px-4 py-6 mac-app:md:pt-[43px]">
             <div className="px-3 pb-5 text-[22px] font-extrabold tracking-[-0.5px] text-foreground">
               Settings
             </div>
@@ -209,7 +224,7 @@ export function SettingsPage() {
           </div>
         </aside>
 
-        <div ref={sectionScrollRef} className="min-w-0 flex-1 overflow-y-auto">
+        <div className="min-w-0 flex-1 overflow-y-auto">
           <div className="border-b border-border py-2 md:hidden h-[63px] pl-1 md:h-auto">
             <div className="overflow-x-auto pr-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <div className="flex min-w-max items-center gap-2">
@@ -265,21 +280,27 @@ export function SettingsPage() {
             {isConnecting ? (
               <SettingsPlaceholder loading className="mx-auto max-w-4xl">Loading machine settings…</SettingsPlaceholder>
             ) : (
-              <div className="@container mx-auto max-w-4xl">
-                <div className={cn("pb-8", SETTINGS_INSET_X_CLASS)}>
+              <div
+                key={selectedPage}
+                className={cn(
+                  "@container mx-auto max-w-4xl",
+                  sectionSwitched && "transition-opacity duration-150 ease-snappy starting:opacity-0",
+                )}
+              >
+                <div className={cn("pb-6", SETTINGS_INSET_X_CLASS)}>
                   <div className="flex items-center justify-between gap-4 min-h-[34px]">
                     <div className="text-lg font-semibold tracking-[-0.2px] text-foreground">
                       {selectedSection.label}
                     </div>
                     {selectedPage === "keybindings" ? (
-                      <SettingsHeaderButton
+                      <SettingsActionButton
                         onClick={() => {
                           void state.handleOpenExternalPath("open_editor", keybindingsFilePathDisplay)
                         }}
-                        icon={<Code className="h-4 w-4" />}
+                        icon={<Code />}
                       >
                         Open in {state.editorLabel}
-                      </SettingsHeaderButton>
+                      </SettingsActionButton>
                     ) : null}
                   </div>
                   <div className="mt-1 text-sm text-muted-foreground">
@@ -289,6 +310,8 @@ export function SettingsPage() {
 
                 {selectedPage === "general" ? (
                   <GeneralSection state={state} appVersion={appVersion} />
+                ) : selectedPage === "mac" ? (
+                  <MacSection />
                 ) : selectedPage === "providers" ? (
                   <ProvidersSection state={state} />
                 ) : selectedPage === "keybindings" ? (
@@ -330,7 +353,7 @@ export function SettingsPage() {
       </div>
 
       {showFooter ? (
-        <div className="absolute bottom-0 left-0 right-[var(--settings-scrollbar-w,0px)] border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="absolute bottom-0 left-0 right-0 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
           <div className="px-6 py-[14.25px]">
             <div className="grid gap-3 text-xs text-muted-foreground grid-cols-2 lg:grid-cols-4">
               <div>

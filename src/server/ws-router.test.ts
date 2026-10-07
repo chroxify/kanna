@@ -92,6 +92,7 @@ const DEFAULT_APP_SETTINGS_SNAPSHOT: AppSettingsSnapshot = {
   chatSoundId: "funk",
   chatBrowserNotificationPreference: "never",
   submitWhileRunning: "queue",
+  paneVisibility: { widgets: "chat", terminal: "chat" },
   terminal: {
     scrollbackLines: 1_000,
     minColumnWidth: 450,
@@ -656,7 +657,9 @@ describe("ws-router", () => {
         v: PROTOCOL_VERSION,
         type: "ack",
         id: "settings-read-1",
-        result: DEFAULT_APP_SETTINGS_SNAPSHOT,
+        // Acks carry the live provider catalog too: the client replaces its
+        // snapshot with them.
+        result: { ...DEFAULT_APP_SETTINGS_SNAPSHOT, availableProviders: SERVER_PROVIDERS },
       },
       {
         v: PROTOCOL_VERSION,
@@ -664,6 +667,7 @@ describe("ws-router", () => {
         id: "settings-write-1",
         result: {
           ...DEFAULT_APP_SETTINGS_SNAPSHOT,
+          availableProviders: SERVER_PROVIDERS,
           analyticsEnabled: false,
         },
       },
@@ -769,6 +773,7 @@ describe("ws-router", () => {
         id: "settings-patch-1",
         result: {
           ...DEFAULT_APP_SETTINGS_SNAPSHOT,
+          availableProviders: SERVER_PROVIDERS,
           theme: "dark",
           terminal: {
             ...DEFAULT_APP_SETTINGS_SNAPSHOT.terminal,
@@ -1196,6 +1201,61 @@ describe("ws-router", () => {
     expect(activeStatusCalls).toBe(1)
     expect(wsA.sent).toHaveLength(1)
     expect(wsB.sent).toHaveLength(1)
+  })
+
+  test("a chat that starts waiting on a subagent is pushed once, to the sidebar and to the chat", async () => {
+    const state = createEmptyState()
+    state.projectsById.set("project-1", { id: "project-1", localPath: "/tmp/project", title: "Project", createdAt: 1, updatedAt: 1 })
+    state.chatsById.set("chat-1", {
+      id: "chat-1",
+      projectId: "project-1",
+      title: "Chat",
+      createdAt: 1,
+      updatedAt: 1,
+      unread: false,
+      provider: null,
+      planMode: false,
+      autoPlan: false,
+      sessionToken: null,
+      lastTurnOutcome: null,
+    })
+    // No turn is in flight throughout: only the wider read knows of the wait.
+    const waiting = new Map<string, "waiting_on_subagent">()
+    const router = createTestRouter({
+      store: createFakeStore({
+        state,
+        getChat: (chatId: string) => state.chatsById.get(chatId) ?? null,
+        getClientTranscript: () => ({ messages: [], startIndex: 0, readAnchor: null }),
+      }),
+      agent: {
+        getActiveStatuses: () => new Map(),
+        getChatStatuses: () => new Map(waiting),
+        getDrainingChatIds: () => new Set(),
+      } as never,
+    })
+    const ws = new FakeWebSocket()
+    router.handleOpen(ws as never)
+    ws.data.subscriptions.set("sidebar-1", { type: "sidebar" })
+    ws.data.subscriptions.set("chat-1", { type: "chat", chatId: "chat-1" })
+    const change = { sidebar: true, chatIds: ["chat-1"] }
+    const statuses = () => JSON.stringify(ws.sent).match(/"status":"[a-z_]+"/g) ?? []
+
+    await router.broadcastChatChange(change)
+    expect(ws.sent).toHaveLength(2)
+    expect(new Set(statuses())).toEqual(new Set(['"status":"idle"']))
+
+    waiting.set("chat-1", "waiting_on_subagent")
+    await router.broadcastChatChange(change)
+    expect(ws.sent).toHaveLength(4)
+    for (const message of ws.sent.slice(2)) expect(JSON.stringify(message)).toContain('"status":"waiting_on_subagent"')
+
+    // Nothing moved, so nothing is sent: the status is part of what is compared.
+    await router.broadcastChatChange(change)
+    expect(ws.sent).toHaveLength(4)
+
+    waiting.clear()
+    await router.broadcastChatChange(change)
+    expect(ws.sent).toHaveLength(6)
   })
 
   test("subscribes to project git snapshots independently from chat snapshots", async () => {
@@ -2521,7 +2581,7 @@ describe("transcript windows", () => {
     ]
   }
 
-  function createWindowedRouter(entries: Array<Record<string, unknown>>) {
+  function createWindowedRouter(entries: Array<Record<string, unknown>>, overrides: Partial<CreateWsRouterArgs> = {}) {
     const state = createEmptyState()
     state.projectsById.set("project-1", { id: "project-1", localPath: "/tmp/project", title: "Project", createdAt: 1, updatedAt: 1 })
     state.chatsById.set("chat-1", {
@@ -2553,7 +2613,7 @@ describe("transcript windows", () => {
     const settings = createFakeAppSettings({
       getSnapshot: () => ({ ...DEFAULT_APP_SETTINGS_SNAPSHOT, transcript: { windowAssistantMessages: 2 } }),
     })
-    return createTestRouter({ store: fake, appSettings: settings })
+    return createTestRouter({ store: fake, appSettings: settings, ...overrides })
   }
 
   const chatData = (ws: FakeWebSocket, index: number) =>
@@ -2641,5 +2701,48 @@ describe("transcript windows", () => {
     } finally {
       resetServerProvidersForTests()
     }
+  })
+
+  test("a background subscription is pushed at most once per interval, and the last change still lands", async () => {
+    const entries = [...turn(1), ...turn(2)]
+    const router = createWindowedRouter(entries, { backgroundChatPushIntervalMs: 40 })
+    const ws = new FakeWebSocket()
+    router.handleOpen(ws as never)
+
+    await router.handleMessage(ws as never, JSON.stringify({
+      v: 1, type: "subscribe", id: "bg", topic: { type: "chat", chatId: "chat-1", background: true },
+    }))
+    // The first push is never held back.
+    expect(ws.sent).toHaveLength(1)
+
+    // Two changes inside the interval: neither goes out yet.
+    entries.push(...turn(3))
+    await router.broadcastSnapshots()
+    entries.push(...turn(4))
+    await router.broadcastSnapshots()
+    expect(ws.sent).toHaveLength(1)
+
+    // One trailing push carries both.
+    await Bun.sleep(80)
+    expect(ws.sent).toHaveLength(2)
+    expect(chatData(ws, 1).messages.map((entry) => entry._id)).toEqual(["p3", "a3", "b3", "p4", "a4", "b4"])
+  })
+
+  test("unsubscribing a background chat cancels its pending push", async () => {
+    const entries = [...turn(1), ...turn(2)]
+    const router = createWindowedRouter(entries, { backgroundChatPushIntervalMs: 40 })
+    const ws = new FakeWebSocket()
+    router.handleOpen(ws as never)
+    await router.handleMessage(ws as never, JSON.stringify({
+      v: 1, type: "subscribe", id: "bg", topic: { type: "chat", chatId: "chat-1", background: true },
+    }))
+    entries.push(...turn(3))
+    await router.broadcastSnapshots()
+
+    await router.handleMessage(ws as never, JSON.stringify({ v: 1, type: "unsubscribe", id: "bg" }))
+    await Bun.sleep(80)
+    // The first push and the unsubscribe ack, nothing after.
+    expect(ws.sent).toHaveLength(2)
+    expect(ws.sent[1]).toEqual({ v: PROTOCOL_VERSION, type: "ack", id: "bg" })
   })
 })
