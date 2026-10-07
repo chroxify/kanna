@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow"
 import { PROVIDERS, withPiFaveModels, type AgentProvider, type AppSettingsPatch, type AskUserQuestionAnswerMap, type AppSettingsSnapshot, type ChatDiffSnapshot, type FaveModel, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateSnapshot } from "../../shared/types"
 import { NEW_CHAT_COMPOSER_ID, useChatPreferencesStore } from "../stores/chatPreferencesStore"
 import { useRightSidebarStore } from "../stores/rightSidebarStore"
+import { usePreviewedChatId } from "../stores/viewerStore"
 import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
 import { getEditorPresetLabel, useTerminalPreferencesStore } from "../stores/terminalPreferencesStore"
 import { useEffectiveEditorPreset } from "../components/open-external-menu"
@@ -16,6 +17,7 @@ import {
   useFirstProjectGroup,
   useNavbarRepoLabel,
   useProjectIdForChat,
+  useSidebarChatStatus,
   useSidebarReady,
   useSidebarStore,
 } from "../stores/sidebarStore"
@@ -25,7 +27,7 @@ import type { OpenLocalLinkTarget } from "../components/messages/shared"
 import { useAppDialog } from "../components/ui/app-dialog"
 import { useTheme } from "../hooks/useTheme"
 import { processTranscriptMessages } from "../lib/parseTranscript"
-import { canCancelStatus, getLatestToolIds, isProcessingStatus } from "./derived"
+import { canCancelStatus, getLatestToolIds, hasNoTurnStatus, isProcessingStatus } from "./derived"
 import {
   getActiveChatSnapshot,
   getMostRecentlyActiveProjectId,
@@ -54,13 +56,16 @@ import {
 import { DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES, trimTranscriptWindow } from "../../shared/transcript-window"
 import { CLOUD_WS_ENDPOINT_PATH, type CloudWsEndpointResponse } from "../../shared/cloud-api"
 import { KannaSocket, type SocketStatus } from "./socket"
+import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "../lib/storageKeys"
 import { useAppSettingsSync } from "./useAppSettingsSync"
+import { useBackgroundChatSubscriptions } from "./useBackgroundChatSubscriptions"
 import { useChatCommands } from "./useChatCommands"
 import { useChatReadAnchor, type ChatReadAnchorState, type ReadAnchorLayoutSource } from "./useChatReadAnchor"
 import { useSendMessage } from "./useSendMessage"
 import { useShareExport } from "./useShareExport"
 import { useUpdateRestart } from "./useUpdateRestart"
 import type { EditorOpenSettings, OpenExternalAction, TerminalPreset } from "../../shared/protocol"
+import { applySidebarPatch, type SidebarPatch } from "../../shared/sidebar-patch"
 
 export {
   getUiUpdateReadinessPath,
@@ -95,6 +100,8 @@ const EMPTY_OUTLINE: TranscriptOutlineEntry[] = []
 // per render failed its shallow compare and re-rendered the whole viewport on
 // every push.
 const EMPTY_QUEUED_MESSAGES: ChatSnapshot["queuedMessages"] = []
+/** How long a chat open waits on the disk cache before subscribing without it. */
+const DISK_CACHE_WAIT_MS = 30
 
 function sameOriginWsUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
@@ -280,7 +287,15 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const [localProjectsReady, setLocalProjectsReady] = useState(false)
   const [chatReady, setChatReady] = useState(false)
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Remembered in this browser: collapsing the sidebar is how a window is
+  // arranged, and a reload should not put it back.
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1"
+  )
+  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
+    setSidebarCollapsedState(collapsed)
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0")
+  }, [])
   const [commandError, setCommandError] = useState<string | null>(null)
   const [startingLocalPath, setStartingLocalPath] = useState<string | null>(null)
   const [pendingChatId, setPendingChatId] = useState<string | null>(null)
@@ -307,11 +322,46 @@ export function useKannaState(activeChatId: string | null): KannaState {
   // sidebar field several times a second, and holding the snapshot here would
   // re-render this hook's whole subtree — the chat page included — every time.
   // Consumers select the slice they paint (see stores/sidebarStore).
+  //
+  // Patches rather than full snapshots (see shared/sidebar-patch.ts). They
+  // apply to `held`, the server's last snapshot as sent, not to the store,
+  // which also carries the local drag order. A patch that doesn't start from
+  // `held` means the two fell out of step; a fresh subscription starts over
+  // with a reset. A full snapshot still arrives when the server can't patch.
   useEffect(() => {
-    return socket.subscribe<SidebarData>({ type: "sidebar" }, (snapshot) => {
-      useSidebarStore.getState().setSnapshot(snapshot)
-      setCommandError(null)
-    })
+    let held: { revision: number | null; data: SidebarData } | null = null
+    let unsubscribe = () => {}
+    const subscribe = () => {
+      held = null
+      unsubscribe = socket.subscribe<SidebarData | SidebarPatch>({ type: "sidebar", patches: true }, (snapshot) => {
+        let data: SidebarData
+        if ("projectGroups" in snapshot) {
+          data = snapshot
+          held = { revision: null, data }
+        } else {
+          if (snapshot.from !== null && snapshot.from !== held?.revision) {
+            resubscribe()
+            return
+          }
+          try {
+            data = applySidebarPatch(held?.data ?? null, snapshot)
+          } catch (error) {
+            console.warn("[sidebar] patch did not apply, resubscribing:", error)
+            resubscribe()
+            return
+          }
+          held = { revision: snapshot.to, data }
+        }
+        useSidebarStore.getState().setSnapshot(data)
+        setCommandError(null)
+      })
+    }
+    const resubscribe = () => {
+      unsubscribe()
+      subscribe()
+    }
+    subscribe()
+    return () => unsubscribe()
   }, [socket])
 
   useEffect(() => {
@@ -471,18 +521,38 @@ export function useKannaState(activeChatId: string | null): KannaState {
       )
     }
 
-    // Memory can seed a resumed subscription. Disk reads never delay the request.
+    // Memory seeds the subscription at once. On a miss the disk read gets a
+    // short head start: it averages under 10 ms, and a subscription that names
+    // the span it holds gets a tail back instead of the whole window, which
+    // otherwise lands as a second full render on top of the cached one. A read
+    // slower than the cap subscribes without it and still paints if it can.
+    let diskWait: ReturnType<typeof setTimeout> | null = null
     const memory = readMemoryCachedWindow(chatId)
-    subscribeToChat(memory)
-    if (!memory) void readCachedWindow(chatId).then(cached => {
-      if (cancelled || receivedSnapshot || !cached) return
-      const trimmed = trimTranscriptWindow(cachedWindowToMessages(cached), transcriptWindowSizeRef.current)
-      setCachedTranscript({ ...cached, entries: trimmed.messages, startIndex: trimmed.startIndex })
-      recordClientPerformance("chat_cache_ready_ms", performance.now() - openedAt)
-    })
+    if (memory) {
+      subscribeToChat(memory)
+    } else {
+      diskWait = setTimeout(() => {
+        diskWait = null
+        subscribeToChat(null)
+      }, DISK_CACHE_WAIT_MS)
+      void readCachedWindow(chatId).then(cached => {
+        if (cancelled) return
+        if (!subscribed) {
+          if (diskWait !== null) clearTimeout(diskWait)
+          diskWait = null
+          subscribeToChat(cached)
+          return
+        }
+        if (receivedSnapshot || !cached) return
+        const trimmed = trimTranscriptWindow(cachedWindowToMessages(cached), transcriptWindowSizeRef.current)
+        setCachedTranscript({ ...cached, entries: trimmed.messages, startIndex: trimmed.startIndex })
+        recordClientPerformance("chat_cache_ready_ms", performance.now() - openedAt)
+      })
+    }
 
     return () => {
       cancelled = true
+      if (diskWait !== null) clearTimeout(diskWait)
       unsubscribe?.()
       // A chat closed mid-turn never reaches a settled write, so take what is
       // pending rather than lose the window.
@@ -643,10 +713,17 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const latestToolIds = useMemo(() => getLatestToolIds(messages), [messages])
   const runtime = activeChatSnapshot?.runtime ?? null
   const queuedMessages = activeChatSnapshot?.queuedMessages ?? EMPTY_QUEUED_MESSAGES
-  const optimisticRuntimeStatus = optimisticProcessing?.scopeId === optimisticScopeId && (!runtime || runtime.status === "idle")
+  const optimisticRuntimeStatus = optimisticProcessing?.scopeId === optimisticScopeId && (!runtime || hasNoTurnStatus(runtime.status))
     ? "starting"
     : null
-  const effectiveRuntimeStatus = optimisticRuntimeStatus ?? runtime?.status ?? null
+  // The chat's snapshot waits on the server reading the transcript off disk,
+  // but the cached transcript paints before that. Without a status in the gap,
+  // a running chat opens with no footer indicator and gains one a beat later,
+  // shoving the text up. The sidebar already knows the status, so use it until
+  // the snapshot lands.
+  const sidebarChatStatus = useSidebarChatStatus(activeChatId)
+  const loadingRuntimeStatus = activeChatId && !activeChatSnapshot ? sidebarChatStatus : null
+  const effectiveRuntimeStatus = optimisticRuntimeStatus ?? runtime?.status ?? loadingRuntimeStatus ?? null
   // Outside a chat snapshot (new-chat composer, settings) the catalog is the
   // live one the app-settings snapshot carries, so runtime-discovered models
   // show before any chat is opened; the static list covers a cold start. The
@@ -665,6 +742,12 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (!activeChatId || !chatSnapshot || chatSnapshot.runtime.chatId !== activeChatId) return
     transcriptCacheWriter.schedule(activeChatId, chatSnapshot, isProcessing)
   }, [activeChatId, chatSnapshot, isProcessing, transcriptCacheWriter])
+
+  // A chat left mid-turn is followed from the window it was just showing: the
+  // chat subscription's cleanup flushes that window before this effect runs.
+  // Nor the chat in the previewer, which holds a subscription of its own
+  // while it is there (`useChatSession`).
+  useBackgroundChatSubscriptions(socket, activeChatId, transcriptWindowSizeRef, usePreviewedChatId())
 
   const canCancel = canCancelStatus(effectiveRuntimeStatus ?? undefined)
   const isDraining = runtime?.isDraining ?? false
@@ -690,7 +773,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (optimisticProcessing?.scopeId !== optimisticScopeId) {
       return
     }
-    if (runtime?.status && runtime.status !== "idle") {
+    if (runtime?.status && !hasNoTurnStatus(runtime.status)) {
       setOptimisticProcessing(null)
     }
   }, [optimisticProcessing, optimisticScopeId, runtime?.status])
@@ -706,7 +789,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (!optimisticProcessing?.ackedAt || optimisticProcessing.scopeId !== optimisticScopeId) {
       return
     }
-    if (runtime?.status && runtime.status !== "idle") {
+    if (runtime?.status && !hasNoTurnStatus(runtime.status)) {
       return
     }
     const { ackedAt } = optimisticProcessing
@@ -1014,9 +1097,11 @@ export function useKannaState(activeChatId: string | null): KannaState {
     handleOpenStandaloneShareLink,
   } = useShareExport({ socket, activeChatId, resolvedTheme, dialog, setCommandError })
 
+  // The sidebar's New Chat: a chat in the project you're looking at, like the
+  // iOS app. Picking another project is the empty chat's path button.
   const handleCompose = useCallback(() => {
     const intent = resolveComposeIntent({
-      selectedProjectId,
+      selectedProjectId: activeProjectId,
       sidebarProjectId: getMostRecentlyActiveProjectId(getSidebarProjectGroups()),
       fallbackLocalProjectPath,
     })
@@ -1026,13 +1111,20 @@ export function useKannaState(activeChatId: string | null): KannaState {
     }
 
     navigate("/")
-  }, [fallbackLocalProjectPath, navigate, selectedProjectId, startChatFromIntent])
+  }, [activeProjectId, fallbackLocalProjectPath, navigate, startChatFromIntent])
 
-  // On mobile the sidebar is the `/` page rather than an overlay, so "open"
-  // means navigate there. Desktop always shows it and never calls this.
-  const openSidebar = useCallback(() => navigate("/"), [navigate])
-  const collapseSidebar = useCallback(() => setSidebarCollapsed(true), [])
-  const expandSidebar = useCallback(() => setSidebarCollapsed(false), [])
+  // On mobile the sidebar is a page rather than an overlay (`/`, or a
+  // project's page of chats), so "open" means go to it. That is back to
+  // wherever the chat was opened from, through the history, so the chat's
+  // Back button and the system's swipe back agree; and `/` for a chat opened
+  // directly, with nothing behind it. Desktop always shows the sidebar and
+  // never calls this.
+  const openSidebar = useCallback(() => {
+    if (((window.history.state as { idx?: number } | null)?.idx ?? 0) > 0) navigate(-1)
+    else navigate("/")
+  }, [navigate])
+  const collapseSidebar = useCallback(() => setSidebarCollapsed(true), [setSidebarCollapsed])
+  const expandSidebar = useCallback(() => setSidebarCollapsed(false), [setSidebarCollapsed])
 
   return {
     socket,

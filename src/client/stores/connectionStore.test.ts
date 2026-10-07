@@ -27,7 +27,41 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 beforeEach(() => {
-  useConnectionStore.setState({ mode: "unknown", machines: [] })
+  useConnectionStore.setState({
+    mode: "unknown",
+    machines: [],
+    thisMachine: null,
+    showingMachine: null,
+    fromMacApp: false,
+  })
+})
+
+describe("connectionStore.setMacAppFleet", () => {
+  test("the app's list wins over the page's own detection", async () => {
+    useConnectionStore.getState().setMacAppFleet({ machines: MACHINES, thisMachine: "jakemor-mbp", showing: "jakemor-studio" })
+    const fetchImpl = (async () => jsonResponse({ error: "Not found" }, 404)) as unknown as typeof fetch
+    await useConnectionStore.getState().load(fetchImpl)
+    const state = useConnectionStore.getState()
+    expect(state.mode).toBe("cloud")
+    expect(state.machines).toEqual(MACHINES)
+    expect(state.thisMachine).toBe("jakemor-mbp")
+    expect(state.showingMachine).toBe("jakemor-studio")
+  })
+
+  test("null after a list (signed out) goes back to detection", () => {
+    useConnectionStore.getState().setMacAppFleet({ machines: MACHINES })
+    useConnectionStore.getState().setMacAppFleet(null)
+    const state = useConnectionStore.getState()
+    expect(state.mode).toBe("unknown")
+    expect(state.fromMacApp).toBe(false)
+    expect(state.thisMachine).toBeNull()
+  })
+
+  test("null before any list leaves detection alone", () => {
+    useConnectionStore.setState({ mode: "local" })
+    useConnectionStore.getState().setMacAppFleet(null)
+    expect(useConnectionStore.getState().mode).toBe("local")
+  })
 })
 
 describe("connectionStore.load", () => {
@@ -36,6 +70,28 @@ describe("connectionStore.load", () => {
     await useConnectionStore.getState().load(fetchImpl)
     expect(useConnectionStore.getState().mode).toBe("cloud")
     expect(useConnectionStore.getState().machines).toEqual(MACHINES)
+  })
+
+  test("on localhost, a paired machine's own Fleet → cloud mode naming itself", async () => {
+    const fetchImpl = (async (url: string) =>
+      url === "/api/cloud/fleet"
+        ? jsonResponse({ self: "jakemor-mbp", machines: MACHINES })
+        : jsonResponse({ error: "Not found" }, 404)) as unknown as typeof fetch
+    await useConnectionStore.getState().load(fetchImpl)
+    const state = useConnectionStore.getState()
+    expect(state.mode).toBe("cloud")
+    expect(state.machines).toEqual(MACHINES)
+    expect(state.thisMachine).toBe("jakemor-mbp")
+    expect(state.showingMachine).toBe("jakemor-mbp")
+  })
+
+  test("an unpaired machine's empty Fleet → local mode", async () => {
+    const fetchImpl = (async (url: string) =>
+      url === "/api/cloud/fleet"
+        ? jsonResponse({ self: null, machines: [] })
+        : jsonResponse({ error: "Not found" }, 404)) as unknown as typeof fetch
+    await useConnectionStore.getState().load(fetchImpl)
+    expect(useConnectionStore.getState().mode).toBe("local")
   })
 
   test("machine's explicit 404 → local mode", async () => {

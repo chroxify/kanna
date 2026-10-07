@@ -7,6 +7,7 @@ import type { ChatAttachment } from "../shared/types"
 import type { ShareMode } from "../shared/share"
 import {
   CLOUD_BROWSER_PATH_PREFIX,
+  CLOUD_FLEET_PATH,
   CLOUD_PAIR_SESSION_PATH,
   CLOUD_WS_ENDPOINT_PATH,
   type CloudWsEndpointResponse,
@@ -14,6 +15,7 @@ import {
 import { createAuthManager } from "./auth"
 import { classifyCloudRequest, isAllowedCloudWsUpgrade, type CloudRequestClass } from "./cloud/guard"
 import { createCloudRuntime, type CloudRuntime } from "./cloud"
+import { createFleetCache } from "./cloud/fleet"
 import { writeCloudIdentity } from "./cloud/identity"
 import { createPairSessionManager, type PairSessionSnapshot } from "./cloud/pair-session"
 import { EventStore } from "./event-store"
@@ -30,8 +32,11 @@ import { WorktreeProbe } from "./worktree-probe"
 import { TurnFileTracker } from "./worktree-snapshot"
 import { backfillTouchedFileBases } from "./touched-file-backfill"
 import { resumeInterruptedTurns } from "./resume-turns"
+import { ChatOrchestrator } from "./orchestrator"
+import { createChatCommands } from "./chat-commands"
 import { discoverProjects, type DiscoveredProject } from "./discovery"
 import { KeybindingsManager } from "./keybindings"
+import { PROJECT_ICON_URL_PREFIX, ProjectIcons, resolveProjectIconPath } from "./project-icons"
 import { clearGitHubRepoCache } from "./github"
 import { readLlmProviderSnapshot, validateLlmProviderCredentials, writeLlmProviderSnapshot } from "./llm-provider"
 import { handleTranscribe } from "./transcribe"
@@ -172,7 +177,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   let discoveredProjects: DiscoveredProject[] = []
 
   async function refreshDiscovery() {
-    discoveredProjects = discoverProjects()
+    discoveredProjects = await discoverProjects()
     return discoveredProjects
   }
 
@@ -184,6 +189,13 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   // in-memory; see worktree-probe.ts for why there's no `git status` sweep.
   const worktreeProbe = new WorktreeProbe(
     () => store.state,
+    () => {
+      void router.broadcastSidebar()
+    }
+  )
+  const projectIcons = new ProjectIcons(
+    store.dataDir,
+    () => [...store.state.projectsById.values()].filter((project) => !project.deletedAt).map((project) => project.localPath),
     () => {
       void router.broadcastSidebar()
     }
@@ -207,6 +219,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   })
   store.onTurnStarted = (chatId) => {
     turnFiles.beginTurn(chatId)
+    orchestrator.handleTurnStarted(chatId)
   }
   // A finished turn is the likeliest moment for the dirty set to have changed,
   // so probe that one project then — after recording the turn's own files, so
@@ -269,6 +282,23 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
       router.scheduleBroadcast()
     },
   })
+  // The agents' side of chat management: sub-chats, their reports, schedules.
+  // Its pushes go through `router`, which exists by the time anything can fire.
+  // One set of chat actions for both callers: the router runs them for the
+  // user, the orchestrator for an agent.
+  const chatCommands = createChatCommands({ store, agent, analytics })
+  const orchestrator = new ChatOrchestrator({
+    store,
+    agent,
+    commands: chatCommands,
+    push: (change) => {
+      void router.broadcastChatChange(change)
+    },
+    onError: (message) => console.warn(`${LOG_PREFIX} ${message}`),
+  })
+  agent.orchestration = orchestrator
+  agent.onChatSettled = (chatId) => orchestrator.handleChatSettled(chatId)
+  agent.onChatStopped = (chatId) => orchestrator.handleChatStopped(chatId)
   const usageLimits = new UsageLimitsManager(path.join(store.dataDir, "usage-limits.json"), {
     fetchClaudeUsage: () => agent.fetchClaudeUsage(),
     fetchCodexRateLimits: () => agent.fetchCodexRateLimits(),
@@ -310,7 +340,9 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     store,
     diffStore,
     worktreeProbe,
+    projectIcons,
     agent,
+    chatCommands,
     terminals,
     portTunnels,
     keybindings,
@@ -388,6 +420,9 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     }
   }
   await shellPathReady
+  // After the shell path: an overdue schedule or a report held over from the
+  // last run starts an agent straight away.
+  orchestrator.start()
   // Chats that were mid-turn when Kanna last exited pick up where they left
   // off. Not awaited — each resume starts a harness process, and boot should
   // not wait on them; chained onto the GC sweep so a chat about to be archived
@@ -416,6 +451,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   const staleChatAutoArchiveInterval = setInterval(runAutoArchiveStaleChats, STALE_CHAT_AUTO_ARCHIVE_INTERVAL_MS)
   const staleChatDeleteInterval = setInterval(runDeleteStaleChats, STALE_CHAT_DELETE_INTERVAL_MS)
   worktreeProbe.start()
+  projectIcons.start()
   // Claims recorded before base blobs never expire on their own, so a chat
   // whose work shipped months ago keeps returning to Relevant on someone
   // else's edit. Dating them is two git calls per affected chat and only
@@ -436,6 +472,8 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   // One-click cloud setup: the sidebar asks for a claim URL, the user opens
   // it (or scans it) on any device, and pairing lands back here — credentials
   // to ~/.kanna/cloud.json and the tunnel up, without restarting kanna.
+  const fleet = createFleetCache()
+
   const pairSession =
     options.allowCloudPairing && !cloud
       ? createPairSessionManager({
@@ -634,6 +672,18 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
             return withOriginAgentCluster(new Response(null, { status: 405, headers: { Allow: "GET, POST" } }))
           }
 
+          // The account's machines, asked for with this machine's own
+          // credentials (see cloud/fleet.ts). Through the proxy the page asks
+          // kanna.sh instead, but answering there too costs nothing.
+          if (url.pathname === CLOUD_FLEET_PATH) {
+            if (req.method !== "GET") {
+              return withOriginAgentCluster(new Response(null, { status: 405, headers: { Allow: "GET" } }))
+            }
+            return withOriginAgentCluster(Response.json(await fleet.get(cloud?.identity ?? null), {
+              headers: { "Cache-Control": "no-store" },
+            }))
+          }
+
           if (url.pathname === CLOUD_WS_ENDPOINT_PATH) {
             if (req.method !== "GET") {
               return withOriginAgentCluster(new Response(null, { status: 405, headers: { Allow: "GET" } }))
@@ -678,6 +728,11 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
           const transcriptMediaResponse = await handleTranscriptMediaContent(req, url, store)
           if (transcriptMediaResponse) {
             return withOriginAgentCluster(transcriptMediaResponse)
+          }
+
+          const projectIconResponse = await handleProjectIcon(req, url, store.dataDir)
+          if (projectIconResponse) {
+            return withOriginAgentCluster(projectIconResponse)
           }
 
           const projectFileContentResponse = await handleProjectFileContent(req, url, store)
@@ -760,8 +815,10 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     clearInterval(staleChatAutoArchiveInterval)
     clearInterval(staleChatDeleteInterval)
     worktreeProbe.stop()
+    projectIcons.stop()
     // Cancels every in-flight turn *and* marks its chat, so the next boot
     // restarts the work instead of leaving it interrupted (see resume-turns.ts).
+    orchestrator.dispose()
     try { await agent.interruptForShutdown() } finally { agent.dispose() }
     router.dispose()
     providerAuth.dispose()
@@ -782,6 +839,9 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     updateManager,
     analytics,
     stop: shutdown,
+    /** For the single-instance lock's status (instance-socket.ts), which the
+     *  Mac app's quit dialog shows. */
+    state: () => ({ runningChats: agent.activeTurns.size, cloud: Boolean(options.cloud ?? selfPairedCloud) }),
   }
 }
 
@@ -969,6 +1029,39 @@ async function handleTranscriptMediaContent(req: Request, url: URL, store: Event
       "X-Content-Type-Options": "nosniff",
       ...(!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.type)
         ? { "Content-Disposition": "attachment", "Content-Security-Policy": "sandbox; default-src 'none'" } : {}),
+      "Cache-Control": "private, max-age=31536000, immutable",
+    },
+  })
+}
+
+/**
+ * A project's stored icon (`project-icons.ts`). The name carries a hash of
+ * the source file's path, size and time, so a changed icon is a new URL and
+ * this one never changes.
+ */
+async function handleProjectIcon(req: Request, url: URL, dataDir: string) {
+  if (!url.pathname.startsWith(PROJECT_ICON_URL_PREFIX)) {
+    return null
+  }
+
+  if (req.method !== "GET") {
+    return new Response(null, { status: 405, headers: { Allow: "GET" } })
+  }
+
+  const filePath = resolveProjectIconPath(dataDir, url.pathname)
+  const file = filePath ? Bun.file(filePath) : null
+  if (!file || !(await file.exists())) {
+    return Response.json({ error: "Icon not found" }, { status: 404 })
+  }
+
+  return new Response(file, {
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff",
+      // An SVG is a copy of a file from the project. Drawn by an <img> it
+      // can't run script; opened in a tab of its own it could, so it is
+      // sandboxed there.
+      "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
       "Cache-Control": "private, max-age=31536000, immutable",
     },
   })

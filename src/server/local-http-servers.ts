@@ -168,15 +168,41 @@ export async function killLocalHttpServer(port: number) {
   }
 }
 
-async function readProcessCwd(pid: number) {
+export function parseLsofCwdOutput(output: string) {
+  const cwdByPid = new Map<number, string>()
+  let currentPid: number | undefined
+
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) {
+      const pid = Number(line.slice(1))
+      currentPid = Number.isInteger(pid) ? pid : undefined
+    } else if (line.startsWith("n") && currentPid !== undefined && !cwdByPid.has(currentPid)) {
+      cwdByPid.set(currentPid, line.slice(1))
+    }
+  }
+
+  return cwdByPid
+}
+
+// One lsof for every owner, not one per process: Bun spawns on the main
+// thread, and a spawn per listening process blocked the server for ~1s a poll.
+async function readProcessCwds(pids: number[]) {
+  if (pids.length === 0) return new Map<number, string>()
   try {
-    const { stdout } = await execLsof(["-p", String(pid), "-a", "-d", "cwd", "-Fn"], {
-      timeout: 500,
-      maxBuffer: 128 * 1024,
+    const { stdout } = await execLsof(["-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], {
+      timeout: 1_500,
+      maxBuffer: 64 * 1024 + pids.length * 4 * 1024,
     })
-    return stdout.split("\n").find((line) => line.startsWith("n"))?.slice(1)
-  } catch {
-    return undefined
+    return parseLsofCwdOutput(stdout)
+  } catch (error) {
+    // lsof exits 1 when any pid has exited or is not ours to inspect, yet still
+    // prints the rest. A numeric code means lsof ran to completion; timeouts and
+    // overflows have no numeric code and may hold a truncated path.
+    const { code, stdout } = error as { code?: unknown; stdout?: unknown }
+    if (typeof code === "number" && typeof stdout === "string") {
+      return parseLsofCwdOutput(stdout)
+    }
+    return new Map<number, string>()
   }
 }
 
@@ -261,12 +287,8 @@ export async function listLocalHttpServers(options: {
   }
 
   const parentByPid = await readParentProcessMap()
-  const ownerCwds = new Map<number, string | undefined>()
-
-  await Promise.all(entries.flatMap((entry) => entry.owners.map(async (owner) => {
-    if (ownerCwds.has(owner.pid)) return
-    ownerCwds.set(owner.pid, await readProcessCwd(owner.pid))
-  })))
+  const ownerPids = new Set(entries.flatMap((entry) => entry.owners.map((owner) => owner.pid)))
+  const ownerCwds = await readProcessCwds([...ownerPids])
 
   const results = await Promise.all(entries.map((entry) => {
     const primaryOwner = entry.owners[0]

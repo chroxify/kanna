@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { GitWidgets, summarizeChanges, visibleHistoryEntries, canIgnoreDiffFile, canIgnoreDiffFolder, getPrimaryCommitActionPrefix } from "./GitWidgets"
+import { filterFilesByQuery, GitWidgets, summarizeChanges, visibleHistoryEntries, canIgnoreDiffFile, canIgnoreDiffFolder, getPrimaryCommitActionPrefix } from "./GitWidgets"
 import { TooltipProvider } from "../../ui/tooltip"
 
 describe("GitWidgets", () => {
-  test("with no changes: no Changes section, just Branch and History", () => {
+  test("with no changes: no Changes section, just the Branch card and Commits", () => {
     const markup = renderToStaticMarkup(createElement(
       TooltipProvider,
       null,
@@ -48,8 +48,8 @@ describe("GitWidgets", () => {
     // A clean tree drops the Changes section instead of saying "No changes".
     expect(markup).not.toContain("No changes")
     expect(markup).not.toContain("files changed")
-    expect(markup).toContain("History")
-    // One commit is a small card, so History starts open.
+    expect(markup).toContain(">Commits<")
+    // One commit is a small card, so Commits starts open.
     expect(markup).toContain("Initial commit")
     expect(markup).toContain("main")
     // Nothing to commit, so no commit box.
@@ -113,10 +113,7 @@ describe("GitWidgets", () => {
     expect(markup).not.toContain("Publish Branch")
   })
 
-  // A static render reads the store's initial state (zustand's server
-  // snapshot), so this pins the default; a toggle is the store's `expanded`
-  // map, covered in rightSidebarStore.test.ts.
-  test("a large Changes card starts collapsed behind a disclosure, counting files", () => {
+  test("the changes sit under the Branch card's one header, counted in their search, in tree order", () => {
     const markup = renderToStaticMarkup(createElement(
       TooltipProvider,
       null,
@@ -150,15 +147,19 @@ describe("GitWidgets", () => {
       })
     ))
 
-    expect(markup).toContain("4 files changed")
+    expect(markup).toContain('placeholder="Search 4 changes"')
     // Totals across the change set: +1 and +4 added, 1 removed.
     expect(markup).toContain(">+5<")
     expect(markup).toContain(">-1<")
-    expect(markup).toContain('aria-expanded="false"')
-    expect(markup).not.toContain("src/b.ts")
+    // One header: the branch. The changes have none of their own.
+    expect(markup.split("<header").length - 1).toBe(1)
+    // By path, not size: app.ts (+1 -1) before b.ts (+4).
+    expect(markup.indexOf(">app.ts<")).toBeGreaterThan(-1)
+    expect(markup.indexOf(">app.ts<")).toBeLessThan(markup.indexOf(">b.ts<"))
     expect(markup).not.toContain("Side-by-side diff")
-    // No commits yet, so no History card.
-    expect(markup).not.toContain(">History<")
+    // No commits and nothing incoming, so no Commits card.
+    expect(markup).not.toContain(">Commits<")
+    expect(markup).not.toContain("incoming")
   })
 
   test("the Changes header describes what will be committed", () => {
@@ -183,20 +184,32 @@ describe("GitWidgets", () => {
     expect(visibleHistoryEntries([0, 1, 2], false)).toEqual({ shown: [0, 1, 2], hiddenCount: 0 })
   })
 
-  test("a long History starts collapsed, counting only unpushed commits", () => {
-    const entries = Array.from({ length: 25 }, (_, index) => ({
+  function renderBranch(entryCount: number, files: Parameters<typeof GitWidgets>[0]["diffs"]["files"] = []) {
+    const entries = Array.from({ length: entryCount }, (_, index) => ({
       sha: `sha${index}`,
       summary: `Commit number ${index}`,
       description: "",
       authoredAt: new Date(Date.now() - index * 60_000).toISOString(),
       tags: [],
     }))
-    const markup = renderToStaticMarkup(createElement(
+    return renderToStaticMarkup(createElement(
       TooltipProvider,
       null,
       createElement(GitWidgets, {
         projectId: "project-1",
-        diffs: { status: "ready", branchName: "main", hasUpstream: true, aheadCount: 2, files: [], branchHistory: { entries } },
+        diffs: {
+          status: "ready",
+          branchName: "feature/checks",
+          defaultBranchName: "main",
+          hasOriginRemote: true,
+          originRepoSlug: "acme/repo",
+          hasUpstream: true,
+          aheadCount: 2,
+          behindCount: 3,
+          files,
+          branchHistory: { entries },
+          branchPullRequest: { number: 412, title: "Show CI checks in cards", url: "https://github.com/acme/repo/pull/412", isDraft: false },
+        },
         editorLabel: "Cursor",
         onOpenFile: () => {},
         onOpenInFinder: () => {},
@@ -213,13 +226,44 @@ describe("GitWidgets", () => {
         onSyncWithRemote: async () => null,
       })
     ))
+  }
 
-    expect(markup).toContain(">History<")
+  test("reads top to bottom as the present then the past: branch and PR, changes, then commits", () => {
+    const markup = renderBranch(3, [
+      { path: "src/app.ts", changeType: "modified", isUntracked: false, additions: 1, deletions: 1, patchDigest: "d1" },
+    ])
+
+    const order = [
+      ">feature/checks<",
+      "Show CI checks in cards",
+      "1 file changed",
+      "Generate &amp; push to",
+      ">Commits<",
+      "3 incoming commits",
+      "Commit number 0<",
+    ].map((text) => markup.indexOf(text))
+    expect(order.every((index) => index > -1)).toBe(true)
+    expect(order).toEqual([...order].sort((left, right) => left - right))
+    expect(markup).toContain("#412")
+    expect(markup).toContain(">2 unpushed<")
+    expect(markup.split('aria-label="Not pushed yet"').length - 1).toBe(2)
+    // The picker waits behind the header.
+    expect(markup).not.toContain("Find or create a branch")
+  })
+
+  test("a long Commits card starts open on five commits, counting only unpushed ones", () => {
+    const markup = renderBranch(25)
+    expect(markup).toContain(">Commits<")
     // Not the length, which is the server's cap on any real repo.
     expect(markup).not.toContain(">25<")
     expect(markup).toContain(">2 unpushed<")
-    expect(markup).not.toContain("Commit number 0<")
-    expect(markup).not.toContain("Show 20 more")
+    // Open however long the history, since it pages itself: five, then more.
+    expect(markup).toContain("Commit number 4<")
+    expect(markup).not.toContain("Commit number 5<")
+    expect(markup).toContain("Show 20 more")
+    // The PR stays in view with the branch; a clean tree has no Changes.
+    expect(markup).toContain("Show CI checks in cards")
+    expect(markup).not.toContain("files changed")
   })
 
   test("labels the primary commit action for empty and filled messages", () => {
@@ -450,7 +494,7 @@ describe("GitWidgets", () => {
     expect(markup).not.toContain("Side-by-side diff")
   })
 
-  test("an open Changes card lists each file as name, folder and status, under a Review strip", () => {
+  test("the changes list each file as name, folder and status, under a Review strip", () => {
     const markup = renderToStaticMarkup(createElement(
       TooltipProvider,
       null,
@@ -485,7 +529,18 @@ describe("GitWidgets", () => {
     expect(markup).toContain(">src/feature<")
     expect(markup).toContain(">A<")
     expect(markup).toContain(">D<")
-    expect(markup).toContain(">Review all<")
-    expect(markup).toContain("All files in the commit")
+    expect(markup).toContain('aria-label="Review all"')
+    expect(markup).toContain('placeholder="Search 2 changes"')
+    expect(markup).not.toContain("All files in the commit")
+  })
+})
+
+describe("filterFilesByQuery", () => {
+  test("keeps files whose path holds every word, in the list's order", () => {
+    const files = [{ path: "src/widgets/WidgetCard.tsx" }, { path: "src/git/DiffViewer.tsx" }, { path: "src/widgets/parts.tsx" }]
+    expect(filterFilesByQuery(files, "widget card").map((file) => file.path)).toEqual(["src/widgets/WidgetCard.tsx"])
+    expect(filterFilesByQuery(files, "WIDGETS").map((file) => file.path)).toEqual(["src/widgets/WidgetCard.tsx", "src/widgets/parts.tsx"])
+    expect(filterFilesByQuery(files, "  ")).toBe(files)
+    expect(filterFilesByQuery(files, "nope")).toEqual([])
   })
 })
