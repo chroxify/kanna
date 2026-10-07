@@ -11,6 +11,9 @@ export const UI_UPDATE_RELOAD_REQUEST_STORAGE_KEY = "kanna:last-update-reload-re
 /** localStorage: persisted sidebar width in pixels. */
 export const SIDEBAR_WIDTH_STORAGE_KEY = "kanna:sidebar-width"
 
+/** localStorage: "1" while the sidebar is collapsed, so a reload leaves it that way. */
+export const SIDEBAR_COLLAPSED_STORAGE_KEY = "kanna:sidebar-collapsed"
+
 /** localStorage: last action chosen in the open-external menu. */
 export const OPEN_EXTERNAL_SELECT_STORAGE_KEY = "kanna:last-open-external"
 
@@ -27,8 +30,19 @@ export const OPEN_FILE_DESTINATION_STORAGE_KEY = "kanna:last-open-file"
 /** localStorage: active sidebar view ("recents" | "projects" | "channels") when the recent-chats Labs mode is on. */
 export const SIDEBAR_VIEW_STORAGE_KEY = "kanna:sidebar-view"
 
-/** localStorage: JSON map of project id to when its channel was pinned in the Channels sidebar. */
+/**
+ * localStorage (legacy): JSON map of project id to when its channel was
+ * pinned. Pins are the server's now (`SidebarProjectGroup.pinnedAt`); this is
+ * only read once, to carry a browser's own pins over, then removed. See
+ * app/useMigrateChannelPins.ts.
+ */
 export const CHANNEL_PINS_STORAGE_KEY = "kanna:channel-pins"
+
+/** localStorage: JSON list of the chat tabs (`ChatTab[]`), in order. */
+export const CHAT_TABS_STORAGE_KEY = "kanna:chat-tabs"
+
+/** localStorage: JSON map of sidebar list to whether its Pinned section is expanded, once you have toggled it. */
+export const SIDEBAR_PINNED_EXPANDED_STORAGE_KEY = "kanna:sidebar-pinned-expanded"
 
 /** localStorage: focus mode is on, so the sidebar shows only the open chat's project. */
 export const SIDEBAR_FOCUS_MODE_STORAGE_KEY = "kanna:sidebar-focus-mode"

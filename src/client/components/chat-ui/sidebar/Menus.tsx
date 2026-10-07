@@ -49,8 +49,13 @@ export function ProjectSectionMenu({
   onOpenInFinder,
   onOpenInEditor,
   onHide,
+  pinned,
+  onTogglePin,
   children,
 }: {
+  /** With `onTogglePin`, adds Pin / Unpin: the Channels view pins projects. */
+  pinned?: boolean
+  onTogglePin?: () => void
   editorLabel: string
   /** The project's forge page; absent when it has no browsable origin. */
   repoUrl?: string
@@ -74,6 +79,12 @@ export function ProjectSectionMenu({
           <SquarePen />
           <span>New Chat</span>
         </ContextMenuItem>
+        {onTogglePin ? (
+          <ContextMenuItem onSelect={onTogglePin}>
+            {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+            <span className="text-xs font-medium">{pinned ? "Unpin" : "Pin"}</span>
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem
           onSelect={onRename}
         >
@@ -149,6 +160,7 @@ export function ChatRowMenu({
   onRestore,
   onClearDraft,
   onDelete,
+  leadingItems,
   children,
 }: {
   pinned?: boolean
@@ -176,6 +188,11 @@ export function ChatRowMenu({
    */
   onClearDraft?: () => void
   onDelete: () => void
+  /**
+   * Items for where the chat is being shown, ahead of the chat's own and set
+   * off from them: a tab's Close items. They act on the place, not the chat.
+   */
+  leadingItems?: ReactNode
   children: ReactNode
 }) {
   // There is one of these per sidebar row and the menu below is a dozen items
@@ -190,6 +207,12 @@ export function ChatRowMenu({
       </ContextMenuTrigger>
       {!menuOpened ? null : (
         <ContextMenuContent>
+          {leadingItems ? (
+            <>
+              {leadingItems}
+              <ContextMenuSeparator />
+            </>
+          ) : null}
           {onTogglePin ? (
             <ContextMenuItem onSelect={onTogglePin}>
               {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}

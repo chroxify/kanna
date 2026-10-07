@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server"
 import type { ChatTouchedFilesResult, SidebarChatRow } from "../../../../shared/types"
 import type { ChatJumpRole } from "../../../lib/chat-navigation"
 import type { SidebarThread } from "../../../lib/thread-sections"
-import { CHAT_HOVER_CARD_CONTENT_CLASSNAME, ChatHoverCardContent } from "./ChatHoverCard"
+import { HOVER_CARD_SURFACE_CLASSNAME } from "../../ui/list-hover-card"
+import { ChatHoverCardContent } from "./ChatHoverCard"
 
 const NOW = Date.now()
 
@@ -64,20 +65,20 @@ function render(
 
 const JUMPS = () => undefined
 
-describe("CHAT_HOVER_CARD_CONTENT_CLASSNAME", () => {
+describe("HOVER_CARD_SURFACE_CLASSNAME", () => {
   test("a closed card is gone, not fading", () => {
     // The card follows a pointer down a list of rows. An exit animation keeps
     // the closed one on screen — over the row the pointer has already reached.
-    expect(CHAT_HOVER_CARD_CONTENT_CLASSNAME).toContain("data-[state=closed]:hidden")
-    expect(CHAT_HOVER_CARD_CONTENT_CLASSNAME).not.toContain("animate-out")
+    expect(HOVER_CARD_SURFACE_CLASSNAME).toContain("data-[state=closed]:hidden")
+    expect(HOVER_CARD_SURFACE_CLASSNAME).not.toContain("animate-out")
   })
 
   test("carries the surface it used to inherit from the primitive", () => {
     // It is anchored by hand now, so no base class comes with it: layering,
     // the border and the padding all have to be spelled out here.
-    expect(CHAT_HOVER_CARD_CONTENT_CLASSNAME).toContain("z-50")
-    expect(CHAT_HOVER_CARD_CONTENT_CLASSNAME).toContain("border-border")
-    expect(CHAT_HOVER_CARD_CONTENT_CLASSNAME).toContain("px-1.5")
+    expect(HOVER_CARD_SURFACE_CLASSNAME).toContain("z-50")
+    expect(HOVER_CARD_SURFACE_CLASSNAME).toContain("border-border")
+    expect(HOVER_CARD_SURFACE_CLASSNAME).toContain("px-1.5")
   })
 })
 
@@ -211,6 +212,24 @@ describe("ChatHoverCardContent", () => {
     })
 
     expect(html).toContain("3 turns")
+    expect(html).not.toContain(time)
+  })
+
+  test("a chat waiting on a subagent says so where the landing time would go", () => {
+    // Its last turn did end, but stamping the card with that time would read
+    // as the chat having finished then.
+    const endedAt = NOW - 30 * 60_000
+    const time = new Date(endedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    const html = render({
+      status: "waiting_on_subagent",
+      turnCount: 3,
+      lastTurnStartedAt: endedAt - 60_000,
+      lastTurnEndedAt: endedAt,
+    })
+
+    const anchored = html.slice(html.indexOf("ml-auto"))
+    expect(anchored).toContain("3 turns")
+    expect(anchored).toContain("Waiting on a subagent")
     expect(html).not.toContain(time)
   })
 

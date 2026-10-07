@@ -37,7 +37,9 @@ import { SwapIn } from "./WidgetCard"
  * target, not a list.
  */
 export const ROW_HIGHLIGHT_CLASS = "border-border bg-muted"
-export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted"
+// Also while the row's hover card is up (`HOVER_CARD_OPEN_ATTRIBUTE`): the
+// pointer leaves the row to reach the card, and the row should not go plain.
+export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted data-[hover-card-open]:border-border data-[hover-card-open]:bg-muted"
 
 /** A row's box, before any highlight. */
 const ROW_BASE_CLASS = "flex w-full min-w-0 items-start gap-2 rounded-lg border border-transparent px-[5px] py-1.5 text-left text-sm"
@@ -185,6 +187,12 @@ export interface WidgetRowProps {
    */
   menuIdle?: ReactNode
   menuLabel?: string
+  /**
+   * For a row whose menu is not its own to build: a chat's row gets the chat's
+   * menu, the one every list of chats uses. Wraps the row in that menu in
+   * place of this row's `ContextMenu`, and the kebab opens it all the same.
+   */
+  wrapMenu?: (row: ReactNode) => ReactNode
   /** Makes the row pressable (Enter and Space too). Without it the row is static. */
   onActivate?: () => void
   /**
@@ -228,6 +236,7 @@ export function WidgetRow({
   menu,
   menuIdle,
   menuLabel = "More actions",
+  wrapMenu,
   onActivate,
   highlightClassName,
   active = false,
@@ -242,6 +251,7 @@ export function WidgetRow({
   ...aria
 }: WidgetRowProps) {
   const interactive = Boolean(onActivate) && !disabled
+  const hasMenu = Boolean(menu) || Boolean(wrapMenu)
   const row = (
     <div
       id={id}
@@ -259,14 +269,14 @@ export function WidgetRow({
         interactive && "cursor-pointer",
         disabled && "opacity-60",
         muted && "text-muted-foreground",
-        highlightClassName ?? (active ? ROW_HIGHLIGHT_CLASS : interactive || menu ? ROW_HOVER_CLASS : undefined),
+        highlightClassName ?? (active ? ROW_HIGHLIGHT_CLASS : interactive || hasMenu ? ROW_HOVER_CLASS : undefined),
         className,
       )}
       {...aria}
     >
       <WidgetIconColumn>{icon}</WidgetIconColumn>
       <div className="min-w-0 flex-1">
-        <div className={cn("truncate leading-5", muted ? "text-muted-foreground group-hover/row:text-foreground" : "text-foreground")}>{title}</div>
+        <div className={cn("truncate leading-5", muted ? "text-muted-foreground group-hover/row:text-foreground group-data-[hover-card-open]/row:text-foreground" : "text-foreground")}>{title}</div>
         {subtitle ? <div className="truncate text-xs leading-4 text-muted-foreground">{subtitle}</div> : null}
       </div>
       {meta || subMeta ? (
@@ -277,7 +287,7 @@ export function WidgetRow({
           {subMeta ? <div className="flex h-4 items-center gap-1.5">{subMeta}</div> : null}
         </div>
       ) : null}
-      {menu ? (
+      {hasMenu ? (
         menuIdle ? (
           // One slot, two occupants: the idle glyph at rest, the kebab when
           // the row is hovered or focused. They cross-fade in place (shrink
@@ -301,6 +311,7 @@ export function WidgetRow({
       ) : null}
     </div>
   )
+  if (wrapMenu) return wrapMenu(row)
   if (!menu) return row
   return (
     <ContextMenu>
