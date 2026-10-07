@@ -1,13 +1,12 @@
 import { Fragment, memo, useCallback, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react"
 import { ChevronDown, SquarePen } from "lucide-react"
 import type { SidebarProjectGroup } from "../../../shared/types"
-import { computeChannelSections, getChannelPeekGroups, getPinnedChannelChats, type ChannelPeekGroup, type ChannelSection } from "../../lib/channel-sections"
+import { computeChannelSections, getChannelPeekGroups, type ChannelPeekGroup } from "../../lib/channel-sections"
 import { getThreadDetailLabel } from "../../lib/thread-detail-label"
-import type { SidebarThread } from "../../lib/thread-sections"
+import { isSubChat, isUnreadForUser, type SidebarThread } from "../../lib/thread-sections"
 import { isBackgroundOpenClick } from "../../lib/background-open"
 import { getPathBasename } from "../../lib/formatters"
 import { cn, normalizeChatId } from "../../lib/utils"
-import { useChannelPinStore } from "../../stores/channelPinStore"
 import { useChatHasDraft, useDraftStartTimes } from "../../stores/chatInputStore"
 import { usePendingSendTimes } from "../../stores/pendingSendStore"
 import { useSectionOverrides } from "../../stores/sidebarSectionStore"
@@ -133,9 +132,12 @@ function ChannelPeek({
       >
         {peekGroups.map((peekGroup) => (
           <div key={peekGroup.key}>
-            {/* Every group is named, the first included: its label is what
-                sets the chats apart from New Chat above them. */}
-            <div className="px-1.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground">{peekGroup.label}</div>
+            {/* Groups are named to tell them apart. One group alone has
+                nothing to be told apart from, and its name is only a line
+                between New Chat and the chats. */}
+            {peekGroups.length > 1 ? (
+              <div className="px-1.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground">{peekGroup.label}</div>
+            ) : null}
             {peekGroup.threads.map((thread) => (
               <Fragment key={thread.chatId}>{renderChatMenu(thread, (
               <button
@@ -193,6 +195,8 @@ export interface ChannelActions {
   onOpenExternalPath: (action: "open_finder" | "open_editor", localPath: string) => void
   onShowArchivedProject: (projectId: string) => void
   onHideProject: (projectId: string) => void
+  /** Pins or unpins the project. The server keeps it, so every device agrees. */
+  onSetProjectPinned: (projectId: string, pinned: boolean) => void
 }
 
 interface ChannelRowProps {
@@ -203,7 +207,6 @@ interface ChannelRowProps {
   pinned: boolean
   actions: ChannelActions
   onSelect: (projectId: string) => void
-  onTogglePin: (projectId: string) => void
 }
 
 /**
@@ -216,16 +219,22 @@ interface ChannelRowProps {
  * The row has no hover card of its own: the list keeps one for all of them
  * and finds the row under the pointer by `CHANNEL_ROW_ATTRIBUTE`.
  */
-const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned, actions, onSelect, onTogglePin }: ChannelRowProps) {
-  const unread = group.chats.some((chat) => chat.unread)
+const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned, actions, onSelect }: ChannelRowProps) {
+  // A sub-chat finishing is its parent's news, not the channel's, so its
+  // unread mark is not counted. One that stops to ask you something still is.
+  // Nor is the mark of a chat still working, which the window's title and
+  // the notifications leave out for the same reason (`isUnreadForUser`).
+  const unread = group.chats.some(isUnreadForUser)
   // Chats that want you: unread, or waiting on an answer. One chat counts
   // once even when it is both.
-  const attentionCount = group.chats.filter((chat) => chat.unread || chat.status === "waiting_for_user").length
+  const attentionCount = group.chats.filter((chat) => isUnreadForUser(chat) || chat.status === "waiting_for_user").length
   // The mark is the status of the channel's most pressing chat, drawn as that
-  // chat's own row draws it: running, then waiting on you, then unread.
+  // chat's own row draws it: running, then waiting on you, then waiting on a
+  // subagent, then unread.
   const leadChat = group.chats.find((chat) => chat.status === "running" || chat.status === "starting")
     ?? group.chats.find((chat) => chat.status === "waiting_for_user")
-    ?? group.chats.find((chat) => chat.unread)
+    ?? group.chats.find((chat) => chat.status === "waiting_on_subagent" && !isSubChat(chat))
+    ?? group.chats.find(isUnreadForUser)
   const statusMark = leadChat ? renderChatStatusDot(leadChat) : null
 
   return (
@@ -234,7 +243,7 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
       editorLabel={actions.editorLabel}
       repoUrl={group.repoUrl}
       pinned={pinned}
-      onTogglePin={() => onTogglePin(group.groupKey)}
+      onTogglePin={() => actions.onSetProjectPinned(group.groupKey, !pinned)}
       onNewChat={() => actions.onCreateChat(group.groupKey)}
       onRename={() => actions.onRenameProject(group.groupKey, group.sidebarTitle, group.realTitle || getPathBasename(group.localPath))}
       onCopyPath={() => actions.onCopyPath(group.localPath)}
@@ -289,7 +298,8 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
 
 /**
  * The sidebar's Channels view: every project, and nothing under it (a
- * project's chats are in its channel), grouped into the Chats view's sections.
+ * project's chats are in its channel), grouped into the Chats view's sections
+ * down to Relevant and then by age.
  * See `computeChannelSections` for which section a project lands in.
  */
 export function ChannelList({
@@ -303,19 +313,13 @@ export function ChannelList({
   renderChatHoverCard,
   renderChatMenu,
   actions,
-  threads,
-  renderPinnedChatRow,
 }: {
-  /** Every chat the sidebar holds, identity-stable (`useStableSidebarThreads`). */
-  threads: SidebarThread[]
-  /** A sidebar chat row, for the pinned chats listed above the channels. */
-  renderPinnedChatRow: (thread: SidebarThread) => ReactNode
   renderChatMenu: RenderChatMenu
   /** Must be stable (memoized): it reaches every memoized row. */
   actions: ChannelActions
   projectGroups: SidebarProjectGroup[]
   activeProjectId: string | null
-  /** Anchor for the date buckets, as in the Chats view. */
+  /** Anchor for the week a channel counts as recent in, and for a channel card's date buckets. */
   nowMs: number
   /** The open chat, highlighted in a channel's hover card. Normalized. */
   activeChatId: string | null
@@ -344,30 +348,20 @@ export function ChannelList({
   // Without hover there is no menu to pin, so a tap opens the channel itself
   // (`onSelect`): the only way to its chats on touch.
   const handleSelect = opensAsPage ? onSelect : togglePinnedChannel
-  const channelPins = useChannelPinStore((state) => state.pins)
-  const togglePin = useChannelPinStore((state) => state.toggle)
   // Browser-local inputs to the sections; see `ThreadSections`.
   const draftStartTimes = useDraftStartTimes()
   const pendingSends = usePendingSendTimes()
   const sections = useMemo(
-    () => computeChannelSections(projectGroups, nowMs, channelPins, draftStartTimes, pendingSends),
-    [channelPins, draftStartTimes, nowMs, pendingSends, projectGroups]
+    () => computeChannelSections(projectGroups, nowMs, draftStartTimes, pendingSends),
+    [draftStartTimes, nowMs, pendingSends, projectGroups]
   )
-  // Pinned chats lead the Pinned section, above any pinned channels: a pin
-  // is "keep this in view", and they would otherwise be out of sight inside
-  // their channels' cards. The section exists for either kind.
-  const pinnedThreads = useMemo(() => getPinnedChannelChats(threads), [threads])
-  const shownSections = useMemo<ChannelSection[]>(() => {
-    if (pinnedThreads.length === 0 || sections.some((section) => section.key === "pinned")) return sections
-    return [{ key: "pinned", label: "Pinned", collapsible: true, defaultExpanded: true, groups: [] }, ...sections]
-  }, [pinnedThreads.length, sections])
   // In a store, so the sections are as you left them when you come back from
   // a channel (which unmounts this list).
   const [expandOverrides, setSectionExpanded] = useSectionOverrides("channels")
 
   return (
     <div ref={listRef}>
-      {shownSections.map((section) => {
+      {sections.map((section) => {
         const isExpanded = !section.collapsible || (expandOverrides[section.key] ?? section.defaultExpanded)
         return (
           <div key={section.key}>
@@ -380,21 +374,16 @@ export function ChannelList({
               // No gap: the rows carry the Chats view's 2px spacing inside
               // themselves (see `ChannelRow`).
               <div className="mb-3 flex flex-col">
-                {/* Chat rows keep their own 2px gap; the pixel either side
-                    sets them off from the channel rows by the same. */}
-                {section.key === "pinned" && pinnedThreads.length > 0 ? (
-                  <div className="space-y-[2px] py-px">{pinnedThreads.map(renderPinnedChatRow)}</div>
-                ) : null}
                 {section.groups.map((group) => (
                   <ChannelRow
                     key={group.groupKey}
                     group={group}
                     active={group.groupKey === activeProjectId}
                     menuPinned={group.groupKey === pinnedChannelId}
-                    pinned={channelPins[group.groupKey] != null}
+                    pinned={group.pinnedAt != null}
                     actions={actions}
                     onSelect={handleSelect}
-                    onTogglePin={togglePin}
+
                   />
                 ))}
               </div>

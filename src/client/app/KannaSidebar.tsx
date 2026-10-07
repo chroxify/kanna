@@ -53,8 +53,8 @@ import {
 } from "../stores/focusModeStore"
 import { formatActionShortcut } from "../lib/keybindings"
 import { SIDEBAR_MAX_WIDTH_PX } from "../lib/sidebarWidth"
-import type { SidebarThread } from "../lib/thread-sections"
 import { useStableSidebarThreads } from "./useStableSidebarThreads"
+import { listedThreads } from "../lib/thread-sections"
 import { OPEN_COMMAND_PALETTE_EVENT, openCommandPalette } from "../components/command-palette/CommandPalette"
 
 export const DEFAULT_SIDEBAR_WIDTH = 275
@@ -110,6 +110,8 @@ interface KannaSidebarProps {
   onRenameProject: (projectId: string, sidebarTitle: string | undefined, realTitle: string) => void
   onHideProject: (projectId: string) => void
   onReorderProjectGroups: (projectIds: string[]) => void
+  /** Pins or unpins a project in the Channels view. */
+  onSetProjectPinned: (projectId: string, pinned: boolean) => void
   editorLabel: string
   updateSnapshot: UpdateSnapshot | null
   onOpenChangelog: () => void
@@ -348,6 +350,7 @@ function KannaSidebarImpl({
   onRenameProject,
   onHideProject,
   onReorderProjectGroups,
+  onSetProjectPinned,
   editorLabel,
   updateSnapshot,
   onOpenChangelog,
@@ -475,7 +478,8 @@ function KannaSidebarImpl({
   // a SidebarThread. Flattened once here and shared with the Chats tab so
   // projectId/projectTitle/archived stay correct in one place — and so both tabs
   // hand their rows the same identity-stable thread objects.
-  const threads = useStableSidebarThreads(data)
+  const everyThread = useStableSidebarThreads(data)
+  const threads = useMemo(() => listedThreads(everyThread), [everyThread])
   const threadByChatId = useMemo(
     () => new Map(threads.map((thread) => [thread.chatId, thread])),
     [threads]
@@ -564,31 +568,6 @@ function KannaSidebarImpl({
     navigate(`/chat/${chatId}`, { state: buildChatJumpLocationState(role) })
   }, [navigate])
 
-  // A pinned chat, listed above the channels in the Channels view. The same
-  // row as the Chats view's, naming its project: these come from all of them.
-  const renderPinnedChatRow = useCallback((thread: SidebarThread) => (
-    <ThreadRow
-      key={thread.chatId}
-      thread={thread}
-      isActive={activeChatId === normalizeChatId(thread.chatId)}
-      editorLabel={editorLabel}
-      detailScope="cross-project"
-      nowMs={nowMs}
-      dimIdleTitles={false}
-      onSelect={selectChat}
-      onCreateChat={onCreateChat}
-      onRenameChat={onRenameChat}
-      onShareChat={onShareChat}
-      onCopyPath={onCopyPath}
-      onOpenExternalPath={onOpenExternalPath}
-      onForkChat={onForkChat}
-      onToggleChatPin={onToggleChatPin}
-      onArchiveChat={onArchiveChat}
-      onRestoreChat={handleRestoreChat}
-      onDeleteChat={onDeleteChat}
-    />
-  ), [activeChatId, editorLabel, handleRestoreChat, nowMs, onArchiveChat, onCopyPath, onCreateChat, onDeleteChat, onForkChat, onOpenExternalPath, onRenameChat, onShareChat, onToggleChatPin, selectChat])
-
   // The chat rows' own right-click menu, for the chats inside a channel's
   // card. The items that take you elsewhere or open a dialog close the card
   // first; the rest (pin, archive, copy, open in…) leave you where you were,
@@ -620,7 +599,8 @@ function KannaSidebarImpl({
     onOpenExternalPath,
     onShowArchivedProject: setArchivedProjectId,
     onHideProject,
-  }), [editorLabel, onCopyPath, onCreateChat, onHideProject, onOpenExternalPath, onRenameProject])
+    onSetProjectPinned,
+  }), [editorLabel, onCopyPath, onCreateChat, onHideProject, onOpenExternalPath, onRenameProject, onSetProjectPinned])
 
   // The chat hover card again, for the chats inside a channel's card. Stable,
   // so the memoized channel rows are not re-rendered by it.
@@ -759,8 +739,8 @@ function KannaSidebarImpl({
   // Escape leaves focus mode, but only when nothing nearer has a use for it.
   // It is last in line, heard as the event finishes bubbling, and it stands
   // down for:
-  //   - anything that already answered it (`defaultPrevented`): stopping a
-  //     running turn, closing the composer's skill or project menu, the first
+  //   - anything that already answered it (`defaultPrevented`): the hold that
+  //     stops a running turn, closing the composer's skill or project menu, the first
   //     Escape that returns focus to the composer, the phone's widget sheet;
   //   - anything that kept it for itself: the viewer and the branch picker
   //     stop it before it gets here;
@@ -1328,8 +1308,6 @@ function KannaSidebarImpl({
                 renderChatHoverCard={renderChannelChatHoverCard}
                 actions={channelActions}
                 renderChatMenu={renderChannelChatMenu}
-                threads={threads}
-                renderPinnedChatRow={renderPinnedChatRow}
               />
             ) : null}
 

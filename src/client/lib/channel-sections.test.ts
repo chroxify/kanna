@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SidebarChatRow, SidebarProjectGroup } from "../../shared/types"
-import { computeChannelSections, getChannelPeekGroups, getPinnedChannelChats } from "./channel-sections"
-import { flattenSidebarThreads } from "./thread-sections"
+import { computeChannelSections, getChannelPeekGroups, RECENT_CHANNEL_DAYS } from "./channel-sections"
 
 const NOW = new Date(2026, 9, 1, 12).getTime()
 const DAY = 24 * 60 * 60 * 1_000
@@ -26,7 +25,10 @@ function project(groupKey: string, chats: SidebarChatRow[]): SidebarProjectGroup
 }
 
 function sectionsOf(groups: SidebarProjectGroup[], pins: Record<string, number> = {}) {
-  return computeChannelSections(groups, NOW, pins)
+  const pinned = groups.map((group) => (
+    pins[group.groupKey] === undefined ? group : { ...group, pinnedAt: pins[group.groupKey] }
+  ))
+  return computeChannelSections(pinned, NOW)
     .map((section) => [section.label, section.groups.map((group) => group.groupKey)])
 }
 
@@ -40,9 +42,67 @@ describe("computeChannelSections", () => {
     ])).toEqual([
       ["In Progress", ["running"]],
       ["Relevant", ["today-and-relevant"]],
-      ["Today", ["today"]],
-      ["Yesterday", ["yesterday-and-older"]],
+      ["Recent", ["today", "yesterday-and-older"]],
     ])
+  })
+
+  test("files the rest by age: a rolling week, then everything older, then projects with no chats", () => {
+    const sections = computeChannelSections([
+      project("month-ago", [chat("a", NOW - 30 * DAY)]),
+      project("no-chats", []),
+      project("six-days-ago", [chat("b", NOW - 6 * DAY)]),
+      project("seven-days-ago", [chat("c", NOW - 7 * DAY)]),
+      project("today", [chat("d", NOW)]),
+      // Old by its newest finished chat, but something is running in it.
+      project("old-but-running", [chat("e", NOW - 40 * DAY), chat("f", NOW - 60 * DAY, { status: "running" })]),
+      project("years-ago", [chat("g", NOW - 800 * DAY)]),
+    ], NOW)
+    expect(sections.map((section) => [section.key, section.label, section.groups.map((group) => group.groupKey)])).toEqual([
+      ["in-progress", "In Progress", ["old-but-running"]],
+      ["recent", "Recent", ["today", "six-days-ago"]],
+      // No lower cutoff, and newest first.
+      ["older", "Older", ["seven-days-ago", "month-ago", "years-ago"]],
+      ["quiet", "No Recent Chats", ["no-chats"]],
+    ])
+    // Fixed per section, whichever of them are there.
+    expect(Object.fromEntries(sections.map((section) => [section.key, [section.collapsible, section.defaultExpanded]]))).toEqual({
+      "in-progress": [false, true],
+      "recent": [true, true],
+      older: [true, false],
+      quiet: [true, false],
+    })
+  })
+
+  test("the week is whole local days: today and the six before it, turning over at midnight", () => {
+    expect(RECENT_CHANNEL_DAYS).toBe(7)
+    // NOW is noon on October 1st, so the week began as September 25th did.
+    const weekStart = new Date(2026, 8, 25).getTime()
+    const keyFor = (at: number, now = NOW) => computeChannelSections([project("p", [chat("a", at)])], now)[0]!.key
+    expect(keyFor(weekStart)).toBe("recent")
+    expect(keyFor(weekStart - 1)).toBe("older")
+    // Not a rolling 168 hours: the first minute of that day is in at any
+    // time today, and out the moment tomorrow starts.
+    const endOfToday = new Date(2026, 9, 1, 23, 59, 59, 999).getTime()
+    expect(keyFor(weekStart + 60_000, endOfToday)).toBe("recent")
+    expect(keyFor(weekStart + 60_000, endOfToday + 1)).toBe("older")
+    // A clock a little ahead of this one is still today.
+    expect(keyFor(NOW + 5 * 60_000)).toBe("recent")
+  })
+
+  test("a project is as recent as its most recent chat activity, not its last message", () => {
+    // Sent a fortnight ago, and the agent only finished yesterday.
+    expect(sectionsOf([
+      project("long-turn", [chat("a", NOW - 14 * DAY, { lastTurnEndedAt: NOW - DAY })]),
+      project("old", [chat("b", NOW - 14 * DAY), chat("c", NOW - 20 * DAY)]),
+    ])).toEqual([
+      ["Recent", ["long-turn"]],
+      ["Older", ["old"]],
+    ])
+  })
+
+  test("leaves out a section with nothing in it", () => {
+    expect(sectionsOf([project("old", [chat("a", NOW - 30 * DAY)])])).toEqual([["Older", ["old"]]])
+    expect(sectionsOf([project("new", [chat("a", NOW)])])).toEqual([["Recent", ["new"]]])
   })
 
   test("pins a project only when the channel itself is pinned", () => {
@@ -52,8 +112,7 @@ describe("computeChannelSections", () => {
       project("plain", [chat("c", NOW - DAY)]),
     ], { "pinned-channel": 10 })).toEqual([
       ["Pinned", ["pinned-channel"]],
-      ["Today", ["has-pinned-chat"]],
-      ["Yesterday", ["plain"]],
+      ["Recent", ["has-pinned-chat", "plain"]],
     ])
   })
 
@@ -63,14 +122,11 @@ describe("computeChannelSections", () => {
       project("unsent", [chat("a", NOW, { lastMessageAt: undefined })]),
       project("active", [chat("b", NOW)]),
     ])).toEqual([
-      ["Today", ["active"]],
+      ["Recent", ["active"]],
       ["No Recent Chats", ["empty", "unsent"]],
     ])
   })
 
-  test("ignores a pin for a project that is gone", () => {
-    expect(sectionsOf([project("active", [chat("a", NOW)])], { gone: 1 })).toEqual([["Today", ["active"]]])
-  })
 })
 
 describe("getChannelPeekGroups", () => {
@@ -107,20 +163,5 @@ describe("getChannelPeekGroups", () => {
 
   test("is empty for a project with no chats to show", () => {
     expect(peek([chat("unsent", NOW, { lastMessageAt: undefined })])).toEqual([])
-  })
-})
-
-describe("getPinnedChannelChats", () => {
-  test("lists pinned chats from every project in pin order, without archived ones", () => {
-    const threads = flattenSidebarThreads({
-      projectGroups: [
-        project("a", [chat("later", NOW, { pinnedAt: 20 }), chat("plain", NOW)]),
-        {
-          ...project("b", [chat("earlier", NOW, { pinnedAt: 10 })]),
-          archivedChats: [chat("archived", NOW, { pinnedAt: 5 })],
-        } as SidebarProjectGroup,
-      ],
-    })
-    expect(getPinnedChannelChats(threads).map((thread) => thread.chatId)).toEqual(["earlier", "later"])
   })
 })

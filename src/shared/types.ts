@@ -186,6 +186,19 @@ export type StandaloneTranscriptExportCommandResult =
   | StandaloneTranscriptExportResult
   | StandaloneTranscriptExportFailureResult
 
+/**
+ * Who sent a message, when it was not typed into the composer. Absent means
+ * the user. Carried from the queue onto the transcript's `user_prompt`, so a
+ * client can show an agent's message as something other than the user's own.
+ */
+export type MessageSource =
+  /** Another chat's agent sent it (`send_message`, or the first message of a chat it created). */
+  | { kind: "agent"; chatId: string }
+  /** Sub-chats reporting their results to the chat that started them. */
+  | { kind: "report"; chatIds: string[] }
+  /** A schedule fired. */
+  | { kind: "schedule"; scheduleId: string }
+
 export interface QueuedChatMessage {
   id: string
   content: string
@@ -194,8 +207,62 @@ export interface QueuedChatMessage {
   provider?: AgentProvider
   model?: string
   modelOptions?: ModelOptions
+  /** Kept from the sender so a queued message runs with the effort it was sent with. */
+  effort?: string
   planMode?: boolean
   autoPlan?: boolean
+  source?: MessageSource
+}
+
+/** When a schedule sends its message. Wall-clock times are in the server's time zone. */
+export type ScheduleTrigger =
+  | { kind: "once"; at: number }
+  | { kind: "interval"; everyMs: number }
+  /** `weekdays` uses 0 for Sunday. Omitted means every day. */
+  | { kind: "daily"; timeOfDay: string; weekdays?: number[] }
+
+/**
+ * A stored trigger that sends a message later: into an existing chat, or into
+ * a new chat it creates for each run.
+ */
+export interface ChatSchedule {
+  id: string
+  name: string
+  content: string
+  target: { kind: "chat"; chatId: string } | { kind: "new_chat"; projectId: string }
+  trigger: ScheduleTrigger
+  provider?: AgentProvider
+  model?: string
+  effort?: string
+  planMode?: boolean
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+  /** The chat whose agent created it. Absent when a user did. */
+  createdByChatId?: string
+  /**
+   * Set when a sub-chat scheduled this for itself in a turn its parent was
+   * owed a report for. The run is more of the same work, so the turn it
+   * starts is reported to the parent too.
+   */
+  reportsToParent?: true
+  /** Null once nothing is left to run: a one-shot that fired, or `maxRuns` reached. */
+  nextRunAt: number | null
+  lastRunAt?: number
+  /** The chat the last run went to. For a `new_chat` target, the chat it created. */
+  lastRunChatId?: string
+  runCount: number
+  maxRuns?: number
+  /** The latest runs, oldest first. Capped, so a schedule that fires for months stays small. */
+  runs?: ScheduleRun[]
+}
+
+export interface ScheduleRun {
+  at: number
+  /** `skipped`: the previous run was still going. `failed`: the message could not be sent. */
+  outcome: "sent" | "skipped" | "failed"
+  /** The chat the message went to, when it was sent. */
+  chatId?: string
 }
 
 export interface ProviderModelOption {
@@ -975,12 +1042,31 @@ export function isNightlyVersion(version: string): boolean {
   return version.includes("-nightly.")
 }
 
+/**
+ * `waiting_on_subagent` is a chat whose own turn has ended while work it
+ * handed to another agent is still going: its provider's (a subagent, a
+ * workflow) or a Kanna sub-chat. That work comes back and starts the chat's
+ * next turn, so the chat has not finished. A shell or a monitor it left
+ * running is not that: a dev server is not something a chat is waiting for,
+ * and such a chat reads as its last turn ended.
+ * A chat whose turn is still running reads `running`, whatever it handed off.
+ */
 export type KannaStatus =
   | "idle"
   | "starting"
   | "running"
   | "waiting_for_user"
+  | "waiting_on_subagent"
   | "failed"
+
+/**
+ * Work is still going in the chat without needing the user: a turn in flight,
+ * or handed-off work the chat is waiting on. Such a chat is in progress, not
+ * ready to review, however its last turn ended.
+ */
+export function isWorkingStatus(status?: string | null): boolean {
+  return status === "starting" || status === "running" || status === "waiting_on_subagent"
+}
 
 export interface ProjectSummary {
   id: string
@@ -1068,6 +1154,18 @@ export interface SidebarChatRow {
   pinnedAt?: number
   hasAutomation: boolean
   canFork?: boolean
+  /**
+   * The chat whose agent started this one as a sub-chat. Lists of chats leave
+   * these out: a sub-chat is shown with its parent, the way a subagent is. It
+   * stays in `chats` so anything that looks a chat up by id still finds it.
+   */
+  parentChatId?: string
+  /**
+   * Set when `parentChatId` came from the parent adopting the chat, not
+   * starting it. An adopted chat stays in every list: `isSubChat` in
+   * `shared/sub-chat.ts` is the rule. Never false; absent on every other row.
+   */
+  adopted?: true
 }
 
 /**
@@ -1120,6 +1218,11 @@ export interface SidebarProjectGroup {
   title: string
   realTitle: string
   sidebarTitle?: string
+  /**
+   * When the project was pinned in the Channels view (epoch ms). Absent when
+   * it isn't. Pinned projects are listed in the order they were pinned.
+   */
+  pinnedAt?: number
   /**
    * Basename of the git repo root, absent when the project isn't in a repo.
    * Not always the project's folder name — a project can be a subdirectory of
@@ -1766,6 +1869,22 @@ export interface DisplayToolCall
 export interface UnknownToolCall
   extends ToolCallBase<"unknown_tool", { payload?: Record<string, unknown> }> { }
 
+/**
+ * A Kanna tool that started another chat or sent one a message (`create_chat`,
+ * `fork_chat`, `send_message`). Drawn inline as a card for that chat, so its
+ * input and result travel with the transcript like a display tool's.
+ */
+export interface ChatToolCall
+  extends ToolCallBase<"chat", { payload: Record<string, unknown> }> { }
+
+/**
+ * A Kanna tool that set, changed or deleted a schedule (`set_schedule`,
+ * `delete_schedule`). Drawn inline as a card for that schedule, like a chat
+ * tool's card for its chat.
+ */
+export interface ScheduleToolCall
+  extends ToolCallBase<"schedule", { payload: Record<string, unknown> }> { }
+
 export type NormalizedToolCall =
   | AskUserQuestionToolCall
   | ExitPlanModeToolCall
@@ -1783,6 +1902,8 @@ export type NormalizedToolCall =
   | McpGenericToolCall
   | UnknownToolCall
   | DisplayToolCall
+  | ChatToolCall
+  | ScheduleToolCall
 
 export interface ToolResultEntry extends TranscriptEntryBase {
   kind: "tool_result"
@@ -1808,6 +1929,8 @@ export interface UserPromptEntry extends TranscriptEntryBase {
   content: string
   attachments?: ChatAttachment[]
   steered?: boolean
+  /** Set when something other than the user sent it. See `MessageSource`. */
+  source?: MessageSource
 }
 
 export interface SystemInitEntry extends TranscriptEntryBase {
@@ -2365,7 +2488,7 @@ export type HydratedToolCall = {
 }[NormalizedToolCall["toolKind"]]
 
 export type HydratedTranscriptMessage =
-  | ({ kind: "user_prompt"; content: string; attachments?: ChatAttachment[]; steered?: boolean; id: string; messageId?: string; timestamp: string; hidden?: boolean })
+  | ({ kind: "user_prompt"; content: string; attachments?: ChatAttachment[]; steered?: boolean; source?: MessageSource; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "system_init"; model: string; tools: string[]; agents: string[]; slashCommands: string[]; mcpServers: McpServerInfo[]; provider: AgentProvider; id: string; messageId?: string; timestamp: string; hidden?: boolean; debugRaw?: string })
   | ({ kind: "account_info"; accountInfo: AccountInfo; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "assistant_text"; text: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
@@ -2382,12 +2505,13 @@ export type HydratedTranscriptMessage =
   | ({ id: string; messageId?: string; hidden?: boolean } & HydratedToolCall)
 
 /**
- * One unit of work a chat is still waiting on after the main agent stopped
- * talking: a subagent, a backgrounded shell, a monitor, a workflow.
+ * One task still going after the main agent stopped talking: a subagent, a
+ * backgrounded shell, a monitor, a workflow. The Tasks widget lists them all.
  *
- * A turn is not over while any of these is `running`. The main agent's result
- * arrives as soon as *it* is done, so without this the chat read as finished
- * while the work it delegated was still going.
+ * Only the ones that are work handed to another agent (a subagent, a
+ * workflow, a sub-chat) keep the chat from reading as finished: the main
+ * agent's result arrives as soon as *it* is done, and without them the chat
+ * read as finished while the work it delegated was still going.
  */
 export interface SubagentActivity {
   /** The provider's own id: Claude's task id (a subagent's `agent_id`), or the spawning tool call id. */
@@ -2418,6 +2542,8 @@ export interface SubagentActivity {
   workflowId?: string
   /** The provider can stop this one task without cancelling the turn (Claude's `stopTask`). */
   stoppable?: boolean
+  /** Set when the task is a Kanna chat this one started (`type: "chat"`): the chat to open. */
+  chatId?: string
 }
 
 /**
@@ -2482,6 +2608,20 @@ export interface ChatRuntime {
    * spawned any, so a chat that doesn't delegate costs nothing on the wire.
    */
   subagents?: SubagentActivity[]
+  /**
+   * Schedules to do with this chat: the ones that send to it, the ones its
+   * agent created, and the one whose run started it. Omitted when there are none.
+   */
+  schedules?: ChatSchedule[]
+  /**
+   * The chat this one reports to as a sub-chat, as it stands now. The same
+   * value as `SidebarChatRow.parentChatId`, here so a client can show the way
+   * back to the parent from the chat's own snapshot. Omitted for a chat with
+   * no parent. The parent's title and status are still the sidebar's to give.
+   */
+  parentChatId?: string
+  /** Set when that parent adopted the chat. The same value as `SidebarChatRow.adopted`. */
+  adopted?: true
 }
 
 export interface ChatSnapshot {

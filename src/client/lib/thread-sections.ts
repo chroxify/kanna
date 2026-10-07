@@ -1,4 +1,5 @@
-import type { SidebarChatRow, SidebarData } from "../../shared/types"
+import { isSubChat } from "../../shared/sub-chat"
+import { isWorkingStatus, type SidebarChatRow, type SidebarData } from "../../shared/types"
 import { getProjectSidebarLabel, type ProjectSidebarLabel } from "./project-label"
 
 /**
@@ -88,7 +89,38 @@ export function carryProjectSidebarLabel(
   if (cached) projectLabelCache.set(to, cached)
 }
 
-/** Flattens the sidebar snapshot into one searchable thread list (active + archived). */
+// The rule for which chats the lists leave out. It lives in `shared` because
+// the server's sidebar lists apply it too.
+export { isSubChat }
+
+/**
+ * Whether a chat's unread mark is the user's to hear about, as a sound, a
+ * notification or a count. A sub-chat's is not: it finished for its parent,
+ * which reports the result in its own turn. An adopted chat is in the lists,
+ * so its mark is the user's like any other chat's.
+ *
+ * Nor is the mark of a chat that is still working. Its turn ended, which is
+ * what set the mark, but a chat waiting on a subagent has more to say, and the
+ * turn that work starts would end with the mark already set: the reply worth
+ * hearing about would be the one that made no sound. Held back until the chat
+ * comes to rest, the mark is announced once, when everything is in.
+ */
+export function isUnreadForUser(row: Pick<SidebarChatRow, "unread" | "parentChatId" | "adopted" | "status">): boolean {
+  return row.unread && !isSubChat(row) && !isWorkingStatus(row.status)
+}
+
+/** The threads a list of chats shows: everything but sub-chats. */
+export function listedThreads(threads: SidebarThread[]): SidebarThread[] {
+  return threads.some((thread) => isSubChat(thread.row))
+    ? threads.filter((thread) => !isSubChat(thread.row))
+    : threads
+}
+
+/**
+ * Flattens the sidebar snapshot into one searchable thread list (active +
+ * archived). Sub-chats included: this is also what a chat is looked up in.
+ * A caller that lists chats passes the result through `listedThreads`.
+ */
 export function flattenSidebarThreads(data: SidebarData): SidebarThread[] {
   const threads: SidebarThread[] = []
   for (const group of data.projectGroups) {
@@ -162,7 +194,8 @@ export function stabilizeSidebarThreads(
 /**
  * Chats "ready for review" — exactly the ones that would show a status dot in
  * the sidebar as needing you: waiting on the user (plan/question) or unread.
- * Running chats (spinner, still in progress) and archived chats are excluded.
+ * Chats still working (a turn running, or waiting on a subagent) and archived
+ * chats are excluded.
  * Special case: sorted OLDEST first (unlike every other section) — the chat
  * that's been waiting on you longest leads, so Cmd+K → Enter clears the
  * backlog in FIFO order.
@@ -179,9 +212,10 @@ export function getReviewThreads(
       // even if it's still flagged unread (e.g. a follow-up sent while the
       // previous turn's unread badge is still showing). A chat with a prompt in
       // flight is the same case one moment earlier: you have just answered it,
-      // so it is not waiting on you, whatever the snapshot still says.
-      && thread.row.status !== "running"
-      && thread.row.status !== "starting"
+      // so it is not waiting on you, whatever the snapshot still says. And a
+      // chat waiting on a subagent has an unread reply that is not its last
+      // word: the work it handed off will start another turn.
+      && !isWorkingStatus(thread.row.status)
       && !isPendingSend(thread, pendingSends)
       && (thread.row.status === "waiting_for_user" || thread.row.unread))
     .sort((left, right) => left.lastActivityAt - right.lastActivityAt)
@@ -201,10 +235,10 @@ function isPendingSend(thread: SidebarThread, pendingSends?: PendingSendTimes): 
 }
 
 /**
- * Chats still working (running/starting), minus any already surfaced in the
- * exclude set (typically the review section). Special case: sorted OLDEST
- * first (unlike every other section) — the chat that's gone longest without a
- * response leads since it's most likely to need you next.
+ * Chats still working (running/starting, or waiting on a subagent), minus any
+ * already surfaced in the exclude set (typically the review section). Special
+ * case: sorted OLDEST first (unlike every other section) — the chat that's
+ * gone longest without a response leads since it's most likely to need you next.
  *
  * Chats with a prompt in flight count as working before the server says so.
  * Without that a chat you just sent to belongs to no section at all for the
@@ -230,8 +264,7 @@ export function getInProgressThreads(
     .filter((thread) =>
       !thread.archived
       && !(exclude?.has(thread.chatId))
-      && (thread.row.status === "running"
-        || thread.row.status === "starting"
+      && (isWorkingStatus(thread.row.status)
         || isPendingSend(thread, pendingSends)))
     .sort((left, right) =>
       userMessageAt(left, pendingSends) - userMessageAt(right, pendingSends))
@@ -385,6 +418,15 @@ function addDays(ms: number, days: number): number {
   const date = new Date(ms)
   date.setDate(date.getDate() + days)
   return date.getTime()
+}
+
+/**
+ * Local midnight at the start of the day `days` calendar days before the one
+ * `nowMs` falls in: 0 is today's. For a window counted in whole days, which
+ * a chat then leaves at midnight and not at the minute it was last touched.
+ */
+export function startOfDayDaysAgo(nowMs: number, days: number): number {
+  return addDays(startOfDay(nowMs), -days)
 }
 
 /** Monday 00:00 of the week containing the given day start (weeks start Monday). */
