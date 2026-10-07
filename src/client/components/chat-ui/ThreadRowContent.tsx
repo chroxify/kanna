@@ -4,6 +4,7 @@ import type { SidebarChatRow } from "../../../shared/types"
 import type { SidebarThread } from "../../lib/thread-sections"
 import { cn } from "../../lib/utils"
 import { AnimatedShinyText } from "../ui/animated-shiny-text"
+import { ProjectIcon } from "../ui/project-icon"
 import { PROVIDER_ICONS } from "./ChatPreferenceControls"
 
 /**
@@ -19,8 +20,9 @@ function statusDotClass(archived: boolean) {
 }
 
 /**
- * Status glyph mirroring the sidebar chat rows: spinner while running, a blue
- * ping when waiting on the user, a green ping when unread. Returns null for
+ * Status glyph mirroring the sidebar chat rows: spinner while running, the
+ * same spinner in grey while waiting on a subagent, a blue ping when waiting
+ * on the user, a green ping when unread. Returns null for
  * idle chats so callers can fall back to a default icon — `uncommittedWork` is
  * carried by title contrast, not by this slot, so it only ever holds things
  * that want your attention.
@@ -28,6 +30,12 @@ function statusDotClass(archived: boolean) {
 export function renderChatStatusDot(chat: SidebarChatRow): ReactNode | null {
   if (chat.status === "starting" || chat.status === "running") {
     return <Loader2 className="size-3.5 shrink-0 animate-spin text-logo" />
+  }
+  // Still going, but not in this chat: the grey a running task gets in the
+  // Tasks widget, which is where the work is. Ahead of the unread ping,
+  // because the reply it would flag is not the chat's last word.
+  if (chat.status === "waiting_on_subagent") {
+    return <Loader2 aria-label="Waiting on a subagent" className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
   }
   const color = chat.status === "waiting_for_user" ? "blue" : chat.unread ? "emerald" : null
   if (!color) return null
@@ -56,6 +64,7 @@ export function ThreadRowContent({
   isActive = false,
   dimIdleTitles = true,
   hasDraft = false,
+  showProjectIcon = false,
   detailLabel,
   hoverActions,
 }: {
@@ -81,6 +90,13 @@ export function ThreadRowContent({
    * store — see the hook's note on zustand's server snapshot.
    */
   hasDraft?: boolean
+  /**
+   * Put the project's icon where the harness icon goes. For a list that spans
+   * projects, where the icon tells rows apart; in a list inside one project
+   * every row would carry the same one. The status glyph and the draft pencil
+   * still take the slot when they have something to say.
+   */
+  showProjectIcon?: boolean
   /**
    * The trailing detail slot — the project in cross-project lists, the chat's
    * age in project-scoped ones. **Required, and deliberately so**: this used to
@@ -149,9 +165,11 @@ export function ThreadRowContent({
   const dimTitle = dimIdleTitles && !isActive && !hasUncommittedWork && !needsAttention
   return (
     <>
-      {statusDot ?? (HarnessIcon
-        ? <HarnessIcon className={iconClass} />
-        : <MessageCircle className={iconClass} />)}
+      {statusDot ?? (showProjectIcon && !showsDraft
+        ? <ProjectIcon name={thread.projectTitle} iconUrl={thread.projectIconUrl} className={thread.archived ? "opacity-50" : undefined} />
+        : HarnessIcon
+          ? <HarnessIcon className={iconClass} />
+          : <MessageCircle className={iconClass} />)}
       {thread.row.status === "running" || thread.row.status === "starting" ? (
         <AnimatedShinyText
           className="!mx-0 min-w-0 shrink truncate"

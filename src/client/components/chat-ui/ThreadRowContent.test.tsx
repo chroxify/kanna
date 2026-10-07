@@ -74,6 +74,21 @@ describe("renderChatStatusDot", () => {
     expect(html).not.toContain("bg-emerald-400")
   })
 
+  test("waiting on a subagent spins in grey, ahead of unread, and the title holds still", () => {
+    const html = renderDot({ ...baseChat, status: "waiting_on_subagent", unread: true })
+
+    expect(html).toContain("animate-spin")
+    expect(html).toContain("text-muted-foreground")
+    // Not the running red: nothing is happening in this chat itself.
+    expect(html).not.toContain("text-logo")
+    expect(html).not.toContain("bg-emerald-400")
+
+    const row = renderRow({ thread: thread({ status: "waiting_on_subagent" }), showStatus: true, detailLabel: null })
+    expect(row).not.toContain("kanna-shiny-track")
+    // Still going, so it never recedes with the chats at rest.
+    expect(row).not.toContain(DIM_CLASS)
+  })
+
   test("renders the compositor-driven shimmer for a running title", () => {
     const html = renderRow({ thread: thread({ status: "running" }), showStatus: true, detailLabel: null })
 
@@ -180,6 +195,39 @@ describe("ThreadRowContent draft glyph", () => {
 
     expect(html).toContain("animate-spin")
     expect(html).not.toContain("lucide-pencil-line")
+  })
+})
+
+describe("ThreadRowContent project icon", () => {
+  const iconUrl = "/api/project-icons/0123456789abcdef-0123456789ab.png"
+
+  test("is off unless asked for", () => {
+    const html = renderRow({ thread: { ...thread(), projectIconUrl: iconUrl }, detailLabel: null })
+
+    expect(html).not.toContain(iconUrl)
+  })
+
+  test("takes the harness icon's slot, as an image or as initials", () => {
+    const withIcon = renderRow({ thread: { ...thread(), projectIconUrl: iconUrl }, showProjectIcon: true, detailLabel: null })
+    expect(withIcon).toContain(`src="${iconUrl}"`)
+
+    const withoutIcon = renderRow({ thread: { ...thread(), projectTitle: "kanna-site" }, showProjectIcon: true, detailLabel: null })
+    expect(withoutIcon).toContain(">KS<")
+  })
+
+  test("yields to the status dot and the draft pencil", () => {
+    const running = renderRow({
+      thread: { ...thread({ status: "running" }), projectIconUrl: iconUrl },
+      showStatus: true,
+      showProjectIcon: true,
+      detailLabel: null,
+    })
+    expect(running).toContain("animate-spin")
+    expect(running).not.toContain(iconUrl)
+
+    const drafted = renderRow({ thread: { ...thread(), projectIconUrl: iconUrl }, showProjectIcon: true, hasDraft: true, detailLabel: null })
+    expect(drafted).toContain("lucide-pencil-line")
+    expect(drafted).not.toContain(iconUrl)
   })
 })
 

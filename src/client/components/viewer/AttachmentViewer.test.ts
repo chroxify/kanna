@@ -20,6 +20,14 @@ describe("sortTableRows", () => {
     expect(sortTableRows(rows, { column: 0, direction: "desc" }).map((row) => row[0])).toEqual(["gamma", "beta", "alpha", ""])
   })
 
+  test("sorts row indices, leaving the rows where they are", async () => {
+    const { sortedRowOrder } = await import("./AttachmentViewer")
+    const big = Array.from({ length: 1_000 }, (_, index) => [`row ${index}`, String((index * 7919) % 1_000)])
+    const order = sortedRowOrder(big, { column: 1, direction: "desc" })
+    expect(big[order[0]!]![1]).toBe("999")
+    expect(big[order[999]!]![1]).toBe("0")
+  })
+
   test("no sort keeps the file's order", () => {
     expect(sortTableRows(rows, null)).toEqual(rows)
   })

@@ -1,9 +1,11 @@
 import commandScore from "command-score"
+import { isSubChat } from "../../../shared/sub-chat"
 import type { LocalProjectSummary, SidebarProjectGroup } from "../../../shared/types"
 import type { SidebarThread } from "../../lib/thread-sections"
 import {
   listAllSettingsRowDefs,
   SETTINGS_SECTIONS,
+  visibleSettingsSections,
   type SettingsRowDef,
   type SettingsSectionId,
 } from "../../app/settings/registry"
@@ -96,6 +98,8 @@ export function flattenVisibleProjectGroups(groups: SidebarProjectGroup[]): Pale
     let mostRecentChatId: string | null = null
     let lastActivityAt = 0
     for (const chat of group.chats) {
+      // Opening a project lands on a chat its list shows.
+      if (isSubChat(chat)) continue
       const activityAt = chat.lastMessageAt ?? chat._creationTime
       if (activityAt >= lastActivityAt) {
         lastActivityAt = activityAt
@@ -198,7 +202,7 @@ function sectionLabelFor(sectionId: SettingsSectionId): string {
  * Derived entirely from the settings registry — new rows appear automatically.
  */
 export function getSettingsPaletteEntries(): SettingsPaletteEntry[] {
-  const sections: SettingsPaletteEntry[] = SETTINGS_SECTIONS.map((section) => ({
+  const sections: SettingsPaletteEntry[] = visibleSettingsSections().map((section) => ({
     id: `settings-section-${section.id}`,
     title: section.label,
     sectionLabel: "Settings",

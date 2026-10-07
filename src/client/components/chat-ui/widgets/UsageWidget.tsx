@@ -1,5 +1,5 @@
 import { LoaderCircle, RefreshCw } from "lucide-react"
-import type { AgentProvider } from "../../../../shared/types"
+import type { AgentProvider, UsageLimitsSnapshot } from "../../../../shared/types"
 import type { KannaSocket } from "../../../app/socket"
 import {
   formatPercent,
@@ -17,34 +17,75 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip"
 import { WidgetStatic } from "./parts"
 import { useWidgetExpanded, WidgetCard, WidgetPresence } from "./WidgetCard"
 
+type ProviderUsage = UsageLimitsSnapshot["providers"][number]
+
+function hasUsageContent(usage: ProviderUsage) {
+  return usage.windows.length > 0 || Boolean(usage.credits)
+}
+
 /**
- * The selected harness's usage limits, in the column's own card rather than
- * Settings' ProviderCard, so its header lines up with every other widget's.
- * Only when that harness reports limits: a harness without any (or with
- * nothing read yet) leaves no empty card at the bottom of the column.
+ * Usage limits, one card per harness that reports any: a harness without
+ * limits (or with nothing read yet) leaves no empty card at the bottom of the
+ * column.
  *
- * Collapsed, the header carries the first limit: when it resets, its bar and
- * its percent. Open, the header names the plan ("Personal max") and holds
- * the refresh button, and the body lists every window.
+ * In a chat, only the selected harness shows; that's the one it spends. A new
+ * chat hasn't committed to one, so it shows them all, selected first, and the
+ * others slide out once it sends. One subscription and one refresh for all.
  */
-export function UsageWidget({
+export function UsageWidgets({
   projectId,
   socket,
   active,
-  provider,
+  selectedProvider,
+  showAll,
 }: {
   projectId: string
   socket: KannaSocket
   /** Refreshes only while the widget column is open. */
   active: boolean
-  provider: AgentProvider
+  selectedProvider: AgentProvider
+  showAll: boolean
 }) {
   const { snapshot, refreshing, refresh } = useUsageLimits(socket, active)
-  const usage = snapshot?.providers.find((entry) => entry.provider === provider)
-  const hasContent = Boolean(usage && (usage.windows.length > 0 || usage.credits))
-  const [expanded, setExpanded] = useWidgetExpanded(projectId, "usage", usage?.windows.length ?? 0)
+  const providers = snapshot?.providers ?? []
+  const ordered = [
+    ...providers.filter((usage) => usage.provider === selectedProvider),
+    ...providers.filter((usage) => usage.provider !== selectedProvider),
+  ]
+  return ordered.map((usage) => (
+    <UsageWidget
+      key={usage.provider}
+      projectId={projectId}
+      usage={usage}
+      show={hasUsageContent(usage) && (showAll || usage.provider === selectedProvider)}
+      refreshing={refreshing}
+      onRefresh={() => void refresh(true)}
+    />
+  ))
+}
 
-  if (!usage) return <WidgetPresence show={false}>{null}</WidgetPresence>
+/**
+ * One harness's limits, in the column's own card rather than Settings'
+ * ProviderCard, so its header lines up with every other widget's.
+ *
+ * Collapsed, the header carries the first limit: when it resets, its bar and
+ * its percent. Open, the header names the plan ("Personal max") and holds
+ * the refresh button, and the body lists every window.
+ */
+function UsageWidget({
+  projectId,
+  usage,
+  show,
+  refreshing,
+  onRefresh,
+}: {
+  projectId: string
+  usage: ProviderUsage
+  show: boolean
+  refreshing: boolean
+  onRefresh: () => void
+}) {
+  const [expanded, setExpanded] = useWidgetExpanded(projectId, `usage:${usage.provider}`, usage.windows.length)
 
   const Icon = PROVIDER_ICONS[usage.provider]
   const summaryWindow = usage.windows[0] ?? null
@@ -85,7 +126,7 @@ export function UsageWidget({
           size="sm"
           aria-label="Refresh usage"
           onClick={() => {
-            if (!refreshing) void refresh(true)
+            if (!refreshing) onRefresh()
           }}
           disabled={refreshing}
           className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:text-foreground hover:!bg-transparent hover:!border-border/0"
@@ -98,7 +139,7 @@ export function UsageWidget({
   )
 
   return (
-    <WidgetPresence show={hasContent}>
+    <WidgetPresence show={show}>
       <WidgetCard
         icon={<Icon />}
         title={providerLabel(usage.provider)}

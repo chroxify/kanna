@@ -1,21 +1,41 @@
-import { ChevronDown, ChevronUp, X } from "lucide-react"
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react"
+import { ChevronDown, ChevronUp, Maximize2, Minimize2, X } from "lucide-react"
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
+import { isEscapeClaimed, resolveEscapePress, VIEWER_FIELDS_KEEP_ESCAPE_ATTRIBUTE } from "../../lib/escape-key"
 import { cn } from "../../lib/utils"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
 
 /**
  * The viewer's chrome, the one frame every full-size view sits in: a changed
- * file's diff, an attachment, a chart. An elevated card, like the widget
- * cards, over the whole chat (navbar, transcript, composer, terminal), so
- * whatever is in it gets the room and nothing competes with it.
+ * file's diff, an attachment, a chart, another chat. A flat card, bordered like the
+ * widget cards. On the chat page it opens in a pane of its own beside the
+ * chat, and expands over the chat (navbar, transcript, composer) on
+ * request; elsewhere it covers the page.
  *
  * One header grammar: what it is (icon, title, a muted subtitle), then the
  * view's own controls, then stepping between items when there are several,
- * then close. The body scrolls; the header stays.
+ * then expand and close. The body scrolls; the header stays.
  *
- * Keys: Esc closes; j/k (or ]/[) step when there's more than one item, but
- * never while you're typing in a field.
+ * Keys. Esc closes, from wherever focus is, the chat's composer included:
+ * while the pane is open that is what Escape means on the page, ahead of
+ * stopping a turn (`lib/escape-key` has the whole order). It stands down
+ * only for what is nearer the key: an open menu or dialog, and a field that
+ * is not a composer, so Esc in vim in the terminal below is still vim's.
+ *
+ * j/k (or ]/[) step when there's more than one item, but never while you're
+ * typing in a field. In a pane beside the chat they're the viewer's only
+ * while focus is in it: the chat is live then, and a j typed there is the
+ * chat's. Over the chat they're the viewer's from anywhere but a field.
  */
+
+/** The page gave the viewer a pane beside the chat, which it can widen over the chat. */
+export interface ViewerPlacement {
+  expanded: boolean
+  onToggleExpanded: () => void
+}
+
+const ViewerPlacementContext = createContext<ViewerPlacement | null>(null)
+export const ViewerPlacementProvider = ViewerPlacementContext.Provider
 
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false
@@ -41,7 +61,18 @@ export function ViewerSurface({
   label,
   scrollKey,
   center,
+  leading,
+  fieldsKeepEscape = false,
 }: {
+  /** A control before the icon and title: a previewed chat's Back. */
+  leading?: ReactNode
+  /**
+   * Escape pressed in a field inside is the field's, not a close. For a view
+   * with a transcript in it, whose fields have their own use for the key (a
+   * plan's edit box closes on it). Its composer is not one of those: Escape
+   * there closes the pane, like Escape anywhere else on the page.
+   */
+  fieldsKeepEscape?: boolean
   icon?: ReactNode
   title: ReactNode
   subtitle?: ReactNode
@@ -55,14 +86,27 @@ export function ViewerSurface({
   bodyClassName?: string
   /** Names the region for assistive tech, e.g. "Review src/app.ts". */
   label: string
-  /** Changes when the body shows something new (the next file): it starts at its top. */
+  /**
+   * Changes when the body shows something new: it starts at its top. Without
+   * one the body's scroll is its content's to set (the diff list opens
+   * scrolled to the file you clicked).
+   */
   scrollKey?: string
 }) {
   const surfaceRef = useRef<HTMLDivElement | null>(null)
   const bodyRef = useRef<HTMLDivElement | null>(null)
+  const placement = useContext(ViewerPlacementContext)
+  const docked = placement !== null && !placement.expanded
+  const dockedRef = useRef(docked)
+  dockedRef.current = docked
+  const ownsKeys = () => {
+    const active = document.activeElement
+    if (surfaceRef.current?.contains(active)) return true
+    return !dockedRef.current && !isTypingTarget(active)
+  }
 
   useLayoutEffect(() => {
-    bodyRef.current?.scrollTo({ top: 0 })
+    if (scrollKey !== undefined) bodyRef.current?.scrollTo({ top: 0 })
   }, [scrollKey])
 
   // Focus comes here on open, so its keys work at once and nothing behind
@@ -71,16 +115,39 @@ export function ViewerSurface({
     surfaceRef.current?.focus({ preventScroll: true })
   }, [])
 
+  // Escape closes, from wherever focus is. It's heard first (window, capture
+  // phase), because on its way things would take it: the composer, to stop
+  // a turn; its focus keeper, to refocus the chat input; an open tooltip
+  // (the close button's own "Close (Esc)"), to close itself. What it does
+  // is `resolveEscapePress`'s to say. The event is stopped here either way
+  // it is ours, so the press that closes the pane starts nothing else, and
+  // neither does the key repeating if it is held on.
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return
+      // A card on its way out, or under another (the graph, under the chat
+      // picked from it), is not the pane any more.
+      if (!surfaceRef.current || surfaceRef.current.closest("[inert]")) return
+      const action = resolveEscapePress({
+        repeat: event.repeat,
+        claimed: isEscapeClaimed(event),
+        paneOpen: true,
+        canInterrupt: false,
+      })
+      if (action === "pass") return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      if (action === "close-pane") onClose()
+    }
+    window.addEventListener("keydown", handleEscape, true)
+    return () => window.removeEventListener("keydown", handleEscape, true)
+  }, [onClose])
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      // Something closer to the key (a menu, a dialog) already answered it.
+      // Something closer to the key (a menu, a field) already answered it.
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      if (event.key === "Escape") {
-        event.preventDefault()
-        onClose()
-        return
-      }
-      if (!navigation || navigation.count < 2 || isTypingTarget(event.target)) return
+      if (!navigation || navigation.count < 2 || isTypingTarget(event.target) || !ownsKeys()) return
       if (event.key === "j" || event.key === "]") {
         event.preventDefault()
         navigation.onNext()
@@ -99,8 +166,20 @@ export function ViewerSurface({
       tabIndex={-1}
       role="region"
       aria-label={label}
+      // A click in here isn't a click away from the chat input for the
+      // composer's focus keeper to take back. Over the chat it's also an open
+      // overlay, which stands the keeper down altogether; in a pane beside
+      // the chat it isn't, and the keeper goes on working for the chat.
+      {...{ [FOCUS_FALLBACK_IGNORE_ATTRIBUTE]: "" }}
+      data-state={docked ? undefined : "open"}
+      data-viewer-surface
+      {...(fieldsKeepEscape ? { [VIEWER_FIELDS_KEEP_ESCAPE_ATTRIBUTE]: "" } : {})}
       className={cn(
-        "flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-xl outline-none dark:bg-card",
+        "flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border outline-none",
+        // The card says once what colour it is, and is painted from that. A
+        // transcript shown in it (a previewed chat) fades and fills with the
+        // same `surface`, in either theme, wherever the card is placed.
+        "bg-surface [--surface:var(--color-background)] dark:[--surface:var(--color-card)]",
         // Opens like the modal it effectively is: from its own centre, a
         // touch small and faded, 200ms. It leaves at once: closing is you
         // done with it, and a fade would hold it over the chat you went back to.
@@ -119,6 +198,9 @@ export function ViewerSurface({
         )}
       >
         <div className={cn("flex min-w-0 items-center gap-2", !center && "flex-1")}>
+          {/* Pulled out by the header's own left padding less the 8px the
+              close button keeps on the right, so the two sit alike. */}
+          {leading ? <div className="-ml-2 flex shrink-0 items-center">{leading}</div> : null}
           {icon ? <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4">{icon}</span> : null}
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <span className="min-w-0 max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">{title}</span>
@@ -137,6 +219,11 @@ export function ViewerSurface({
             </>
           ) : null}
           <ViewerDivider />
+          {placement ? (
+            <ViewerIconButton label={placement.expanded ? "Show chat" : "Expand"} onClick={placement.onToggleExpanded}>
+              {placement.expanded ? <Minimize2 /> : <Maximize2 />}
+            </ViewerIconButton>
+          ) : null}
           <ViewerIconButton label="Close (Esc)" onClick={onClose}><X /></ViewerIconButton>
         </div>
       </header>
@@ -182,6 +269,39 @@ export function ViewerIconButton({ label, active = false, onClick, children }: {
 }
 
 /**
+ * The bodies a ViewerToggle switches between. Each mounts the first time it's
+ * shown and then stays: a CSV's table is tens of thousands of cells, and
+ * building it again on every switch back from "Original" froze the viewer.
+ * The one not showing is `content-visibility: hidden`, which keeps its layout
+ * for when it comes back, rather than `display: none`, which throws it away.
+ * Each pane is its own scroller, so each keeps its place.
+ */
+export function ViewerPanes<T extends string>({ value, panes }: {
+  value: T
+  panes: Record<T, () => ReactNode>
+}) {
+  const [shown, setShown] = useState<ReadonlySet<T>>(() => new Set([value]))
+  if (!shown.has(value)) setShown(new Set([...shown, value]))
+  return (
+    <div className="relative h-full">
+      {(Object.keys(panes) as T[]).filter((key) => shown.has(key) || key === value).map((key) => {
+        const active = key === value
+        return (
+          <div
+            key={key}
+            inert={!active}
+            aria-hidden={!active || undefined}
+            className={cn("absolute inset-0 overflow-auto", !active && "pointer-events-none [content-visibility:hidden]")}
+          >
+            {panes[key]()}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
  * Two or three mutually exclusive views of one thing ("Preview" / "Original"),
  * as text in the header. One control, so the active one reads as selected
  * rather than as a pressed button beside another.
@@ -192,7 +312,9 @@ export function ViewerToggle<T extends string>({ value, options, onChange }: {
   onChange: (value: T) => void
 }) {
   return (
-    <div role="radiogroup" className="flex h-7 shrink-0 items-center rounded-md border border-border p-0.5">
+    // Concentric corners: the segment's radius is the frame's less the 3px
+    // between their edges (1px border, 2px padding), 8px outside, 5px inside.
+    <div role="radiogroup" className="flex h-7 shrink-0 items-center rounded-[8px] border border-border p-0.5">
       {options.map((option) => (
         <button
           key={option.value}

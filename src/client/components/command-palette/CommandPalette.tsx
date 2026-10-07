@@ -24,6 +24,7 @@ import {
   Lock,
   LockOpen,
   Moon,
+  Network,
   PanelRight,
   Paperclip,
   Plus,
@@ -46,7 +47,6 @@ import { CHAT_MODE_LABELS } from "../../lib/composer"
 import type { ProjectRequest } from "../../app/kannaStateHelpers"
 import { actionMatchesEvent, getBindingsForAction, shortcutToGlyphs } from "../../lib/keybindings"
 import { formatSidebarAgeLabel, getPathBasename } from "../../lib/formatters"
-import { getThreadDetailLabel, type ThreadDetailScope } from "../../lib/thread-detail-label"
 import { formatPathWithTilde } from "../../lib/pathUtils"
 import {
   abbreviateHomePath,
@@ -63,13 +63,13 @@ import {
 import { filterProjects, getLocalProjectTitle, groupProjectsByRecency, groupProjectsForNewChat } from "../../lib/project-groups"
 import { usePendingSendStore } from "../../stores/pendingSendStore"
 import { useRightSidebarStore, useWidgetsOpen } from "../../stores/rightSidebarStore"
+import { getPaneChatKey, usePaneChatKey } from "../../lib/paneVisibility"
 import { setFocusMode, useFocusModeEnabled } from "../../stores/focusModeStore"
 import { useSidebarStore } from "../../stores/sidebarStore"
-import { useChatHasDraft } from "../../stores/chatInputStore"
 import { useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
+import { useChatViewer, useViewerStore } from "../../stores/viewerStore"
 import { PROVIDER_ICONS } from "../chat-ui/ChatPreferenceControls"
-import { ThreadRowContent } from "../chat-ui/ThreadRowContent"
 import { UsageSection } from "../../app/settings/UsageSection"
 import { getOpenAppItems, openAppValue, OpenAppIcon, useInstalledEditors, useInstalledTerminals } from "../open-external-menu"
 import {
@@ -81,6 +81,7 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/command"
+import { listedThreads } from "../../lib/thread-sections"
 import {
   computeSidebarThreadSections,
   computeThreadSections,
@@ -95,6 +96,7 @@ import {
   type SidebarThread,
 } from "./actions"
 import { CloneProgressBlock, PaletteErrorRow, RepoResultContent } from "./add-project-rows"
+import { ProjectChatSections, ThreadItem } from "./ProjectChatSections"
 import { useDirectoryBrowser } from "./useDirectoryBrowser"
 import { useRepoMetadata } from "./useRepoMetadata"
 
@@ -129,6 +131,11 @@ interface PaletteStackEntry {
   page: PalettePage
   /** Only for `page === "browse"`: the directory this level lists (undefined = home). */
   browsePath?: string
+  /**
+   * What was typed on the page underneath when this one was pushed. Popping
+   * puts it back, so going back lands on the search that led here.
+   */
+  returnQuery?: string
 }
 
 /** State of an in-flight (or failed) clone driven from the palette. */
@@ -158,44 +165,6 @@ function ShortcutHint({ binding }: { binding: string }) {
     <span className="ml-auto shrink-0 pl-3 text-xs tracking-widest text-muted-foreground">
       {shortcutToGlyphs(binding)}
     </span>
-  )
-}
-
-function ThreadItem({
-  thread,
-  onSelect,
-  showStatus = false,
-  scope,
-  nowMs,
-}: {
-  thread: SidebarThread
-  onSelect: (thread: SidebarThread) => void
-  /** Use the sidebar status glyph (ping dots / spinner) instead of the chat icon. */
-  showStatus?: boolean
-  /**
-   * Whether this list spans projects. The detail slot follows from it — see
-   * `getThreadDetailLabel`. Taking the scope rather than a finished label is
-   * what keeps the palette in step with the sidebar.
-   */
-  scope: ThreadDetailScope
-  nowMs: number
-}) {
-  // Same treatment as the sidebar: a chat you left mid-sentence swaps its
-  // harness glyph for a pencil.
-  const hasDraft = useChatHasDraft(thread.chatId)
-  return (
-    <CommandItem value={`thread-${thread.chatId}`} onSelect={() => onSelect(thread)}>
-      <ThreadRowContent
-        thread={thread}
-        showStatus={showStatus}
-        showPreview
-        // Every palette row is something you might be about to open, so none of
-        // them recede the way an ambient sidebar list does.
-        dimIdleTitles={false}
-        hasDraft={hasDraft}
-        detailLabel={getThreadDetailLabel(thread, scope, nowMs)}
-      />
-    </CommandItem>
   )
 }
 
@@ -301,10 +270,17 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const onChatPage = Boolean(state.activeChatId)
   const projectId = state.activeProjectId
   // Reactive so the palette's Show/Hide Widgets label tracks the navbar toggle.
-  const widgetsOpen = useWidgetsOpen(projectId)
+  const widgetsChatKey = usePaneChatKey("widgets", state.activeChatId)
+  const widgetsOpen = useWidgetsOpen(projectId, widgetsChatKey)
   const isMac = (state.localProjects?.machine.platform ?? "darwin") === "darwin"
   // Reactive so the action's label flips between Focus and Exit Focus Mode.
   const focusModeEnabled = useFocusModeEnabled()
+  // The graph is shown in the previewer's pane, so only where a page has one
+  // (the same count a sub-chat's click reads: `chatPreviewHosts`).
+  const canShowGraph = useViewerStore((store) => store.chatPreviewHosts > 0)
+  // Reactive so the label says what choosing it will do. A chat picked from
+  // the graph has taken the graph's place, so the graph is not "shown" then.
+  const graphShown = useChatViewer()?.item.kind === "graph"
   // The active chat's row plus the project group that owns it (for the
   // "Hide <project>" action, which needs the group key + title).
   const currentChat = useMemo(() => {
@@ -318,7 +294,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const currentChatRow = currentChat?.row ?? null
   const currentChatGroup = currentChat?.group ?? null
 
-  const threads = useMemo(() => flattenSidebarThreads(sidebarData), [sidebarData])
+  const threads = useMemo(() => listedThreads(flattenSidebarThreads(sidebarData)), [sidebarData])
   const paletteProjects = useMemo(
     () => flattenVisibleProjectGroups(sidebarData.projectGroups),
     [sidebarData]
@@ -346,17 +322,22 @@ export function CommandPalette({ state }: { state: KannaState }) {
     setOpen(true)
   }, [browser.reset])
 
+  // Read through a ref so pushPage stays stable; the actions memo depends on
+  // it and would otherwise rebuild on every keystroke.
+  const queryRef = useRef(query)
+  queryRef.current = query
+
   const pushPage = useCallback((next: PaletteStackEntry) => {
-    setPages((current) => [...current, next])
+    setPages((current) => [...current, { ...next, returnQuery: queryRef.current }])
     setQuery("")
     setActionError(null)
   }, [])
 
   const popPage = useCallback(() => {
     setPages((current) => current.slice(0, -1))
-    setQuery("")
+    setQuery(pages[pages.length - 1]?.returnQuery ?? "")
     setActionError(null)
-  }, [])
+  }, [pages])
 
   useEffect(() => {
     function handleGlobalKeydown(event: KeyboardEvent) {
@@ -402,13 +383,6 @@ export function CommandPalette({ state }: { state: KannaState }) {
     }
     navigate(`/chat/${thread.chatId}`)
   }, [close, navigate, state.handleOpenArchivedChat])
-
-  // Browse a specific project's chats (from a search result's "Chats in…"
-  // row). Keeps the palette open and steps into the project-chats sub-page.
-  const openProjectChats = useCallback((targetProjectId: string) => {
-    setProjectChatsTargetId(targetProjectId)
-    pushPage({ page: "project-chats" })
-  }, [pushPage])
 
   const newProjectsDir = state.appSettings?.newProjectsDirectory ?? DEFAULT_NEW_PROJECTS_DIRECTORY
 
@@ -469,7 +443,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     setPages((current) => (
       current[current.length - 1]?.page === "clone-github"
         ? current
-        : [...current, { page: "clone-github" }]
+        : [...current, { page: "clone-github", returnQuery: queryRef.current }]
     ))
     setQuery(`${repo.owner}/${repo.repo}`)
     setActionError(null)
@@ -667,13 +641,13 @@ export function CommandPalette({ state }: { state: KannaState }) {
         // words still find the toggle.
         keywords: [
           "right sidebar", "panel", "git", "diff", "changes", "commit", "stage", "source control", "history", "log",
-          "ports", "localhost", "servers", "browser", "todos", "agents", "subagents", "attachments", "show", "hide",
+          "ports", "localhost", "servers", "browser", "todos", "agents", "subagents", "tasks", "monitors", "workflows", "attachments", "show", "hide",
         ],
         icon: <PanelRight className={ICON_CLASS} />,
         shortcut: chatShortcuts("toggleRightSidebar"),
         run: () => {
           close()
-          useRightSidebarStore.getState().toggleWidgets(projectId)
+          useRightSidebarStore.getState().toggleWidgets(projectId, widgetsChatKey)
         },
       })
       list.push({
@@ -686,11 +660,12 @@ export function CommandPalette({ state }: { state: KannaState }) {
           close()
           const store = useTerminalLayoutStore.getState()
           const layout = store.projects[projectId]
+          const terminalChatKey = getPaneChatKey("terminal", state.activeChatId)
           if (!layout || layout.terminals.length === 0) {
-            store.addTerminal(projectId)
+            store.addTerminal(projectId, undefined, terminalChatKey)
             return
           }
-          store.toggleVisibility(projectId)
+          store.toggleVisibility(projectId, terminalChatKey)
         },
       })
       list.push({
@@ -749,6 +724,22 @@ export function CommandPalette({ state }: { state: KannaState }) {
           },
         })
       }
+    }
+
+    if (state.activeChatId && canShowGraph) {
+      const graphChatId = state.activeChatId
+      list.push({
+        id: "show-graph",
+        title: graphShown ? "Hide Graph" : "Show Graph",
+        keywords: ["graph", "tree", "map", "overview", "sub-chats", "subchats", "sub chats", "delegation", "agents", "children", "show", "hide"],
+        icon: <Network className={ICON_CLASS} />,
+        run: () => {
+          close()
+          // The tree this chat is in, from its root down, beside the chat.
+          if (graphShown) useViewerStore.getState().close()
+          else useViewerStore.getState().open({ kind: "graph", chatId: graphChatId })
+        },
+      })
     }
 
     if (state.activeChatId) {
@@ -956,6 +947,8 @@ export function CommandPalette({ state }: { state: KannaState }) {
     editorCommandTemplate,
     editorPreset,
     focusModeEnabled,
+    canShowGraph,
+    graphShown,
     installedEditors,
     installedTerminals,
     isMac,
@@ -964,6 +957,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     projectId,
     pushPage,
     resolvedTheme,
+    widgetsChatKey,
     widgetsOpen,
     setTheme,
     state.activeChatId,
@@ -1284,8 +1278,10 @@ export function CommandPalette({ state }: { state: KannaState }) {
         if (projectChatsTargetId !== null) return "project-chats-new"
         const firstThread = projectChatSections
           ? [
+            ...projectChatSections.pinned,
             ...projectChatSections.inProgress,
             ...projectChatSections.review,
+            ...projectChatSections.relevant,
             ...projectChatSections.buckets.flatMap((bucket) => bucket.threads),
             ...projectChatSections.archived,
           ][0]
@@ -1392,8 +1388,10 @@ export function CommandPalette({ state }: { state: KannaState }) {
     const map = new Map<string, string>()
     const projectChatSectionThreads = projectChatSections
       ? [
+        ...projectChatSections.pinned,
         ...projectChatSections.inProgress,
         ...projectChatSections.review,
+        ...projectChatSections.relevant,
         ...projectChatSections.buckets.flatMap((bucket) => bucket.threads),
         ...projectChatSections.archived,
       ]
@@ -1590,15 +1588,20 @@ export function CommandPalette({ state }: { state: KannaState }) {
               </CommandGroup>
             ) : null
 
-            // One row per matched project: opens the project's chats sub-page
-            // (which itself leads with a "New Chat" item).
+            // One row per matched project: starts a new chat in it. The new
+            // chat page lists the project's recent chats with the picker, so it
+            // covers what the "Chats in <project>" sub-page used to be the way
+            // in for. (iOS still opens the sub-page.)
             const projectsGroup = projectSearchResults.length > 0 ? (
               <CommandGroup key="projects" heading="Projects">
                 {projectSearchResults.map((project) => (
                   <CommandItem
                     key={project.localPath}
                     value={`palette-project-${project.localPath}`}
-                    onSelect={() => openProjectChats(project.projectId)}
+                    onSelect={() => {
+                      close()
+                      void state.handleCreateChat(project.projectId)
+                    }}
                   >
                     <Folder className={ICON_CLASS} />
                     <span className="min-w-0 truncate">{project.title}</span>
@@ -1611,7 +1614,9 @@ export function CommandPalette({ state }: { state: KannaState }) {
             ) : null
 
             // Every other project on the machine (the "/" route's list) —
-            // search-only, and selecting one opens it and starts a chat.
+            // search-only, and selecting one opens it and starts a chat. The
+            // palette closes at once, like the "New Chat in…" picker; a
+            // failure shows as the app's command error.
             const allProjectsGroup = allProjectSearchResults.length > 0 ? (
               <CommandGroup key="all-projects" heading="All Projects">
                 {allProjectSearchResults.map((project) => {
@@ -1622,11 +1627,8 @@ export function CommandPalette({ state }: { state: KannaState }) {
                       key={project.localPath}
                       value={value}
                       onSelect={() => {
-                        void runProjectAction(value, {
-                          mode: "existing",
-                          localPath: project.localPath,
-                          title: getPathBasename(project.localPath),
-                        })
+                        close()
+                        void state.handleOpenLocalProject(project.localPath)
                       }}
                     >
                       <Folder className={ICON_CLASS} />
@@ -1758,11 +1760,16 @@ export function CommandPalette({ state }: { state: KannaState }) {
                             void state.handleHideProject({ localPath: project.localPath })
                             return
                           }
-                          void runProjectAction(value, {
-                            mode: "existing",
-                            localPath: project.localPath,
-                            title: getPathBasename(project.localPath),
-                          })
+                          // Closes at once rather than spinning on the row: the
+                          // new chat opens as soon as the server makes it, and a
+                          // failure shows as the app's command error. A project
+                          // already in the sidebar skips `project.open`.
+                          close()
+                          const knownProjectId = sidebarData.projectGroups
+                            .find((group) => group.localPath === project.localPath)?.groupKey
+                          void (knownProjectId
+                            ? state.handleCreateChat(knownProjectId)
+                            : state.handleOpenLocalProject(project.localPath))
                         }}
                       >
                         <Folder className={ICON_CLASS} />
@@ -1834,29 +1841,9 @@ export function CommandPalette({ state }: { state: KannaState }) {
                 </CommandGroup>
               ) : null}
               {projectChatSections ? (
-              // Browsing: the sidebar Chats tab's grouping — In Progress,
-              // Review, date buckets, archived last — as flat headed groups.
-              [
-                { key: "in-progress", label: "In Progress", threads: projectChatSections.inProgress },
-                { key: "review", label: "Review", threads: projectChatSections.review },
-                ...projectChatSections.buckets.map((bucket) => ({ key: bucket.key, label: bucket.label, threads: bucket.threads })),
-                { key: "archived", label: "Archived", threads: projectChatSections.archived },
-              ]
-                .filter((group) => group.threads.length > 0)
-                .map((group) => (
-                  <CommandGroup key={group.key} heading={group.label}>
-                    {group.threads.map((thread) => (
-                      <ThreadItem
-                        key={thread.chatId}
-                        thread={thread}
-                        onSelect={openThread}
-                        showStatus
-                        scope="project-scoped"
-                        nowMs={nowMs}
-                      />
-                    ))}
-                  </CommandGroup>
-                ))
+              // Browsing: the sidebar Chats tab's grouping, as flat headed
+              // groups — the same list the new chat page shows.
+              <ProjectChatSections threads={projectChatsThreads} nowMs={nowMs} onSelect={openThread} />
             ) : (
               <CommandGroup heading={projectChatsTitle ? `Chats in ${projectChatsTitle}` : "Project Chats"}>
                 {projectChatResults.map((thread) => (

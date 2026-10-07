@@ -3,12 +3,12 @@ import { ChevronDown } from "lucide-react"
 import type { EditorOpenSettings, EditorPreset, OpenExternalAction, TerminalPreset } from "../../shared/protocol"
 import { TERMINAL_PRESETS, TERMINAL_SPECS } from "../../shared/terminal-presets"
 import { getRepoUrlLabel } from "../../shared/git-url"
-import { getDefaultEditorCommandTemplate } from "../stores/terminalPreferencesStore"
+import { getDefaultEditorCommandTemplate, useTerminalPreferencesStore } from "../stores/terminalPreferencesStore"
 import { useAppSettingsStore } from "../stores/appSettingsStore"
 import { useOpenDestinationStore } from "../stores/openDestinationStore"
 import { editorPresetFromOpenAppValue, isEditorInstalled as isPresetInstalled, resolveEffectiveEditorPreset } from "../lib/effective-editor"
 import { DefaultAppIcon, EDITOR_OPTIONS, EditorIcon, FinderIcon, FolderFallbackIcon, GithubIcon, PreviewIcon, TerminalIcon } from "./editor-icons"
-import { HotkeyTooltip, HotkeyTooltipContent, HotkeyTooltipTrigger } from "./ui/tooltip"
+import { HotkeyTooltip, HotkeyTooltipContent, HotkeyTooltipTrigger, Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip"
 import { Button } from "./ui/button"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "./ui/select"
 import { ContextMenuContent, ContextMenuItem } from "./ui/context-menu"
@@ -423,6 +423,86 @@ export function OpenExternalSelect({
           <div className="flex items-center justify-center size-5">
             <ChevronDown className="h-4 w-4 opacity-60" />
           </div>
+        </SelectTrigger>
+        <SelectContent align="end">
+          <SelectGroup>
+            {items.map((item) => (
+              <SelectItem
+                key={item.value}
+                value={item.value}
+                disabled={!item.installed}
+                className={OPEN_APP_MENU_ITEM_CLASS_NAME}
+              >
+                <OpenAppMenuItemContent value={item.value} label={item.label} isMac={isMac} installed={item.installed} />
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </div>
+  )
+}
+
+/**
+ * "Open in…" for one file, in the viewer's header: the navbar's split button
+ * at a header control's size. The icon opens the file where it last went; the
+ * chevron lists the rest, the same list a file link's context menu has
+ * (editors, Preview, Finder, the default app). What it last opened is
+ * remembered apart from the navbar's; until there is something, it's the
+ * editor the navbar would use.
+ */
+export function OpenFileSelect({ isMac, onOpenExternal }: {
+  isMac: boolean
+  onOpenExternal: (action: OpenExternalAction, editor?: EditorOpenSettings) => void
+}) {
+  const editorPreset = useTerminalPreferencesStore((store) => store.editorPreset)
+  const editorCommandTemplate = useTerminalPreferencesStore((store) => store.editorCommandTemplate)
+  const installedEditors = useInstalledEditors()
+  const effectiveEditor = useEffectiveEditorPreset(editorPreset)
+  const items = useMemo(() => getOpenAppItems({
+    editorPreset,
+    isMac,
+    installedEditors,
+    includeFinder: true,
+    includePreview: true,
+    includeDefault: true,
+  }), [editorPreset, installedEditors, isMac])
+  const remembered = useOpenDestinationStore((store) => store.fileValue)
+  const setRemembered = useOpenDestinationStore((store) => store.setFileValue)
+  // Only something this menu offers and can run: an editor since
+  // uninstalled falls back like the navbar's does.
+  const lastValue = items.find((item) => item.value === remembered && item.installed)?.value
+    ?? (`editor:${effectiveEditor}` as OpenAppValue)
+  const label = `Open in ${getOpenAppLabel(lastValue, isMac)}`
+
+  function handleOpenValue(value: OpenAppValue) {
+    setRemembered(value)
+    openAppValue({ value, editorCommandTemplate, onOpenExternal })
+  }
+
+  return (
+    <div className="flex h-7 shrink-0 items-center rounded-md border border-border">
+      <Tooltip delayDuration={0}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={label}
+            onClick={() => handleOpenValue(lastValue)}
+            className="flex h-full items-center rounded-l-md pl-1.5 pr-1 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <OpenAppIcon value={lastValue} isMac={isMac} className="size-4.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+      <Select value={undefined} onValueChange={(value) => handleOpenValue(value as OpenAppValue)}>
+        <SelectTrigger
+          aria-label="Choose where to open"
+          className="!h-full !w-auto !py-0 !pl-0.5 !pr-1 rounded-l-none rounded-r-md border-0 bg-transparent text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:ring-0 focus:ring-offset-0 [&>svg]:hidden"
+        >
+          {/* Wrapped: `[&>svg]:hidden` hides the trigger's built-in arrow,
+              and would take a bare chevron with it. */}
+          <span className="flex items-center"><ChevronDown className="size-3.5" /></span>
         </SelectTrigger>
         <SelectContent align="end">
           <SelectGroup>

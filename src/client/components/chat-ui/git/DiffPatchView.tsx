@@ -1,5 +1,6 @@
 import { PatchDiff } from "@pierre/diffs/react"
 import { useMemo } from "react"
+import { useTheme } from "../../../hooks/useTheme"
 import { Skeleton } from "../../ui/skeleton"
 import { getDiffPreviewAttachment, type DiffFile, type DiffRenderMode } from "./shared"
 
@@ -51,16 +52,19 @@ export function DiffPatchView({
   onRetry: () => void
 }) {
   const previewAttachment = useMemo(() => getDiffPreviewAttachment(projectId, file), [file, projectId])
+  // The app's theme, not the system's (the renderer's default): a light app
+  // on a dark Mac drew light text on its light background.
+  const { resolvedTheme } = useTheme()
 
-  // An image or PDF shows as itself, at the viewer's size: this already is
-  // the full-size view, so there's no second modal to open from it.
+  // An image or PDF shows as itself, as big as a file in the list can be:
+  // this already is the full-size view, so there's no second modal to open.
   if (previewAttachment) {
     return previewAttachment.kind === "image" ? (
-      <div className="flex min-h-full items-center justify-center bg-muted/30 p-6">
-        <img src={previewAttachment.contentUrl} alt={previewAttachment.displayName} className="max-h-full max-w-full rounded-lg object-contain shadow-sm" />
+      <div className="flex items-center justify-center bg-muted/30 p-6">
+        <img src={previewAttachment.contentUrl} alt={previewAttachment.displayName} className="max-h-[min(500px,70vh)] max-w-full rounded-lg object-contain shadow-sm" />
       </div>
     ) : (
-      <iframe src={previewAttachment.contentUrl} title={previewAttachment.displayName} className="size-full min-h-[70vh] border-0" />
+      <iframe src={previewAttachment.contentUrl} title={previewAttachment.displayName} className="h-[min(500px,70vh)] w-full border-0" />
     )
   }
   if (isLoading) return <DiffPatchSkeleton />
@@ -85,6 +89,7 @@ export function DiffPatchView({
           overflow: wrapLines ? "wrap" : "scroll",
           lineDiffType: "word",
           diffIndicators: "classic",
+          themeType: resolvedTheme,
         }}
       />
     </div>
