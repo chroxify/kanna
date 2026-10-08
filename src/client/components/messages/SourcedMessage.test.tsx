@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server"
 import type { ChatSchedule, HydratedTranscriptMessage } from "../../../shared/types"
 import { ChatSchedulesProvider } from "../chat-ui/chat-reference"
 import type { ChatToolCall } from "./ChatToolMessage"
-import { delegationsFor, noteDelegation, SourcedMessage, sourcedSections } from "./SourcedMessage"
+import { delegationsFor, noteDelegation, REPLY_LINE, REPLY_LINE_LEFT_PX, SourcedMessage, sourcedSections } from "./SourcedMessage"
+import { QUOTE_GEOMETRY, QUOTE_MARK_CENTER_PX } from "./tool-card"
 
 const schedule: ChatSchedule = {
   id: "s1",
@@ -46,8 +47,9 @@ describe("SourcedMessage", () => {
     expect(html).not.toContain("Deploy check")
   })
 
-  // The line between a quote and its bubble: 3px wide, 14 long, 18 in, with 3 clear at each end.
-  const LINE = '<span aria-hidden="true" class="my-[3px] ml-[18px] h-[14px] w-[3px] rounded-full bg-border"></span>'
+  // The line between a quote and its bubble: 3px wide, 14 long, with 3 clear
+  // at each end, and under the middle of the quote's mark.
+  const LINE = '<span aria-hidden="true" class="my-[3px] h-[14px] w-[3px] rounded-full bg-border" style="margin-left:17.5px"></span>'
   const count = (html: string, text: string) => html.split(text).length - 1
 
   test("the quote sits over the bubble, outside it, with a line joining them", () => {
@@ -64,6 +66,23 @@ describe("SourcedMessage", () => {
     expect(count(html, LINE)).toBe(1)
     // A straight line and nothing else: no drawn bend, and not something to read or press.
     expect(html).not.toContain("stroke-border")
+  })
+
+  test("the line's centre is the centre of the quote's mark, by the quote's own measurements", () => {
+    // The mark's slot starts after the quote's border and padding.
+    const markLeft = QUOTE_GEOMETRY.borderPx + QUOTE_GEOMETRY.paddingXPx
+    expect(QUOTE_MARK_CENTER_PX).toBe(markLeft + QUOTE_GEOMETRY.markPx / 2)
+    expect(REPLY_LINE_LEFT_PX + REPLY_LINE.widthPx / 2).toBe(QUOTE_MARK_CENTER_PX)
+    // The numbers: a 16px slot whose centre is 19 in, and a 3px line from 17.5.
+    expect(QUOTE_MARK_CENTER_PX).toBe(19)
+    expect(REPLY_LINE_LEFT_PX).toBe(17.5)
+
+    // And the line as drawn is the line as measured.
+    const html = renderToStaticMarkup(<SourcedMessage content="hello" source={{ kind: "agent", chatId: "parent" }} />)
+    expect(html).toContain(`w-[${REPLY_LINE.widthPx}px]`)
+    expect(html).toContain(`h-[${REPLY_LINE.heightPx}px]`)
+    expect(html).toContain(`my-[${REPLY_LINE.clearPx}px]`)
+    expect(html).toContain(`style="margin-left:${REPLY_LINE_LEFT_PX}px"`)
   })
 
   test("the quote starts at the bubble's edge and keeps its own width, as the bubble keeps its own", () => {

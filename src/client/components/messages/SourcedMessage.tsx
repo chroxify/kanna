@@ -9,7 +9,7 @@ import { formatScheduleTrigger } from "../chat-ui/widgets/SchedulesWidget"
 import { CLAMP_LINES, ClampedMessageText, FOLD_SURFACE_ATTRIBUTE } from "./ClampedMessageText"
 import { ChatReplyQuote, inlineChatToolExcerpt, inlineChatToolTarget, isChatToolCall, type ChatToolCall } from "./ChatToolMessage"
 import { ScheduleCardBox } from "./ScheduleToolMessage"
-import { TOOL_QUOTE_CLASS } from "./tool-card"
+import { QUOTE_MARK_CENTER_PX, TOOL_QUOTE_CLASS } from "./tool-card"
 import { USER_BUBBLE_CLASS, UserMessageAttachments } from "./UserMessage"
 
 /**
@@ -171,10 +171,20 @@ export function isAdoptionNotice(section: ReportSection) {
 /** A quote's own width: what it says, to a limit that keeps a long excerpt from widening the message. */
 export const REPLY_QUOTE_WIDTH_CLASS = "min-w-0 max-w-96"
 
+/** The line between a quote and its bubble, in px. */
+export const REPLY_LINE = { widthPx: 3, heightPx: 14, clearPx: 3 } as const
+/**
+ * Where the line starts, from the quote's left edge: under the middle of the
+ * quote's leading mark, whatever that mark is. Worked out from the quote's
+ * own measurements and not written down a second time, so a change to the
+ * quote's padding or its mark moves the line with it.
+ */
+export const REPLY_LINE_LEFT_PX = QUOTE_MARK_CENTER_PX - REPLY_LINE.widthPx / 2
+
 /**
  * A quote over the bubble it belongs to, with a short line joining them:
  *
- *   [ quoted chat      ]
+ *   [ ◌ quoted chat    ]
  *     |
  *   [ the message                   ]
  *
@@ -186,8 +196,14 @@ export const REPLY_QUOTE_WIDTH_CLASS = "min-w-0 max-w-96"
  * between two 1px outlines. It stops its own width short of each, so the
  * quote stands 20px off the bubble: 3, the line, 3. A thick line butted
  * against a hairline reads as a collision, and with the gaps it reads as a
- * link. It is 18px in from the shared left edge, which is 2 clear of where
- * the bubble's 16px corner straightens out and 6 clear of the quote's 12.
+ * link.
+ *
+ * It hangs from the quote's mark: its centre is the mark's centre, 19px from
+ * the shared left edge, which puts its own edge at 17.5. Half a pixel,
+ * because the mark's slot is an even 16 wide and the line an odd 3, and one
+ * of them being a pixel off the other is what this is here to prevent. That
+ * is 1.5 clear of where the bubble's 16px corner straightens out, and the
+ * line stops 3 above it in any case.
  *
  * It takes the border colour at full strength, which at this weight is a
  * soft grey: firmer than the quote's half-strength outline, and still
@@ -197,7 +213,7 @@ export function ReplyQuoteRow({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-w-0 max-w-full flex-col items-start">
       <div className={REPLY_QUOTE_WIDTH_CLASS}>{children}</div>
-      <span aria-hidden className="my-[3px] ml-[18px] h-[14px] w-[3px] rounded-full bg-border" />
+      <span aria-hidden className="my-[3px] h-[14px] w-[3px] rounded-full bg-border" style={{ marginLeft: REPLY_LINE_LEFT_PX }} />
     </div>
   )
 }

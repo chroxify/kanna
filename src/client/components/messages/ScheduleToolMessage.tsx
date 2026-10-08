@@ -14,7 +14,7 @@ import {
 } from "../chat-ui/widgets/SchedulesWidget"
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "../ui/context-menu"
 import { ListHoverCard } from "../ui/list-hover-card"
-import { text, TOOL_CARD_CAPTION_CLASS, TOOL_CARD_CLASS, TOOL_CARD_WIDTH_CLASS, toolCardClasses, toolCardErrorText, useToolCardPayload } from "./tool-card"
+import { text, TOOL_CARD_CAPTION_CLASS, TOOL_CARD_CLASS, TOOL_CARD_MARK_SLOT_CLASS, TOOL_CARD_WIDTH_CLASS, toolCardClasses, toolCardErrorText, useToolCardPayload } from "./tool-card"
 import type { ProcessedToolCall } from "./types"
 
 /**
@@ -77,7 +77,7 @@ export function ScheduleToolMessage({ message }: { message: ScheduleToolCall }) 
       <div className={cn(TOOL_CARD_CLASS, TOOL_CARD_WIDTH_CLASS)}>
         <div className="flex min-w-0 items-center gap-2.5">
           {pending
-            ? <Loader2 className="size-3.5 shrink-0 animate-spin text-logo" />
+            ? <span className={TOOL_CARD_MARK_SLOT_CLASS}><Loader2 className="size-3.5 animate-spin text-logo" /></span>
             : <Icon className="size-4 shrink-0 text-muted-foreground" />}
           <span className={cn("min-w-0 truncate", !pending && "text-muted-foreground")}>{title}</span>
         </div>
