@@ -153,5 +153,11 @@ describe("visualization document isolation", () => {
     const inner = decode((await parse(buildVisualizationDocument('<p>Example</p>', 'Example', 360))).frames[0]!.srcdoc!)
     expect(inner).toContain(".kanna-segmented>:is([aria-checked=true],[aria-selected=true],[aria-pressed=true])")
     expect(inner).toContain(".kanna-tabs>:is([aria-selected=true],[aria-checked=true],[aria-pressed=true])")
+    // The popover sits over the chart and is deaf to the pointer: showing it
+    // moves nothing and cannot take the hover that shows it.
+    const tooltip = /\.kanna-tooltip\{([^}]*)\}/.exec(inner)![1]!
+    expect(tooltip).toContain("position:absolute")
+    expect(tooltip).toContain("pointer-events:none")
+    expect(tooltip).not.toContain("transition")
   })
 })

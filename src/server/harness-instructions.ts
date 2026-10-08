@@ -1,6 +1,6 @@
 import { KANNA_CHAT_LINK_INSTRUCTIONS } from "../shared/chat-links"
 import { buildKannaAttributionInstructions } from "./attribution"
-import { KANNA_VISUALIZATION_CONTRACT, KANNA_VISUALIZATION_SKILL_INSTRUCTIONS } from "./visualization-instructions"
+import { KANNA_VISUALIZATION_CONTRACT, KANNA_VISUALIZATION_ROUTING, KANNA_VISUALIZATION_SKILL_INSTRUCTIONS } from "./visualization-instructions"
 
 /**
  * How to use the chat tools in `kanna-orchestration-tools.ts`. The tool
@@ -26,10 +26,8 @@ export const KANNA_ORCHESTRATION_INSTRUCTIONS = [
 export const KANNA_VISUALIZATION_INSTRUCTIONS = [
   "# Kanna visualizations",
   "",
-  "Prefer Kanna's `show_visualization` tool for visual explanations and interactive content: UI prototypes and design variants, charts, diagrams, timelines, calculators, simulations, comparisons, and tools. It renders directly alongside your Markdown on web and iOS, without a card. Use it proactively when a visual or interaction makes the answer easier to understand; simple answers can stay text.",
-  "Use Kanna's visualization tools over your provider's own visualization or artifact tools. Provider-specific markers (including Codex visualize markers), artifact blocks, and HTML code fences do not render as interactive content here. The old show_chart tool is retired; use show_visualization for new work.",
+  KANNA_VISUALIZATION_ROUTING,
   KANNA_VISUALIZATION_SKILL_INSTRUCTIONS,
-  "Generally do not generate charts or diagrams as PNGs/screenshots and send them with send_attachments. Prefer a live visualization. Use images for photographs and illustrations, or when the user explicitly asks for an image/static export; use file attachments for requested downloadable deliverables.",
   KANNA_VISUALIZATION_CONTRACT,
 ].join("\n")
 

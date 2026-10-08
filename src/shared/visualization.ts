@@ -8,11 +8,12 @@ export const VISUALIZATION_MAX_HEIGHT = 2000
 
 /**
  * The expand button the web client lays over an inline visualization's
- * top-right corner, in CSS px. `clear` is the square of that corner authored
- * content keeps free: the inset, the button, and a margin. The tool
- * description quotes it, so the button and the prompt cannot drift apart.
+ * top-right corner, in CSS px: flush in the corner, on the edge, with no
+ * inset. `clear` is the square of that corner authored content keeps free:
+ * the button and a margin. The tool description quotes it, so the button and
+ * the prompt cannot drift apart.
  */
-export const VISUALIZATION_EXPAND_BUTTON = { size: 28, inset: 8, clear: 48 } as const
+export const VISUALIZATION_EXPAND_BUTTON = { size: 28, inset: 0, clear: 40 } as const
 
 export interface VisualizationArtifact {
   type: "visualization"

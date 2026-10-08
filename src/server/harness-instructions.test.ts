@@ -45,16 +45,67 @@ describe("buildKannaSystemMessage", () => {
 test("visualization instructions reach tool-enabled harnesses and prefer native inline results", () => {
   const instructions = buildKannaSystemInstructions(AGENT_ID)
   expect(instructions).toContain(KANNA_VISUALIZATION_INSTRUCTIONS)
-  expect(instructions).toContain("show_visualization")
-  expect(instructions).toContain("show_chart tool is retired")
-  expect(instructions).toContain("do not generate charts or diagrams as PNGs")
+  expect(instructions).toContain("# Kanna visualizations")
   expect(instructions).toContain(KANNA_VISUALIZATION_SKILL_INSTRUCTIONS)
+  expect(instructions).toContain(KANNA_VISUALIZATION_CONTRACT)
+  expect(instructions).toContain("show_chart tool is retired")
+  expect(buildKannaSystemMessage(AGENT_ID)).toContain(KANNA_VISUALIZATION_INSTRUCTIONS)
+  expect(buildKannaSystemInstructions(AGENT_ID, { tools: false })).not.toContain("show_visualization")
+})
+
+test("the tool is reached for by situation, for a diagram and a prototype as much as a chart", () => {
+  const instructions = buildKannaSystemInstructions(AGENT_ID)
+  const description = SHOW_VISUALIZATION_TOOL.description
+  // Both say when, and what it takes the place of, before any rule for drawing.
+  for (const text of [instructions, description]) {
+    expect(text).toContain("how something works")
+    expect(text).toContain("could look like")
+    expect(text).toMatch(/ASCII art/)
+    expect(text).toMatch(/Mermaid/)
+    expect(text).toMatch(/a diagram/)
+    expect(text).toMatch(/a prototype/)
+    expect(text).toMatch(/a chart or (a )?table/)
+  }
+  expect(instructions).toContain("Not a PNG or screenshot sent with send_attachments")
+  expect(description.startsWith("Show something inline in the conversation")).toBe(true)
+  expect(description.indexOf("a diagram")).toBeLessThan(description.indexOf("- Inline all CSS"))
+  expect(description).toContain('under "Kanna visualizations"')
+  expect(description).not.toContain(KANNA_VISUALIZATION_SKILL_INSTRUCTIONS)
+
+  // The contract is by kind, so a prototype is not held to a chart's rules.
+  const section = (heading: string) => {
+    const from = KANNA_VISUALIZATION_CONTRACT.indexOf(`## ${heading}`)
+    const next = KANNA_VISUALIZATION_CONTRACT.indexOf("\n## ", from + 1)
+    expect(from).toBeGreaterThanOrEqual(0)
+    return KANNA_VISUALIZATION_CONTRACT.slice(from, next === -1 ? undefined : next)
+  }
+  const every = section("Every kind"), charts = section("Charts and tables"), diagrams = section("Diagrams"), prototypes = section("Prototypes")
+  for (const chartRule of ["One chart per visualization", "kanna-tooltip", "Axis ticks", "window.kanna.download", "Do not build a dashboard because the data allows one", "small multiples", "Never a readout in a fixed line of text", "keyboard focus on the marks"]) {
+    expect(charts).toContain(chartRule)
+    expect(every).not.toContain(chartRule)
+    expect(prototypes).not.toContain(chartRule)
+  }
+  // A header is a chart's and a diagram's. A prototype has none: the stage is the design.
+  expect(charts).toContain('an h3 title that names what is shown and a p class="text-muted" subtitle')
+  expect(diagrams).toContain("an h3 title")
+  expect(prototypes).toContain("No title or subtitle")
+  expect(prototypes).not.toContain("<h3>")
+  expect(description).toContain("A prototype has no heading")
+  // Diagrams have guidance of their own.
+  for (const rule of ["inline SVG", "no library", "320px", "arrowheads", "--border", `${VISUALIZATION_MAX_HEIGHT}px`, "visible at rest"]) expect(diagrams).toContain(rule)
+  // And a prototype says when to step through directions and when to lay them side by side.
+  expect(prototypes).toContain("kanna-segmented picker")
+  expect(prototypes).toContain("side by side")
+  expect(prototypes).toContain("wait for that choice")
+  expect(prototypes).toContain('<section id="stage" style="height:40px">')
+})
+
+test("what holds for every kind is in the description and the session instructions alike", () => {
+  const instructions = buildKannaSystemInstructions(AGENT_ID)
+  const description = SHOW_VISUALIZATION_TOOL.description
   // The corner the prompt keeps clear is the expand button's own, with a margin.
   const { size, inset, clear } = VISUALIZATION_EXPAND_BUTTON
   expect(clear).toBeGreaterThan(size + inset)
-  const description = SHOW_VISUALIZATION_TOOL.description
-  // What a model needs before its first line is in both places, in the same
-  // terms: the header and the corner, the two controls, the text size, the cap.
   for (const text of [instructions, description]) {
     expect(text).toContain(`Keep the top-right ${clear}px by ${clear}px clear`)
     expect(text).toContain("kanna-segmented")
@@ -62,28 +113,17 @@ test("visualization instructions reach tool-enabled harnesses and prefer native 
     expect(text).toContain("16px")
     expect(text).toContain(`up to ${VISUALIZATION_MAX_HEIGHT}px`)
     expect(text).toContain("iOS")
+    expect(text).toContain("One subject per visualization")
     // Stated in both, strictly: nothing a reader does may move the conversation.
     expect(text).toContain("must never change after")
     expect(text).toContain("tallest state")
   }
-  expect(instructions).toContain("No interaction may grow or shrink it")
-  expect(instructions).toContain('<section id="stage" style="height:40px">')
   // The rest is only in the session instructions, which no harness cuts short.
-  expect(instructions).toContain(KANNA_VISUALIZATION_CONTRACT)
   expect(instructions).toContain(`${size}px expand button`)
-  expect(instructions).toContain("window.kanna.download")
+  expect(instructions).toContain("No interaction may grow or shrink it")
   expect(instructions).toContain("kanna:themechange")
   expect(instructions).toContain("touch-action: none")
-  expect(instructions).toContain("UI prototypes")
-  expect(instructions).toContain(`<header style="padding-right:${clear}px">`)
   expect(instructions).not.toContain("<select aria-label")
-  // And the description says where, and opens with the contract, not with what to avoid.
-  expect(description).toContain('under "Kanna visualizations"')
-  expect(instructions).toContain("# Kanna visualizations")
-  expect(description.startsWith("Render self-contained interactive HTML")).toBe(true)
-  expect(description).not.toContain(KANNA_VISUALIZATION_SKILL_INSTRUCTIONS)
-  expect(buildKannaSystemMessage(AGENT_ID)).toContain(KANNA_VISUALIZATION_INSTRUCTIONS)
-  expect(buildKannaSystemInstructions(AGENT_ID, { tools: false })).not.toContain("show_visualization")
 })
 
 // Claude Code cuts an MCP tool's description at this length and ends it
