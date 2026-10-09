@@ -95,11 +95,16 @@ Rules that follow from that:
   changed files in, commit there, `git push fork feat/x`, `git worktree
   remove /tmp/wt-x`. The next `kn` folds it in. Edits left uncommitted on
   `local` survive a rebuild (they're stashed and re-applied) but never land.
-- **Don't merge into `local` by hand and don't restart the server.** The
-  server (`~/.bun/bin/kanna` → this repo) serves `dist/client` from disk, so
-  `bun run build:client` plus a page reload ships a client change; `kn` does
-  the rest on the next launch, and the running Kanna is usually the one the
-  conversation is happening in.
+- **Don't merge into `local` by hand; ship with `kn reload`.** Once a branch
+  is pushed to `fork`, run it yourself, without asking:
+  `nohup kn reload --force >/tmp/kn-reload.log 2>&1 &`. It rebuilds `local`
+  and restarts the running Kanna in place; running chats (this one included)
+  are marked and resumed a second later, so it is safe mid-conversation.
+  Detach it as shown: the restart ends this turn, and a foreground run would
+  die with it. Never Ctrl-C/kill the server or launch a second one. A chat
+  waiting on a question or plan approval is ended by the restart, so say so
+  if one is open. Check `/tmp/kn-reload.log` after the resume for skipped
+  branches or a failed start.
 - A merged PR drops out of `local` on its own — nothing to clean up.
 
 Floaty integration: hosts that wrap Kanna read `<meta name="floaty:status">`
