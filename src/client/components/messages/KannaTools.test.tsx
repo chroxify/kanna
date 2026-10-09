@@ -8,6 +8,9 @@ import type { TranscriptEntry } from "../../../shared/types"
 import { AttachmentsCard, DisplayToolMessage } from "./DisplayToolMessage"
 import { ToolPayloadProvider } from "./tool-payload-context"
 import { csvCell } from "./ChartTool"
+import { VisualizationExpandButton } from "./Visualization"
+import { TooltipProvider } from "../ui/tooltip"
+import { VISUALIZATION_EXPAND_BUTTON } from "../../../shared/visualization"
 import { displayAttachments, resolveChartKeys, type ChartToolPayload } from "../../../shared/display-tools"
 
 test("display tools render outside collapsed groups with chart and attachment cards", () => {
@@ -72,4 +75,34 @@ test("chart aliases filter category columns and CSV escapes quotes", () => {
   const chart: ChartToolPayload = { title: "Sales", type: "line", data: [{ month: "Jan", value: 10 }], xAxisKey: "month", dataKeys: ["month", "value"] }
   expect(resolveChartKeys(chart)).toEqual({ xKey: "month", keys: ["value"] })
   expect(csvCell('A "quoted", value')).toBe('"A ""quoted"", value"')
+})
+
+test("the expand button is a circle in the corner, named for assistive tech, with no label of its own", () => {
+  const html = renderToStaticMarkup(<TooltipProvider><VisualizationExpandButton onClick={() => {}} /></TooltipProvider>)
+  const { size, inset } = VISUALIZATION_EXPAND_BUTTON
+  expect(html).toContain('aria-label="Expand"')
+  // Flush in the corner: React writes a zero without a unit.
+  expect(inset).toBe(0)
+  expect(html).toContain(`top:0;right:0;width:${size}px;height:${size}px`)
+  expect(html).toContain("visualization-expand absolute")
+  expect(html).toContain("rounded-full")
+  expect(html).not.toContain(">Expand<")
+})
+
+test("visualizations stay inline between Markdown messages without a tool card", () => {
+  const entries: TranscriptEntry[] = [
+    { _id: "before", createdAt: 0, kind: "assistant_text", text: "Here is the relationship." },
+    { _id: "visualization", createdAt: 1, kind: "tool_call", tool: normalizeToolCall({ toolName: "show_visualization", toolId: "viz", input: { title: "Relationship", html: "<svg></svg>" } }) },
+    { _id: "visualization-result", createdAt: 2, kind: "tool_result", toolId: "viz", content: [{ type: "visualization", version: 1, title: "Relationship", height: 360, url: "/api/chats/chat-1/media/visualization-abc.html" }] },
+    { _id: "after", createdAt: 3, kind: "assistant_text", text: "Move the slider to compare." },
+  ]
+  const messages = processTranscriptMessages(entries)
+  const rows = buildResolvedTranscriptRows(messages, { isLoading: false, latestToolIds: getLatestToolIds(messages) })
+  expect(rows.every(row => row.kind !== "tool-group")).toBe(true)
+  const html = renderToStaticMarkup(<>{rows.map(row => <KannaTranscriptRow key={row.id} row={row} onToolGroupExpandedChange={() => {}} onAskUserQuestionSubmit={() => {}} onExitPlanModeConfirm={() => {}} />)}</>)
+  expect(html).toContain("Loading visualization")
+  expect(html).not.toContain("chart-card")
+  expect(html).not.toContain("show_visualization")
+  expect(html.indexOf("Here is the relationship")).toBeLessThan(html.indexOf("Loading visualization"))
+  expect(html.indexOf("Loading visualization")).toBeLessThan(html.indexOf("Move the slider"))
 })

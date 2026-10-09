@@ -74,6 +74,38 @@ describe("renderChatStatusDot", () => {
     expect(html).not.toContain("bg-emerald-400")
   })
 
+  test("every mark is drawn centred in the same 16px slot, the spinner included", () => {
+    const marks = [
+      renderDot({ ...baseChat, status: "running" }),
+      renderDot({ ...baseChat, status: "starting" }),
+      renderDot({ ...baseChat, status: "waiting_on_subagent" }),
+      renderDot({ ...baseChat, status: "waiting_for_user" }),
+      renderDot({ ...baseChat, unread: true }),
+    ]
+    for (const html of marks) {
+      // The outermost element is the slot: 16px, not shrinking, its content centred.
+      const slot = html!.slice(0, html!.indexOf(">"))
+      for (const name of ["size-4", "shrink-0", "flex", "items-center", "justify-center"]) expect(slot).toContain(name)
+    }
+    // The spinner itself stays 14px, inside the slot.
+    expect(marks[0]).toContain("size-3.5 animate-spin")
+  })
+
+  test("waiting on a subagent spins in grey, ahead of unread, and the title holds still", () => {
+    const html = renderDot({ ...baseChat, status: "waiting_on_subagent", unread: true })
+
+    expect(html).toContain("animate-spin")
+    expect(html).toContain("text-muted-foreground")
+    // Not the running red: nothing is happening in this chat itself.
+    expect(html).not.toContain("text-logo")
+    expect(html).not.toContain("bg-emerald-400")
+
+    const row = renderRow({ thread: thread({ status: "waiting_on_subagent" }), showStatus: true, detailLabel: null })
+    expect(row).not.toContain("kanna-shiny-track")
+    // Still going, so it never recedes with the chats at rest.
+    expect(row).not.toContain(DIM_CLASS)
+  })
+
   test("renders the compositor-driven shimmer for a running title", () => {
     const html = renderRow({ thread: thread({ status: "running" }), showStatus: true, detailLabel: null })
 

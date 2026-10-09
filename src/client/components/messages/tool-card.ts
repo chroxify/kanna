@@ -24,6 +24,56 @@ export const TOOL_CARD_CLASS = "flex min-w-0 flex-col gap-0.5 rounded-xl border 
  * thing itself is where the rest is read.
  */
 export const TOOL_CARD_CAPTION_CLASS = "truncate pl-[26px] text-xs leading-4 text-muted-foreground"
+/**
+ * The same card as a quote: over the bubble of a message it is tied to
+ * (`ReplyQuoteRow` in SourcedMessage), the way a messaging app quotes what a
+ * reply is to. Its frame decides its width.
+ *
+ * An outline with nothing in it: the transcript shows through, so the quote
+ * reads as a note on the message under it and the bubble stays the one solid
+ * thing. The outline is the border at half strength, fainter than the
+ * bubble's and than the line that joins the two, for the same reason. 12px corners, a
+ * step in from the bubble's 16. `not-prose` for the places it sits inside a
+ * `prose` container.
+ */
+export const TOOL_QUOTE_CLASS = "not-prose flex min-w-0 flex-col gap-0.5 rounded-xl border border-border/50 bg-transparent px-2.5 py-1.5 text-left text-sm"
+
+/**
+ * A quote's measurements across, in px, for what has to line up with it from
+ * outside: the line that joins a quote to the bubble under it stands on the
+ * centre of the quote's leading mark (`ReplyQuoteRow`).
+ *
+ * The classes above are what draw these and Tailwind needs them written out,
+ * so they cannot be built from this. A test holds the two to each other: the
+ * border and `px-2.5` in `TOOL_QUOTE_CLASS`, the mark's `size-4` slot, and
+ * the caption's 26px indent, which is the mark and the gap after it.
+ */
+export const QUOTE_GEOMETRY = { borderPx: 1, paddingXPx: 10, markPx: 16, markGapPx: 10 } as const
+/** The centre of a quote's leading mark, from the quote's outer left edge. */
+export const QUOTE_MARK_CENTER_PX = QUOTE_GEOMETRY.borderPx + QUOTE_GEOMETRY.paddingXPx + QUOTE_GEOMETRY.markPx / 2
+
+/**
+ * The slot a card's leading mark is drawn in: one size for every mark, with
+ * the mark centred in it. Most marks are the slot's size. A spinner is 14px,
+ * and drawn bare it sat 1px left of where every other mark's centre is and
+ * pulled the title 2px with it.
+ */
+export const TOOL_CARD_MARK_SLOT_CLASS = "flex size-4 shrink-0 items-center justify-center"
+
+/**
+ * How a card's border lights under the pointer and while its hover card is
+ * up. A quote's lit border is the card's at half strength too, so the step
+ * from resting to lit is the same on both.
+ */
+const TOOL_CARD_LIT_CLASS = "hover:border-muted-foreground/40 data-[hover-card-open]:border-muted-foreground/40"
+const TOOL_QUOTE_LIT_CLASS = "hover:border-muted-foreground/20 data-[hover-card-open]:border-muted-foreground/20"
+
+/** The box, the width and the lit border for a card, as itself or as a quote. */
+export function toolCardClasses(quote: boolean) {
+  return quote
+    ? { box: TOOL_QUOTE_CLASS, width: "min-w-0", lit: TOOL_QUOTE_LIT_CLASS }
+    : { box: TOOL_CARD_CLASS, width: TOOL_CARD_WIDTH_CLASS, lit: TOOL_CARD_LIT_CLASS }
+}
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -38,7 +88,7 @@ export function text(value: unknown): string | null {
  * tool kind. An older record kept only what the provider was sent: the same
  * value as JSON, in a text block.
  */
-function resultRecord(result: unknown): Record<string, unknown> | null {
+export function resultRecord(result: unknown): Record<string, unknown> | null {
   const direct = asRecord(result)
   if (direct) return direct
   const first = Array.isArray(result) ? text(asRecord(result[0])?.text) : text(result)

@@ -20,20 +20,37 @@ function statusDotClass(archived: boolean) {
 }
 
 /**
- * Status glyph mirroring the sidebar chat rows: spinner while running, a blue
- * ping when waiting on the user, a green ping when unread. Returns null for
+ * Status glyph mirroring the sidebar chat rows: spinner while running, the
+ * same spinner in grey while waiting on a subagent, a blue ping when waiting
+ * on the user, a green ping when unread. Returns null for
  * idle chats so callers can fall back to a default icon — `uncommittedWork` is
  * carried by title contrast, not by this slot, so it only ever holds things
  * that want your attention.
  */
+/**
+ * The slot every mark at the head of a row is drawn in: 16px, the size of the
+ * harness icon the status glyph takes the place of, with the glyph centred.
+ * The spinner is drawn at 14px so it does not look heavier than the icons
+ * around it, and without the slot it was a 14px box: the title after it sat
+ * 2px left of where it sits after any other mark, and anything lined up under
+ * the mark's centre (the line under a quote, see `ReplyQuoteRow`) was off it.
+ */
+const STATUS_MARK_SLOT_CLASS = "flex size-4 shrink-0 items-center justify-center"
+
 export function renderChatStatusDot(chat: SidebarChatRow): ReactNode | null {
   if (chat.status === "starting" || chat.status === "running") {
-    return <Loader2 className="size-3.5 shrink-0 animate-spin text-logo" />
+    return <span className={STATUS_MARK_SLOT_CLASS}><Loader2 className="size-3.5 animate-spin text-logo" /></span>
+  }
+  // Still going, but not in this chat: the grey a running task gets in the
+  // Tasks widget, which is where the work is. Ahead of the unread ping,
+  // because the reply it would flag is not the chat's last word.
+  if (chat.status === "waiting_on_subagent") {
+    return <span className={STATUS_MARK_SLOT_CLASS}><Loader2 aria-label="Waiting on a subagent" className="size-3.5 animate-spin text-muted-foreground" /></span>
   }
   const color = chat.status === "waiting_for_user" ? "blue" : chat.unread ? "emerald" : null
   if (!color) return null
   return (
-    <div className="relative flex size-4 shrink-0 items-center justify-center">
+    <div className={cn("relative", STATUS_MARK_SLOT_CLASS)}>
       <div
         className={cn(
           "absolute size-2.5 rounded-full kanna-ping",
