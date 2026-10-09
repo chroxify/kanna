@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { compareVersions, classifyInstallVersionFailure, parseArgs, runCli } from "./cli-runtime"
+import { compareVersions, classifyInstallVersionFailure, parseArgs, RESTART_NOT_RUNNING_EXIT_CODE, runCli } from "./cli-runtime"
 import { CLI_SUPPRESS_OPEN_ONCE_ENV_VAR } from "./restart"
 
 const originalRuntimeProfile = process.env.KANNA_RUNTIME_PROFILE
@@ -806,6 +806,49 @@ describe("runCli cloud", () => {
     expect(serverOptions.host).toBe("0.0.0.0")
     expect(fake.calls.starts.length).toBe(1)
     if (result.kind === "started") await result.stop()
+  })
+})
+
+describe("runCli restart", () => {
+  const status = (port: number | null) => ({
+    ok: true as const, pid: 42, instance: "i", owner: "terminal" as const, startedAt: 0,
+    port, version: "1", runningChats: 0, cloud: false,
+  })
+
+  test("a new server stamp is the restart done, even when the gap was missed", async () => {
+    const stamps = [1, 1, 2]
+    const { deps } = createDeps({
+      instanceStatusImpl: async () => ({ ...status(3210), serverAttachedAt: stamps.length > 1 ? stamps.shift()! : stamps[0]! }),
+      requestInstanceRestartImpl: async () => "restarting",
+      instanceWaitMs: { poll: 1, timeout: 1_000 },
+    })
+    expect(await runCli(["restart"], deps)).toEqual({ kind: "exited", code: 0 })
+  })
+
+  test("waits for the server to go down and come back", async () => {
+    const ports: Array<number | null> = [3210, 3210, null, null, 3210]
+    const { calls, deps } = createDeps({
+      instanceStatusImpl: async () => status(ports.length > 1 ? ports.shift()! : ports[0]!),
+      requestInstanceRestartImpl: async () => "restarting",
+      instanceWaitMs: { poll: 1, timeout: 1_000 },
+    })
+    expect(await runCli(["restart"], deps)).toEqual({ kind: "exited", code: 0 })
+    expect(calls.log.some((line) => line.includes("restarted on port 3210"))).toBe(true)
+    expect(calls.startServer).toEqual([])
+  })
+
+  test("nothing running → its own exit code, so kn launches instead", async () => {
+    const { deps } = createDeps({ instanceStatusImpl: async () => null })
+    expect(await runCli(["restart"], deps)).toEqual({ kind: "exited", code: RESTART_NOT_RUNNING_EXIT_CODE })
+  })
+
+  test("an instance that can't restart says so", async () => {
+    const { calls, deps } = createDeps({
+      instanceStatusImpl: async () => status(3210),
+      requestInstanceRestartImpl: async () => "unsupported",
+    })
+    expect(await runCli(["restart"], deps)).toEqual({ kind: "exited", code: 1 })
+    expect(calls.warn.some((line) => line.includes("can't restart in place"))).toBe(true)
   })
 })
 

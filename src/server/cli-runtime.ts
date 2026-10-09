@@ -13,6 +13,7 @@ import { probeExistingInstance, type ExistingInstance } from "./instance"
 import {
   claimInstance,
   instanceStatus,
+  requestInstanceRestart,
   requestInstanceStop,
   type AttachedServer,
   type InstanceClaim,
@@ -98,6 +99,9 @@ export interface CliRuntimeDeps {
   claimInstanceImpl?: () => Promise<InstanceClaim>
   instanceStatusImpl?: () => Promise<InstanceStatus | null>
   requestInstanceStopImpl?: () => Promise<boolean>
+  requestInstanceRestartImpl?: () => Promise<"restarting" | "unsupported" | "none">
+  /** Poll interval and deadline for `stop`/`restart` waits; tests shorten them. */
+  instanceWaitMs?: { poll: number; timeout: number }
   slimTranscriptsImpl?: (log: (message: string) => void) => Promise<SlimTranscriptsStats>
 }
 
@@ -113,6 +117,7 @@ type ParsedArgs =
   | { kind: "pair"; args: PairCommandArgs }
   | { kind: "slim-transcripts" }
   | { kind: "stop" }
+  | { kind: "restart" }
   | { kind: "help" }
   | { kind: "version" }
 
@@ -153,6 +158,8 @@ Usage:
   ${CLI_COMMAND} pair <code>   Same, using a code from https://kanna.sh/fleet
   ${CLI_COMMAND} pair --status|--disable|--enable|--remove
   ${CLI_COMMAND} stop          Stop the ${CLI_COMMAND} running on this machine (a terminal's, or the Mac app's)
+  ${CLI_COMMAND} restart       Restart the running ${CLI_COMMAND} in place, on the code now on disk;
+                       running chats pick up where they were
   ${CLI_COMMAND} slim-transcripts
                        Rewrite stored transcripts without raw tool payloads (stop ${CLI_COMMAND} first)
 
@@ -209,6 +216,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (argv[0] === "stop") {
     if (argv.length > 1) throw new Error(`Unexpected argument for ${CLI_COMMAND} stop: ${argv[1]}`)
     return { kind: "stop" }
+  }
+  if (argv[0] === "restart") {
+    if (argv.length > 1) throw new Error(`Unexpected argument for ${CLI_COMMAND} restart: ${argv[1]}`)
+    return { kind: "restart" }
   }
   if (argv[0] === "slim-transcripts") {
     if (argv.length > 1) throw new Error(`Unexpected argument for ${CLI_COMMAND} slim-transcripts: ${argv[1]}`)
@@ -437,6 +448,10 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps): Promise<CliR
     return { kind: "exited", code: await stopRunningInstance(deps) }
   }
 
+  if (parsedArgs.kind === "restart") {
+    return { kind: "exited", code: await restartRunningInstance(deps) }
+  }
+
   if (parsedArgs.kind !== "run") {
     // Unreachable: every non-run kind returned above.
     return { kind: "exited", code: 0 }
@@ -633,6 +648,54 @@ async function stopRunningInstance(deps: CliRuntimeDeps) {
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   deps.warn(`${LOG_PREFIX} ${CLI_COMMAND} (pid ${running.pid}) is still stopping`)
+  return 1
+}
+
+/** Exit code of `kanna restart` when nothing is running; `kn reload` launches then. */
+export const RESTART_NOT_RUNNING_EXIT_CODE = 3
+
+/**
+ * `kanna restart`: ask the running Kanna's supervisor to restart the server,
+ * and wait until the new one is listening. The supervisor keeps the lock
+ * throughout and stamps each server as it attaches, so a new stamp with a
+ * port is the new server up. The gap between the two can be shorter than a
+ * poll, so the port reading null is only a fallback for supervisors without
+ * the stamp.
+ */
+async function restartRunningInstance(deps: CliRuntimeDeps) {
+  const status = deps.instanceStatusImpl ?? instanceStatus
+  const running = await status()
+  if (!running) {
+    deps.log(`${LOG_PREFIX} ${CLI_COMMAND} isn't running`)
+    return RESTART_NOT_RUNNING_EXIT_CODE
+  }
+  const answer = await (deps.requestInstanceRestartImpl ?? requestInstanceRestart)()
+  if (answer === "none") {
+    deps.log(`${LOG_PREFIX} ${CLI_COMMAND} isn't running`)
+    return RESTART_NOT_RUNNING_EXIT_CODE
+  }
+  if (answer === "unsupported") {
+    deps.warn(`${LOG_PREFIX} the running ${CLI_COMMAND} (pid ${running.pid}) can't restart in place: it has no supervisor, or predates \`${CLI_COMMAND} restart\`. Stop it (Ctrl-C) and start it again once.`)
+    return 1
+  }
+  deps.log(`${LOG_PREFIX} restarting ${CLI_COMMAND} (pid ${running.pid})…`)
+  const { poll, timeout } = deps.instanceWaitMs ?? { poll: 250, timeout: 60_000 }
+  const deadline = Date.now() + timeout
+  let wentDown = false
+  while (Date.now() < deadline) {
+    const current = await status()
+    if (!current) {
+      deps.warn(`${LOG_PREFIX} ${CLI_COMMAND} stopped instead of restarting`)
+      return 1
+    }
+    if (current.port === null) wentDown = true
+    else if (wentDown || (current.serverAttachedAt != null && current.serverAttachedAt !== running.serverAttachedAt)) {
+      deps.log(`${LOG_PREFIX} restarted on port ${current.port}`)
+      return 0
+    }
+    await new Promise((resolve) => setTimeout(resolve, poll))
+  }
+  deps.warn(`${LOG_PREFIX} ${CLI_COMMAND} (pid ${running.pid}) is still restarting`)
   return 1
 }
 

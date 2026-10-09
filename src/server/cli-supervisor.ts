@@ -8,6 +8,7 @@ import {
   CLI_CHILD_COMMAND_ENV_VAR,
   CLI_CHILD_MODE,
   CLI_CHILD_MODE_ENV_VAR,
+  CLI_RESTART_SIGNAL,
   CLI_STARTUP_UPDATE_RESTART_EXIT_CODE,
   CLI_SUPPRESS_OPEN_ONCE_ENV_VAR,
   isUiUpdateRestart,
@@ -60,10 +61,17 @@ function spawnChild(argv: string[]) {
   if (lock) env[INSTANCE_LOCK_ENV_VAR] = "held"
   else if (startsServer(argv)) env[INSTANCE_LOCK_ENV_VAR] = "taken"
   else delete env[INSTANCE_LOCK_ENV_VAR]
+  // A server child gets its own process group, so Ctrl-C in the terminal
+  // reaches only this supervisor, which passes it on once. Sharing the
+  // terminal's group, every agent the server ran (claude, codex, …) got the
+  // SIGINT too and died before the server's shutdown could mark its turn for
+  // resuming. Not for `pair`, which reads its prompt from the terminal.
+  const ownGroup = process.platform !== "win32" && startsServer(argv)
   return new Promise<ChildExit>((resolve, reject) => {
     const child = spawn(childProcess.command, [...childProcess.args, ...argv], {
-      stdio: "inherit",
+      stdio: ownGroup ? ["ignore", "inherit", "inherit"] : "inherit",
       env,
+      detached: ownGroup,
     })
 
     currentChild = child
@@ -122,6 +130,14 @@ async function takeLockFor(argv: string[]) {
     onStop: () => {
       stopRequested = true
       if (currentChild && currentChild.exitCode === null) currentChild.kill("SIGTERM")
+    },
+    // `kanna restart`: the child stops as it does for an update (running
+    // turns marked to resume) and exits with the UI-restart code, so the loop
+    // below brings up a new one on the code now on disk.
+    onRestart: () => {
+      if (process.platform === "win32" || !currentChild || currentChild.exitCode !== null) return false
+      currentChild.kill(CLI_RESTART_SIGNAL)
+      return true
     },
   })
 }

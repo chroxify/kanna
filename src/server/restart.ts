@@ -4,6 +4,17 @@ export const CLI_CHILD_MODE_ENV_VAR = "KANNA_CLI_MODE"
 export const CLI_CHILD_MODE = "child"
 export const CLI_STARTUP_UPDATE_RESTART_EXIT_CODE = 75
 export const CLI_UI_UPDATE_RESTART_EXIT_CODE = 76
+let supervisedChild = false
+/** entry.ts marks the server child before it drops the env var that says so. */
+export function markSupervisedChild() {
+  supervisedChild = true
+}
+export function isSupervisedChild() {
+  return supervisedChild
+}
+
+/** Sent by the supervisor to its server child for `kanna restart`. */
+export const CLI_RESTART_SIGNAL = "SIGUSR2" as const
 export const CLI_CHILD_COMMAND_ENV_VAR = "KANNA_CLI_CHILD_COMMAND"
 export const CLI_CHILD_ARGS_ENV_VAR = "KANNA_CLI_CHILD_ARGS"
 export const CLI_SUPPRESS_OPEN_ONCE_ENV_VAR = "KANNA_SUPPRESS_OPEN_ONCE"

@@ -3,7 +3,7 @@
  *
  * The process that runs the server holds a Unix socket at a fixed path
  * (`~/.kanna/kanna.sock`). Only one process can listen on a path, so holding
- * it is the lock. It's also how the Mac app, `kanna stop` and a second
+ * it is the lock. It's also how the Mac app, `kanna stop`, `kanna restart` and a second
  * `kanna` ask that process about the server: its port, who started it, how
  * many chats are running. The answers come from memory, so they can't go
  * stale the way a pid file can after a crash.
@@ -55,9 +55,11 @@ export interface InstanceStatus {
   runningChats: number | null
   /** Serving this Mac's Kanna Cloud address. */
   cloud: boolean | null
+  /** When the current server attached. A restart shows as a new value. Absent from older supervisors. */
+  serverAttachedAt?: number | null
 }
 
-export type InstanceRequest = { type: "status" } | { type: "release" } | { type: "stop" }
+export type InstanceRequest = { type: "status" } | { type: "release" } | { type: "stop" } | { type: "restart" }
 
 /** What the server reports to the lock holder. */
 export interface AttachedServer {
@@ -82,7 +84,7 @@ export function instanceSocketPath(homeDir: string = os.homedir(), platform: Nod
 /** Whether `argv` starts a server, and so needs the lock. `pair` does too
  *  once it has paired; its child takes the lock itself at that point. */
 export function startsServer(argv: string[]) {
-  if (argv[0] === "pair" || argv[0] === "slim-transcripts" || argv[0] === "stop") return false
+  if (argv[0] === "pair" || argv[0] === "slim-transcripts" || argv[0] === "stop" || argv[0] === "restart") return false
   return !argv.some((arg) => arg === "--version" || arg === "-v" || arg === "--help" || arg === "-h")
 }
 
@@ -167,6 +169,17 @@ export async function waitForInstancePort(options: { socketPath?: string; timeou
   }
 }
 
+/**
+ * Ask the running Kanna to restart its server in place. "unsupported" when it
+ * runs without a supervisor to bring it back (`bun run dev`), or is too old to
+ * know the request: it answers nothing then, and the wait runs out.
+ */
+export async function requestInstanceRestart(options: { socketPath?: string } = {}): Promise<"restarting" | "unsupported" | "none"> {
+  const answer = await ask(options.socketPath ?? instanceSocketPath(), { type: "restart" }, 2_000)
+  if (answer.kind === "none") return "none"
+  return answer.kind === "answer" && answer.message.ok === true ? "restarting" : "unsupported"
+}
+
 /** Ask the running Kanna to stop. False when none is running. */
 export async function requestInstanceStop(options: { socketPath?: string } = {}) {
   const answer = await ask(options.socketPath ?? instanceSocketPath(), { type: "stop" }, 2_000)
@@ -178,6 +191,7 @@ export async function requestInstanceStop(options: { socketPath?: string } = {})
 export class InstanceLock {
   owner: InstanceOwner
   private server: AttachedServer | null = null
+  private serverAttachedAt: number | null = null
   private link: net.Socket | null = null
   private readonly startedAt = Date.now()
   private readonly instance = instanceFingerprint()
@@ -187,6 +201,8 @@ export class InstanceLock {
     readonly socketPath: string,
     owner: InstanceOwner,
     private readonly onStop: () => void,
+    /** Restart the server, keeping the lock. False when there's nothing to do it with. */
+    private readonly onRestart: () => boolean = () => false,
   ) {
     this.owner = owner
     listener.on("connection", (socket) => this.serve(socket))
@@ -197,6 +213,7 @@ export class InstanceLock {
   /** The server this process runs in-process (no supervisor). */
   attach(server: AttachedServer) {
     this.server = server
+    this.serverAttachedAt = Date.now()
   }
 
   /** Kept running when the app that started it quits. */
@@ -219,6 +236,7 @@ export class InstanceLock {
       version: this.server?.version ?? null,
       runningChats: state?.runningChats ?? null,
       cloud: state?.cloud ?? null,
+      serverAttachedAt: this.server ? this.serverAttachedAt : null,
     }
   }
 
@@ -242,6 +260,9 @@ export class InstanceLock {
         case "stop":
           send(socket, { ok: true })
           this.onStop()
+          break
+        case "restart":
+          send(socket, { ok: this.onRestart() })
           break
         case "attach":
           this.attachLink(socket, message)
@@ -271,6 +292,7 @@ export class InstanceLock {
       version: typeof message.version === "string" ? message.version : "",
       state: () => this.linkState ?? { runningChats: 0, cloud: false },
     }
+    this.serverAttachedAt = Date.now()
     socket.once("close", () => {
       if (this.link !== socket) return
       this.link = null
@@ -283,11 +305,12 @@ export class InstanceLock {
 /**
  * Take the socket, or null when another live Kanna holds it. A file left by
  * a process that died is removed and taken over. `onStop` runs on a `stop`
- * request.
+ * request, `onRestart` on a `restart`.
  */
 export async function acquireInstanceLock(options: {
   owner: InstanceOwner
   onStop: () => void
+  onRestart?: () => boolean
   socketPath?: string
 }): Promise<InstanceLock | null> {
   const socketPath = options.socketPath ?? instanceSocketPath()
@@ -318,7 +341,7 @@ export async function acquireInstanceLock(options: {
   return null
 
   function adopt(listener: net.Server) {
-    const lock = new InstanceLock(listener, socketPath, options.owner, options.onStop)
+    const lock = new InstanceLock(listener, socketPath, options.owner, options.onStop, options.onRestart)
     process.once("exit", () => removeSocketFile(socketPath))
     return lock
   }

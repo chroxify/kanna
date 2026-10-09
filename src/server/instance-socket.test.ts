@@ -7,6 +7,7 @@ import {
   attachToSupervisor,
   instanceSocketPath,
   instanceStatus,
+  requestInstanceRestart,
   requestInstanceStop,
   startsServer,
   type InstanceLock,
@@ -94,6 +95,29 @@ describe("the instance lock", () => {
     expect(await requestInstanceStop({ socketPath: socket })).toBe(true)
     expect(stopped).toBe(true)
     expect(await requestInstanceStop({ socketPath: socketPath() })).toBe(false)
+  })
+
+  test("restart reaches the holder, and says when it can't", async () => {
+    const withSupervisor = socketPath()
+    let restarts = 0
+    const lock = await acquireInstanceLock({
+      owner: "terminal",
+      onStop: () => {},
+      onRestart: () => {
+        restarts += 1
+        return true
+      },
+      socketPath: withSupervisor,
+    })
+    if (lock) locks.push(lock)
+    expect(await requestInstanceRestart({ socketPath: withSupervisor })).toBe("restarting")
+    expect(restarts).toBe(1)
+
+    // No onRestart: a server running without a supervisor.
+    const bare = socketPath()
+    await acquire(bare)
+    expect(await requestInstanceRestart({ socketPath: bare })).toBe("unsupported")
+    expect(await requestInstanceRestart({ socketPath: socketPath() })).toBe("none")
   })
 
   test("a server child attaches to its supervisor, and detaches when it exits", async () => {

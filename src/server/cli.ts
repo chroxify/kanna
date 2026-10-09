@@ -6,10 +6,15 @@ import {
   openUrl,
   runCli,
 } from "./cli-runtime"
-import { CLI_STARTUP_UPDATE_RESTART_EXIT_CODE, CLI_UI_UPDATE_RESTART_EXIT_CODE } from "./restart"
+import {
+  CLI_RESTART_SIGNAL,
+  CLI_STARTUP_UPDATE_RESTART_EXIT_CODE,
+  CLI_UI_UPDATE_RESTART_EXIT_CODE,
+  isSupervisedChild,
+} from "./restart"
 import { installNightlyBuild } from "./nightly"
 import { startKannaServer } from "./server"
-import { exitWithParent, openInMacApp } from "./mac-app"
+import { EXIT_WITH_PARENT_ENV_VAR, exitWithParent, openInMacApp } from "./mac-app"
 
 // Read version from package.json at the package root
 const pkg = await Bun.file(new URL("../../package.json", import.meta.url)).json()
@@ -59,15 +64,31 @@ if (result.kind === "restarting") {
 const exitAction = await new Promise<"ui_restart" | "exit">((resolve) => {
   resolveExitAction = resolve
 
+  // The first signal stops cleanly, which marks running turns to resume on
+  // the next start. A second is most likely an impatient Ctrl-C: dying then
+  // would lose exactly those turns, so it only says what's happening, and a
+  // third forces it.
+  let signals = 0
   const shutdown = () => {
-    resolve("exit")
+    signals += 1
+    if (signals === 1) resolve("exit")
+    else if (signals === 2) console.log(`${LOG_PREFIX} stopping, saving running chats to resume; press Ctrl-C again to quit now`)
+    else process.exit(130)
   }
 
-  process.once("SIGINT", shutdown)
-  process.once("SIGTERM", shutdown)
+  process.on("SIGINT", shutdown)
+  process.on("SIGTERM", shutdown)
   exitWithParent(() => {
     if (!result.releasedFromParent?.()) shutdown()
   })
+  if (isSupervisedChild()) {
+    // `kanna restart`, through the supervisor: stop as for an update, and the
+    // supervisor starts the server again.
+    process.once(CLI_RESTART_SIGNAL, () => resolve("ui_restart"))
+    // In its own process group the server outlives a supervisor killed
+    // outright, holding the port with nobody to stop it. Watch for that.
+    exitWithParent(() => shutdown(), { [EXIT_WITH_PARENT_ENV_VAR]: "1" })
+  }
 })
 
 await result.stop()
