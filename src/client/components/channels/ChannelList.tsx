@@ -76,7 +76,7 @@ function ChannelPeek({
   onClose: () => void
   renderChatMenu: RenderChatMenu
   group: SidebarProjectGroup
-  /** Pinned is opened up: the click that holds the menu asked for the rest of it. */
+  /** Pinned is opened up: "Show more", which holds the menu, asked for the rest of it. */
   pinned: boolean
   activeChatId: string | null
   nowMs: number
@@ -169,7 +169,8 @@ function ChannelPeek({
           </div>
         ))}
         {/* A row like the others, so it sits in their rhythm and takes their
-            hover. Clicking the channel does the same thing. */}
+            hover. The only way to the rest of the chats from here: a click on
+            the channel starts a new chat. */}
         {canShowMore ? (
           <button type="button" onClick={onShowMore} className="group/peek block w-full py-px text-left">
             <span className="flex w-full items-center gap-2.5 rounded-lg border border-border/0 px-2 py-1.5 text-sm text-muted-foreground transition-colors group-hover/peek:border-border group-hover/peek:bg-muted">
@@ -257,7 +258,6 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
           {...{ [CHANNEL_ROW_ATTRIBUTE]: group.groupKey }}
           onClick={() => onSelect(group.groupKey)}
           aria-current={active ? "page" : undefined}
-          aria-expanded={menuPinned}
           // The button is the hover target and the box inside it is what
           // highlights. Buttons touch, so the pointer passes from one channel
           // to the next without ever being over neither; the 2px between
@@ -336,18 +336,21 @@ export function ChannelList({
   renderChatHoverCard: RenderChatHoverCard
 }) {
   const listRef = useRef<HTMLDivElement>(null)
-  // The channel whose menu is pinned open, showing all of its chats. A click
-  // on the channel pins it (and a second unpins it), as does its menu's "Show
-  // more"; a click elsewhere, Escape, or picking a chat lets it go. See
-  // `ListHoverCard` on pinning.
+  // The channel whose menu is pinned open, showing all of its chats. Its
+  // menu's "Show more" pins it; a click elsewhere, Escape, picking a chat or
+  // clicking a channel lets it go. See `ListHoverCard` on pinning.
   const [pinnedChannelId, setPinnedChannelId] = useState<string | null>(null)
   const unpinChannel = useCallback(() => setPinnedChannelId(null), [])
-  const togglePinnedChannel = useCallback((projectId: string) => {
-    setPinnedChannelId((current) => (current === projectId ? null : projectId))
-  }, [])
-  // Without hover there is no menu to pin, so a tap opens the channel itself
-  // (`onSelect`): the only way to its chats on touch.
-  const handleSelect = opensAsPage ? onSelect : togglePinnedChannel
+  // A click on a channel starts a chat in it: the page New Chat in its menu
+  // goes to, by the same route. The menu is for reaching a chat that is
+  // already there, and hovering is enough to get it.
+  const startChat = useCallback((projectId: string) => {
+    unpinChannel()
+    actions.onCreateChat(projectId)
+  }, [actions, unpinChannel])
+  // Without hover there is no menu, so a tap opens the channel itself
+  // (`onSelect`): the only way to its chats on touch. New Chat is on that page.
+  const handleSelect = opensAsPage ? onSelect : startChat
   // Browser-local inputs to the sections; see `ThreadSections`.
   const draftStartTimes = useDraftStartTimes()
   const pendingSends = usePendingSendTimes()
@@ -397,8 +400,6 @@ export function ChannelList({
         containerRef={listRef}
         rowAttribute={CHANNEL_ROW_ATTRIBUTE}
         side="right"
-        // Clicking a channel pins its menu; it must not also close it.
-        keepOpenOnRowClick
         pinnedKey={pinnedChannelId}
         onUnpin={unpinChannel}
         // A submenu of the sidebar more than a card about a row, so it is

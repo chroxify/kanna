@@ -49,8 +49,9 @@ export interface ProjectChatGroup {
 }
 
 /**
- * One project's chats under the sidebar Chats tab's headings — Pinned, In
- * Progress, Review, Relevant, date buckets, Archived — empty groups dropped.
+ * One project's chats under the sidebar Chats tab's headings — Pinned,
+ * Delegators, In Progress, Review, Relevant, date buckets, Archived — empty
+ * groups dropped.
  * The palette's "Chats in <project>" page and the new chat page's project card
  * both group by this, so the two read the same.
  */
@@ -66,6 +67,7 @@ export function getProjectChatGroups(threads: SidebarThread[], nowMs: number, {
   let remaining = limit ?? Number.POSITIVE_INFINITY
   return [
     { key: "pinned", label: "Pinned", threads: sections.pinned },
+    { key: "delegators", label: "Delegators", threads: sections.delegators },
     { key: "in-progress", label: "In Progress", threads: sections.inProgress },
     { key: "review", label: "Review", threads: sections.review },
     { key: "relevant", label: "Relevant", threads: sections.relevant },

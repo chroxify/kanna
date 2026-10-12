@@ -64,7 +64,7 @@ export interface ChatViewerState {
    * opened while a chat is in the previewer is a look at something, and
    * closing it goes back to the chat instead of shutting the pane on it.
    */
-  returnTo?: { item: Extract<ViewerItem, { kind: "chat" | "graph" }>; widthPx?: number }
+  returnTo?: { item: Extract<ViewerItem, { kind: "chat" | "graph" | "delegated" }>; widthPx?: number }
 }
 
 interface RightSidebarState {

@@ -28,7 +28,8 @@ function fakeClock() {
   return { clock, advance, pendingFrames: () => frames.size }
 }
 
-function setup(durationMs = 1500) {
+// The length of the hold that stops a turn (`HOLD_TO_STOP_MS`).
+function setup(durationMs = 500) {
   const { clock, advance, pendingFrames } = fakeClock()
   const progress: number[] = []
   let confirmed = 0
@@ -45,7 +46,7 @@ describe("createHoldToConfirm", () => {
   test("confirms once the whole duration has been held, and not before", () => {
     const { hold, advance, confirmed } = setup()
     hold.press()
-    advance(1499)
+    advance(499)
     expect(confirmed()).toBe(0)
     expect(hold.isHolding()).toBe(true)
     advance(1)
@@ -57,10 +58,10 @@ describe("createHoldToConfirm", () => {
     const { hold, advance, progress, confirmed } = setup()
     hold.press()
     expect(progress).toEqual([0])
-    advance(750)
-    expect(progress[progress.length - 1]).toBeCloseTo(0.5, 2)
+    advance(250)
+    expect(progress[progress.length - 1]).toBeCloseTo(0.5, 1)
     expect(confirmed()).toBe(0)
-    advance(750)
+    advance(250)
     expect(progress[progress.length - 1]).toBe(1)
     expect(confirmed()).toBe(1)
     for (let index = 1; index < progress.length; index += 1) {
@@ -71,8 +72,8 @@ describe("createHoldToConfirm", () => {
   test("letting go early confirms nothing and reports how far it got", () => {
     const { hold, advance, pendingFrames, confirmed } = setup()
     hold.press()
-    advance(600)
-    expect(hold.release()).toBeCloseTo(0.4, 2)
+    advance(200)
+    expect(hold.release()).toBeCloseTo(0.4, 1)
     expect(hold.isHolding()).toBe(false)
     expect(pendingFrames()).toBe(0)
     advance(5000)
@@ -83,7 +84,7 @@ describe("createHoldToConfirm", () => {
     const { hold, advance, confirmed } = setup()
     hold.press()
     advance(80)
-    expect(hold.release()).toBeCloseTo(80 / 1500, 2)
+    expect(hold.release()).toBeCloseTo(80 / 500, 2)
     advance(2000)
     expect(confirmed()).toBe(0)
   })
@@ -91,9 +92,9 @@ describe("createHoldToConfirm", () => {
   test("a press while holding does not start over", () => {
     const { hold, advance, confirmed } = setup()
     hold.press()
-    advance(1000)
+    advance(300)
     hold.press()
-    advance(500)
+    advance(200)
     expect(confirmed()).toBe(1)
   })
 
@@ -106,9 +107,9 @@ describe("createHoldToConfirm", () => {
     const { hold, advance, progress, confirmed } = setup()
     hold.press(0.6)
     expect(progress).toEqual([0.6])
-    advance(750)
-    expect(progress[progress.length - 1]).toBeCloseTo(0.8, 2)
-    advance(749)
+    advance(250)
+    expect(progress[progress.length - 1]).toBeCloseTo(0.8, 1)
+    advance(249)
     expect(confirmed()).toBe(0)
     advance(1)
     expect(confirmed()).toBe(1)
@@ -119,7 +120,7 @@ describe("createHoldToConfirm", () => {
     const { hold, advance, confirmed } = setup()
     for (let round = 0; round < 10; round += 1) {
       hold.press(0.9)
-      advance(1000)
+      advance(400)
       hold.release()
       advance(50)
     }
@@ -129,9 +130,9 @@ describe("createHoldToConfirm", () => {
   test("confirms again on a later hold", () => {
     const { hold, advance, confirmed } = setup()
     hold.press()
-    advance(1500)
+    advance(500)
     hold.press()
-    advance(1500)
+    advance(500)
     expect(confirmed()).toBe(2)
   })
 })

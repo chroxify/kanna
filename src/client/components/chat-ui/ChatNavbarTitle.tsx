@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import { GitBranch } from "lucide-react"
+import { DelegatorIcon } from "./delegator-icon"
 import { getRepoUrlLabel } from "../../../shared/git-url"
 import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
 import { getProjectSidebarLabel } from "../../lib/project-label"
@@ -184,6 +185,14 @@ export const ChatNavbarTitle = memo(function ChatNavbarTitle({
           </button>
         ) : null}
         <EditableTitle title={title} onRename={onRename} />
+        {thread?.row.delegator ? (
+          // What kind of chat this is, said once, beside its name: its
+          // composer hands work on instead of doing it.
+          <span className="flex shrink-0 items-center gap-1 rounded-full border border-border px-2 py-px text-xs text-muted-foreground">
+            <DelegatorIcon className="size-3 shrink-0" />
+            Delegator
+          </span>
+        ) : null}
       </span>
       {projectName || branchName ? (
         <span className="flex min-w-0 shrink-[4] items-center gap-1.5 text-xs text-muted-foreground">

@@ -1,8 +1,10 @@
 import type { ReactNode } from "react"
 import { Loader2, MessageCircle, PencilLine } from "lucide-react"
+import { DelegatorIcon } from "./delegator-icon"
 import type { SidebarChatRow } from "../../../shared/types"
 import type { SidebarThread } from "../../lib/thread-sections"
 import { cn } from "../../lib/utils"
+import { waitingOnLabel } from "../../lib/waiting-on"
 import { AnimatedShinyText } from "../ui/animated-shiny-text"
 import { ProjectIcon } from "../ui/project-icon"
 import { PROVIDER_ICONS } from "./ChatPreferenceControls"
@@ -27,20 +29,30 @@ function statusDotClass(archived: boolean) {
  * carried by title contrast, not by this slot, so it only ever holds things
  * that want your attention.
  */
+/**
+ * The slot every mark at the head of a row is drawn in: 16px, the size of the
+ * harness icon the status glyph takes the place of, with the glyph centred.
+ * The spinner is drawn at 14px so it does not look heavier than the icons
+ * around it, and without the slot it was a 14px box: the title after it sat
+ * 2px left of where it sits after any other mark, and anything lined up under
+ * the mark's centre (the line under a quote, see `ReplyQuoteRow`) was off it.
+ */
+const STATUS_MARK_SLOT_CLASS = "flex size-4 shrink-0 items-center justify-center"
+
 export function renderChatStatusDot(chat: SidebarChatRow): ReactNode | null {
   if (chat.status === "starting" || chat.status === "running") {
-    return <Loader2 className="size-3.5 shrink-0 animate-spin text-logo" />
+    return <span className={STATUS_MARK_SLOT_CLASS}><Loader2 className="size-3.5 animate-spin text-logo" /></span>
   }
   // Still going, but not in this chat: the grey a running task gets in the
   // Tasks widget, which is where the work is. Ahead of the unread ping,
   // because the reply it would flag is not the chat's last word.
   if (chat.status === "waiting_on_subagent") {
-    return <Loader2 aria-label="Waiting on a subagent" className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+    return <span className={STATUS_MARK_SLOT_CLASS}><Loader2 aria-label={waitingOnLabel(chat.waitingOn)} className="size-3.5 animate-spin text-muted-foreground" /></span>
   }
   const color = chat.status === "waiting_for_user" ? "blue" : chat.unread ? "emerald" : null
   if (!color) return null
   return (
-    <div className="relative flex size-4 shrink-0 items-center justify-center">
+    <div className={cn("relative", STATUS_MARK_SLOT_CLASS)}>
       <div
         className={cn(
           "absolute size-2.5 rounded-full kanna-ping",
@@ -139,9 +151,19 @@ export function ThreadRowContent({
   // keeps its pencil, since swapping the glyph as you click through rows is a
   // flicker in the corner of your eye for no information gained.
   const showsDraft = hasDraft
+  // A delegator is told apart by its own mark, where another chat's harness
+  // icon would go: what it is matters more on its row than what it runs on.
+  // It gives the slot up as any icon does, to a status mark (a delegator
+  // running, waiting on its chats or wanting you still has to say so) and to
+  // the draft pencil. Then the mark moves to the row's trailing end, small,
+  // beside the age, so a delegator never reads as an ordinary chat.
+  const isDelegator = Boolean(thread.row.delegator)
+  const delegatorMarkTrails = isDelegator && (statusDot !== null || showsDraft)
   const HarnessIcon = showsDraft
     ? PencilLine
-    : thread.row.provider ? PROVIDER_ICONS[thread.row.provider] : null
+    : isDelegator
+      ? DelegatorIcon
+      : thread.row.provider ? PROVIDER_ICONS[thread.row.provider] : null
   // The chat has work sitting in its project's dirty tree, so keep its title at
   // full contrast. Deliberately *not* a colour treatment on the harness icon —
   // that icon says which agent ran the chat, and tinting it (brand red) read as
@@ -165,7 +187,7 @@ export function ThreadRowContent({
   const dimTitle = dimIdleTitles && !isActive && !hasUncommittedWork && !needsAttention
   return (
     <>
-      {statusDot ?? (showProjectIcon && !showsDraft
+      {statusDot ?? (showProjectIcon && !showsDraft && !isDelegator
         ? <ProjectIcon name={thread.projectTitle} iconUrl={thread.projectIconUrl} className={thread.archived ? "opacity-50" : undefined} />
         : HarnessIcon
           ? <HarnessIcon className={iconClass} />
@@ -205,12 +227,14 @@ export function ThreadRowContent({
             {/* `truncate` has to sit on a block, not on the flex parent —
                 text-overflow doesn't apply to a flex container, so putting it
                 up there clips a long `repo/branch` with no ellipsis. */}
+            {delegatorMarkTrails ? <DelegatorIcon aria-label="Delegator" className="mr-1 size-3 shrink-0" /> : null}
             <span className="min-w-0 truncate">{detailLabel ?? ""}</span>
           </span>
         </span>
       ) : (
         // See above: natural width, capped at half the row.
         <span className="ml-auto flex max-w-[50%] shrink-0 items-center gap-1.5 pl-3 text-xs">
+          {delegatorMarkTrails ? <DelegatorIcon aria-label="Delegator" className="size-3 shrink-0 text-muted-foreground" /> : null}
           {detailLabel == null ? null : (
             <span className="min-w-0 truncate text-muted-foreground">{detailLabel}</span>
           )}

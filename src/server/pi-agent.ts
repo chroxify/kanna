@@ -270,6 +270,8 @@ export interface StartPiTurnArgs {
   forkSession: boolean
   /** Model Registry connection (or env fallback). Null surfaces an error turn. */
   connection: PiConnection | null
+  /** The chat is a delegator, which its system prompt says. */
+  delegator?: boolean
 }
 
 interface PiChatSession {
@@ -286,6 +288,8 @@ interface PiChatSession {
    * startTurn covers.
    */
   promptAgentId: string
+  /** Baked into appendSystemPrompt too. A change opens a new session, which resumes the same file. */
+  delegator: boolean
   effort: PiReasoningEffort
   connectionProvider: LlmProviderKind
   connectionBaseUrl: string
@@ -409,7 +413,7 @@ export class PiAgentManager {
     const connectionUnchanged = existing
       && existing.connectionProvider === args.connection.provider
       && existing.connectionBaseUrl === args.connection.baseUrl
-    if (existing && connectionUnchanged && existing.cwd === args.cwd && !args.forkSession) {
+    if (existing && connectionUnchanged && existing.cwd === args.cwd && existing.delegator === Boolean(args.delegator) && !args.forkSession) {
       existing.authStorage.setRuntimeApiKey(args.connection.provider, args.connection.apiKey)
       if (existing.model !== args.model) {
         await existing.session.setModel(this.resolveModel(existing.modelRegistry, args.connection, args.model))
@@ -447,7 +451,7 @@ export class PiAgentManager {
       settingsManager,
       noExtensions: true,
       noThemes: true,
-      appendSystemPrompt: [buildKannaSystemInstructions(buildKannaAgentId("pi", args.model))],
+      appendSystemPrompt: [buildKannaSystemInstructions(buildKannaAgentId("pi", args.model), { delegator: args.delegator })],
     })
     await resourceLoader.reload()
 
@@ -479,6 +483,7 @@ export class PiAgentManager {
       cwd: args.cwd,
       model: args.model,
       promptAgentId: buildKannaAgentId("pi", args.model),
+      delegator: Boolean(args.delegator),
       effort: args.effort,
       connectionProvider: args.connection.provider,
       connectionBaseUrl: args.connection.baseUrl,

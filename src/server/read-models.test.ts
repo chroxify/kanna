@@ -58,6 +58,15 @@ describe("read models", () => {
       resting: "idle",
     })
     const snapshot = (chatId: string) => deriveChatSnapshot(state, statuses, new Set(), chatId, () => ({ messages: [], startIndex: 0, readAnchor: null }))
+    // The count goes with the status it explains and with no other: a failed
+    // chat shows its failure, and one at rest is waiting on nothing.
+    const counts = { chats: 2, agents: 1 }
+    const counted = deriveSidebarData(state, statuses, { waitingOn: new Map([["waiting", counts], ["failed", counts], ["resting", counts]]) }).projectGroups[0]!.chats
+    expect(Object.fromEntries(counted.map((row) => [row.chatId, row.waitingOn]))).toEqual({ waiting: counts, failed: undefined, resting: undefined })
+    const withCounts = (chatId: string) => deriveChatSnapshot(state, statuses, new Set(), chatId, () => ({ messages: [], startIndex: 0, readAnchor: null }), undefined, counts)
+    expect(withCounts("waiting")?.runtime.waitingOn).toEqual(counts)
+    expect(withCounts("failed")?.runtime).not.toHaveProperty("waitingOn")
+    expect(rows.every((row) => !("waitingOn" in row))).toBe(true)
     expect(snapshot("waiting")?.runtime.status).toBe("waiting_on_subagent")
     expect(snapshot("failed")?.runtime.status).toBe("failed")
     expect(snapshot("resting")?.runtime.status).toBe("idle")

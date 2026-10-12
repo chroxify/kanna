@@ -92,15 +92,19 @@ export function useOpenChat(): OpenChat {
       if (action.kind === "close-preview") viewerStore.close()
       if (options?.jump) goTo()
     } else if (action.kind === "preview") {
-      // A trail that began at the graph still ends there: stepping from one
-      // chat to the next inside the previewer carries it along. A chat opened
-      // from the page starts a new trail, with no graph behind it.
-      const graph = options?.from === "preview" && item?.kind === "chat" ? item.graph : undefined
+      // A trail that began at the graph or at a delegator's list still ends
+      // there: stepping from one chat to the next inside the previewer
+      // carries it along, and a chat picked from the list starts one. A chat
+      // opened from the page starts a new trail, with neither behind it.
+      const inPane = options?.from === "preview"
+      const graph = inPane && item?.kind === "chat" ? item.graph : undefined
+      const delegated = !inPane ? undefined : item?.kind === "delegated" ? item.chatId : item?.kind === "chat" ? item.delegated : undefined
       viewerStore.open({
         kind: "chat",
         chatId,
         ...(action.back.length > 0 ? { back: action.back } : {}),
         ...(graph ? { graph } : {}),
+        ...(delegated ? { delegated } : {}),
       })
       if (options?.jump) viewerStore.setChatJump(chatId, options.jump)
     } else {

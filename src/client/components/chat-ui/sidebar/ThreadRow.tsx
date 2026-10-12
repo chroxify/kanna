@@ -6,6 +6,7 @@ import { cn, normalizeChatId } from "../../../lib/utils"
 import { Button } from "../../ui/button"
 import { useChatHasDraft, useChatInputStore } from "../../../stores/chatInputStore"
 import { ThreadRowContent } from "../ThreadRowContent"
+import { useChatMenuCommands } from "../chat-menu-commands"
 import { ChatRowMenu } from "./Menus"
 
 interface ThreadRowProps {
@@ -280,10 +281,17 @@ export function ThreadRowMenu({
 }) {
   const hasDraft = useChatHasDraft(thread.row.chatId)
   const clearDraft = useChatInputStore((state) => state.clearDraft)
+  const commands = useChatMenuCommands()
+  const delegator = Boolean(thread.row.delegator)
+  // Grok chats are not given the chat tools, so one cannot delegate. One
+  // that already is a delegator can still be made ordinary again.
+  const canToggleDelegator = commands !== null && !archived && (delegator || thread.row.provider !== "grok")
 
   return (
     <ChatRowMenu
       leadingItems={leadingItems}
+      delegator={delegator}
+      onToggleDelegator={canToggleDelegator ? () => commands.setDelegator(thread.row.chatId, !delegator) : undefined}
       canFork={thread.row.canFork}
       archived={archived}
       pinned={Boolean(thread.row.pinnedAt)}

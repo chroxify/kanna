@@ -14,8 +14,17 @@
  *   - Out of expanded, the split is set in one step, to the pane's width or
  *     to nothing, while the viewer still covers the chat. One reflow, behind
  *     the card, instead of one per frame beside it.
- *   - Between closed and docked, and between two docked widths (a review and
- *     a preview), it slides, as it always has.
+ *   - Between closed and docked it slides, as it always has.
+ *   - Docked and staying docked, it holds. The pane takes a width when it
+ *     opens, from what it opens on, and keeps it for as long as it is open
+ *     (or until it is dragged): a file opened over a chat, a chat picked
+ *     from a list, a review after a preview all arrive in the pane as it
+ *     stands. A surface that is the same before and after has no business
+ *     moving, and each move re-wrapped the chat beside it for nothing.
+ *
+ * The same reasoning decides when the viewer's card plays its entrance
+ * (`viewerCardEnters`): when the pane opens, and never when what is in an
+ * open pane changes.
  */
 export type ViewerPaneState = "closed" | "docked" | "expanded"
 
@@ -32,10 +41,30 @@ export interface ViewerSplitMove {
 }
 
 /**
- * `continuous` is false when a slide would not read as one pane moving: the
- * page is on another chat or a new split, or motion is reduced.
+ * `samePane` is false when what is being laid out is not the pane that was
+ * there a moment ago: the page is on another chat, or the split is new
+ * (another project, a phone turned desktop). Such a pane takes its own
+ * layout, in one step. So does any move under reduced motion.
  */
-export function resolveViewerSplitMove(previous: ViewerPaneState, next: ViewerPaneState, continuous: boolean): ViewerSplitMove {
+export function resolveViewerSplitMove(
+  previous: ViewerPaneState,
+  next: ViewerPaneState,
+  pane: { samePane: boolean; reducedMotion: boolean },
+): ViewerSplitMove {
   if (next === "expanded") return { to: "hold", animate: false }
+  if (previous === "docked" && next === "docked" && pane.samePane) return { to: "hold", animate: false }
+  const continuous = pane.samePane && !pane.reducedMotion
   return { to: next, animate: continuous && previous !== "expanded" && (previous === "docked" || next === "docked") }
+}
+
+/**
+ * Whether the viewer's card plays its entrance: only when the pane goes from
+ * shut to open. A card mounted into a pane that was already open, because
+ * what the pane shows changed (a chat picked from a list, a file over a
+ * chat, Back), is the same surface in the same place, and stays still: only
+ * its title and its body are new. Expanding and collapsing are not openings
+ * either; the card slides between the two on its own.
+ */
+export function viewerCardEnters(previous: ViewerPaneState, next: ViewerPaneState): boolean {
+  return previous === "closed" && next !== "closed"
 }
