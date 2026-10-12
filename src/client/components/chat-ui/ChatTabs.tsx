@@ -4,7 +4,7 @@ import { SortableContext, arrayMove, horizontalListSortingStrategy, useSortable 
 import { CSS as DndCSS } from "@dnd-kit/utilities"
 import { PencilLine, X } from "lucide-react"
 import { DelegatorIcon } from "./delegator-icon"
-import { getAdjacentChatTab, getChatTabAfterClose, type ChatTab } from "../../lib/chat-tabs"
+import { getAdjacentChatTab, getChatTabAfterClose, groupChatTabs, type ChatTab } from "../../lib/chat-tabs"
 import { isMacApp } from "../../lib/macApp"
 import { flattenSidebarThreads, type SidebarThread } from "../../lib/thread-sections"
 import { cn, normalizeChatId } from "../../lib/utils"
@@ -224,6 +224,62 @@ const Tab = memo(function Tab({ tab, thread, active, isNew, editorLabel, actions
 })
 
 /**
+ * A project's tabs, gathered behind its label. Pressing the label folds the
+ * group down to it and opens it again; the open chat's tab stays out beside
+ * a folded label, so what you are reading never leaves the bar. The cross at
+ * the end closes the group's tabs.
+ */
+function TabGroup({ projectId, title, iconUrl, collapsed, tabCount, onToggle, onClose, children }: {
+  projectId: string
+  title: string
+  iconUrl: string | undefined
+  collapsed: boolean
+  tabCount: number
+  onToggle: (projectId: string) => void
+  onClose: (projectId: string) => void
+  children: ReactNode
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={title}
+      data-chat-tab-group={projectId}
+      className="pointer-events-auto mx-px flex h-[32px] min-w-0 shrink items-center rounded-[10px] border border-border/70 bg-background"
+    >
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        title={collapsed ? `Show ${tabCount} ${tabCount === 1 ? "tab" : "tabs"}` : "Collapse group"}
+        onClick={() => onToggle(projectId)}
+        className="flex h-full shrink-0 items-center gap-1.5 rounded-[9px] px-2 text-sm font-semibold text-foreground outline-none transition-colors duration-150 hover:bg-muted focus-visible:bg-muted active:scale-[0.97] motion-reduce:transition-none"
+      >
+        <span className="flex size-4 shrink-0 items-center justify-center">
+          <ProjectIcon name={title} iconUrl={iconUrl} />
+        </span>
+        <span className="max-w-[140px] truncate">{title}</span>
+      </button>
+      {children ? (
+        <>
+          <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+          <div className="flex min-w-0 shrink items-center">{children}</div>
+        </>
+      ) : null}
+      {collapsed ? null : (
+        <button
+          type="button"
+          title="Close group"
+          aria-label={`Close ${title} tabs`}
+          onClick={() => onClose(projectId)}
+          className="mr-1 ml-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:text-foreground"
+        >
+          <X className="size-3.5" strokeWidth={2.25} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
  * Chat tabs, at the left end of the chat navbar: what it shows in place of
  * the one chat's title (`ChatNavbarTitle`) when the Chat Tabs setting is on.
  *
@@ -270,7 +326,8 @@ export const ChatTabs = memo(function ChatTabs({
   renderHoverCard: (containerRef: RefObject<HTMLDivElement | null>, threads: SidebarThread[]) => ReactNode
 }) {
   const tabs = useChatTabsStore((state) => state.tabs)
-  const { open, close, closeOthers, closeToRight, reorder, prune, visit } = useChatTabsStore.getState()
+  const collapsedProjectIds = useChatTabsStore((state) => state.collapsedProjectIds)
+  const { open, close, closeMany, closeOthers, reorder, prune, visit, toggleGroupCollapsed } = useChatTabsStore.getState()
   const data = useSidebarData()
   const sidebarReady = useSidebarReady()
   const listRef = useRef<HTMLDivElement>(null)
@@ -297,6 +354,23 @@ export const ChatTabs = memo(function ChatTabs({
   }, [data, tabs])
 
   const tabThreads = useMemo(() => [...threadByChatId.values()], [threadByChatId])
+
+  // The tabs by project, and the bar's order is theirs: a project's tabs sit
+  // together, wherever they were opened. What the keys step through skips
+  // the tabs folded away in a collapsed group, but never the open one.
+  const groups = useMemo(
+    () => groupChatTabs(tabs, (chatId) => threadByChatId.get(chatId)?.projectId),
+    [tabs, threadByChatId]
+  )
+  const collapsed = useMemo(() => new Set(collapsedProjectIds), [collapsedProjectIds])
+  const orderedTabs = useMemo(() => groups.flatMap((group) => group.tabs), [groups])
+  const visibleTabs = useMemo(() => groups.flatMap((group) => (
+    group.projectId !== null && collapsed.has(group.projectId)
+      ? group.tabs.filter((tab) => tab.chatId === activeChatId)
+      : group.tabs
+  )), [activeChatId, collapsed, groups])
+  const orderedTabsRef = useRef(orderedTabs)
+  orderedTabsRef.current = orderedTabs
 
   // The open chat has a tab. Opened right of the chat you came from.
   // "Came from" is the store's history too, read before this visit joins it
@@ -325,8 +399,8 @@ export const ChatTabs = memo(function ChatTabs({
   // the same way, is Option+[ and Option+], beside Option+W for closing one.
   // By the keys' positions: with Option held they type curly quotes.
   // From anywhere, the composer included.
-  const tabsRef = useRef(tabs)
-  tabsRef.current = tabs
+  const tabsRef = useRef(visibleTabs)
+  tabsRef.current = visibleTabs
   useEffect(() => {
     const inMacApp = isMacApp()
     function handleKeyDown(event: KeyboardEvent) {
@@ -366,7 +440,8 @@ export const ChatTabs = memo(function ChatTabs({
   }, [activeChatId, visit])
 
   const handleClose = useCallback((chatId: string) => {
-    const { tabs: current, recentChatIds } = useChatTabsStore.getState()
+    const { recentChatIds } = useChatTabsStore.getState()
+    const current = orderedTabsRef.current
     const lastSeen = recentChatIds.find((recent) => (
       recent !== chatId && current.some((tab) => tab.chatId === recent)
     ))
@@ -377,19 +452,42 @@ export const ChatTabs = memo(function ChatTabs({
     else onCloseLast()
   }, [activeChatId, close, onCloseLast, onSelect])
 
+  // Closing several at once (a group, or those right of a tab). If the open
+  // tab goes with them, it is the last one seen that stays, or else the first
+  // left in the bar.
+  const closeSeveral = useCallback((chatIds: readonly string[], fallback?: string) => {
+    if (chatIds.length === 0) return
+    const closing = new Set(chatIds)
+    const remaining = orderedTabsRef.current.filter((tab) => !closing.has(tab.chatId))
+    closeMany(chatIds)
+    if (!activeChatId || !closing.has(activeChatId)) return
+    const lastSeen = useChatTabsStore.getState().recentChatIds.find((recent) => (
+      remaining.some((tab) => tab.chatId === recent)
+    ))
+    const next = fallback ?? lastSeen ?? remaining[0]?.chatId
+    if (next) onSelect(next)
+    else onCloseLast()
+  }, [activeChatId, closeMany, onCloseLast, onSelect])
+
+  const handleCloseGroup = useCallback((projectId: string) => {
+    closeSeveral(orderedTabsRef.current
+      .filter((tab) => threadByChatId.get(tab.chatId)?.projectId === projectId)
+      .map((tab) => tab.chatId))
+  }, [closeSeveral, threadByChatId])
+
   // Closing several from a tab's menu. If the open tab is among those
   // closed, the tab the menu was opened on is what's left to show.
   const handleCloseOthers = useCallback((chatId: string) => {
     closeOthers(chatId)
     if (activeChatId !== chatId) onSelect(chatId)
   }, [activeChatId, closeOthers, onSelect])
+  // Right of it as the bar shows it, which is by project, not as stored.
   const handleCloseToRight = useCallback((chatId: string) => {
-    const current = useChatTabsStore.getState().tabs
+    const current = orderedTabsRef.current
     const index = current.findIndex((tab) => tab.chatId === chatId)
-    const activeIndex = current.findIndex((tab) => tab.chatId === activeChatId)
-    closeToRight(chatId)
-    if (activeIndex > index) onSelect(chatId)
-  }, [activeChatId, closeToRight, onSelect])
+    if (index === -1) return
+    closeSeveral(current.slice(index + 1).map((tab) => tab.chatId), chatId)
+  }, [closeSeveral])
 
   // Close the open tab: Option+W on the web, where Cmd+W is the browser's
   // own and closes its tab instead, and Cmd+W in the Mac app, where it is
@@ -418,16 +516,44 @@ export const ChatTabs = memo(function ChatTabs({
 
   // A few pixels of travel before it is a drag, so a click is still a click.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
-  const tabIds = useMemo(() => tabs.map((tab) => tab.chatId), [tabs])
+  const tabIds = useMemo(() => visibleTabs.map((tab) => tab.chatId), [visibleTabs])
+  // A tab moves within its group: where it sits between groups is its
+  // project's, not its own. The new order is the bar's, so storing it also
+  // settles the stored tabs into their groups.
   const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    const ids = useChatTabsStore.getState().tabs.map((tab) => tab.chatId)
-    const from = ids.indexOf(String(active.id))
-    const to = ids.indexOf(String(over.id))
+    const activeId = String(active.id)
+    const overId = String(over.id)
+    if (threadByChatId.get(activeId)?.projectId !== threadByChatId.get(overId)?.projectId) return
+    const ids = orderedTabsRef.current.map((tab) => tab.chatId)
+    const from = ids.indexOf(activeId)
+    const to = ids.indexOf(overId)
     if (from === -1 || to === -1) return
     reorder(arrayMove(ids, from, to))
-  }, [reorder])
+  }, [reorder, threadByChatId])
+
+  const renderTab = (tab: ChatTab) => {
+    const index = orderedTabs.findIndex((item) => item.chatId === tab.chatId)
+    return (
+      <Tab
+        key={tab.chatId}
+        tab={tab}
+        thread={threadByChatId.get(tab.chatId)}
+        active={tab.chatId === activeChatId}
+        isNew={!initialChatIdsRef.current!.has(tab.chatId)}
+        editorLabel={editorLabel}
+        actions={actions}
+        onSelect={onSelect}
+        onClose={handleClose}
+        onCloseOthers={handleCloseOthers}
+        onCloseToRight={handleCloseToRight}
+        hasOthers={orderedTabs.length > 1}
+        hasTabsToRight={index < orderedTabs.length - 1}
+        onRename={onRename}
+      />
+    )
+  }
 
   // Rendered with no tabs too: it is the navbar's flexible middle, and the
   // buttons on the right are held there by it.
@@ -448,24 +574,26 @@ export const ChatTabs = memo(function ChatTabs({
             // so the first tab's box still starts where the bar does.
             className="-ml-px flex w-[calc(100%+1px)] min-w-0 items-center overflow-x-auto scrollbar-hide"
           >
-            {tabs.map((tab, index) => (
-              <Tab
-                key={tab.chatId}
-                tab={tab}
-                thread={threadByChatId.get(tab.chatId)}
-                active={tab.chatId === activeChatId}
-                isNew={!initialChatIdsRef.current!.has(tab.chatId)}
-                editorLabel={editorLabel}
-                actions={actions}
-                onSelect={onSelect}
-                onClose={handleClose}
-                onCloseOthers={handleCloseOthers}
-                onCloseToRight={handleCloseToRight}
-                hasOthers={tabs.length > 1}
-                hasTabsToRight={index < tabs.length - 1}
-                onRename={onRename}
-              />
-            ))}
+            {groups.map((group) => {
+              if (group.projectId === null) return renderTab(group.tabs[0]!)
+              const thread = threadByChatId.get(group.tabs[0]!.chatId)!
+              const isCollapsed = collapsed.has(group.projectId)
+              const shown = isCollapsed ? group.tabs.filter((tab) => tab.chatId === activeChatId) : group.tabs
+              return (
+                <TabGroup
+                  key={`group:${group.projectId}`}
+                  projectId={group.projectId}
+                  title={thread.projectTitle}
+                  iconUrl={thread.projectIconUrl}
+                  collapsed={isCollapsed}
+                  tabCount={group.tabs.length}
+                  onToggle={toggleGroupCollapsed}
+                  onClose={handleCloseGroup}
+                >
+                  {shown.length > 0 ? shown.map(renderTab) : null}
+                </TabGroup>
+              )
+            })}
           </div>
         </SortableContext>
       </DndContext>

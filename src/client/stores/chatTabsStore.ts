@@ -1,6 +1,7 @@
 import { create } from "zustand"
 import {
   closeChatTab,
+  closeChatTabs,
   closeChatTabsToRight,
   closeOtherChatTabs,
   openChatTab,
@@ -9,7 +10,7 @@ import {
   MAX_CHAT_TABS,
   type ChatTab,
 } from "../lib/chat-tabs"
-import { CHAT_TABS_STORAGE_KEY } from "../lib/storageKeys"
+import { CHAT_TAB_GROUPS_COLLAPSED_STORAGE_KEY, CHAT_TABS_STORAGE_KEY } from "../lib/storageKeys"
 
 /**
  * The chat tabs, kept in this browser: they are how one
@@ -30,9 +31,13 @@ interface ChatTabsState {
    * it was for.
    */
   recentChatIds: string[]
+  /** Projects whose tab group is folded down to its label. Kept with the tabs. */
+  collapsedProjectIds: string[]
+  toggleGroupCollapsed: (projectId: string) => void
   visit: (chatId: string) => void
   open: (chatId: string, afterChatId?: string | null) => void
   close: (chatId: string) => void
+  closeMany: (chatIds: readonly string[]) => void
   closeOthers: (chatId: string) => void
   closeToRight: (chatId: string) => void
   reorder: (orderedChatIds: string[]) => void
@@ -54,6 +59,16 @@ function readStoredTabs(): ChatTab[] {
   }
 }
 
+function readCollapsedProjectIds(): string[] {
+  if (typeof window === "undefined") return []
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(CHAT_TAB_GROUPS_COLLAPSED_STORAGE_KEY) ?? "[]")
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return []
+  }
+}
+
 export const useChatTabsStore = create<ChatTabsState>()((set) => {
   // Every change goes through here: unchanged tabs (the rules hand back the
   // same array) neither re-render anything nor touch storage.
@@ -67,6 +82,16 @@ export const useChatTabsStore = create<ChatTabsState>()((set) => {
   return {
     tabs: readStoredTabs(),
     recentChatIds: [],
+    collapsedProjectIds: readCollapsedProjectIds(),
+    toggleGroupCollapsed: (projectId) => set((state) => {
+      const collapsedProjectIds = state.collapsedProjectIds.includes(projectId)
+        ? state.collapsedProjectIds.filter((id) => id !== projectId)
+        : [...state.collapsedProjectIds, projectId]
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(CHAT_TAB_GROUPS_COLLAPSED_STORAGE_KEY, JSON.stringify(collapsedProjectIds))
+      }
+      return { collapsedProjectIds }
+    }),
     visit: (chatId) => set((state) => (
       state.recentChatIds[0] === chatId
         ? state
@@ -74,6 +99,7 @@ export const useChatTabsStore = create<ChatTabsState>()((set) => {
     )),
     open: (chatId, afterChatId) => update((tabs) => openChatTab(tabs, chatId, afterChatId)),
     close: (chatId) => update((tabs) => closeChatTab(tabs, chatId)),
+    closeMany: (chatIds) => update((tabs) => closeChatTabs(tabs, chatIds)),
     closeOthers: (chatId) => update((tabs) => closeOtherChatTabs(tabs, chatId)),
     closeToRight: (chatId) => update((tabs) => closeChatTabsToRight(tabs, chatId)),
     reorder: (orderedChatIds) => update((tabs) => reorderChatTabs(tabs, orderedChatIds)),
