@@ -1736,6 +1736,97 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a background turn with a tool still running is not closed as quiet", async () => {
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      backgroundResumeGraceMs: 0,
+      backgroundTurnIdleMs: 50,
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+          })
+        },
+      }),
+    })
+
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "run the tests", model: "claude-opus-4-1" })
+    await waitFor(() => store.turnFinishedCount === 1)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    // The background command finishes and the agent wakes up to run ffmpeg,
+    // which takes far longer than the idle window and writes nothing meanwhile.
+    events.push({
+      type: "transcript" as const,
+      entry: timestamped({ kind: "tool_call", tool: { kind: "bash", toolKind: "bash", toolName: "Bash", toolId: "tool-ffmpeg", input: { command: "ffmpeg" } } as never }),
+    })
+    await waitFor(() => coordinator.getActiveStatuses().has("chat-1"))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(true)
+    expect(store.turnFinishedCount).toBe(1)
+
+    // Once the tool is back and the turn goes quiet, the watchdog closes it.
+    events.push({ type: "transcript" as const, entry: timestamped({ kind: "tool_result", toolId: "tool-ffmpeg", content: "ok" }) })
+    await waitFor(() => !coordinator.getActiveStatuses().has("chat-1"))
+    await waitFor(() => store.turnFinishedCount === 2)
+
+    events.close()
+  })
+
+  test("a different effort is applied to the live session instead of restarting it", async () => {
+    const events = new AsyncEventQueue<any>()
+    const store = createFakeStore()
+    let starts = 0
+    const effortCalls: Array<string | undefined> = []
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => {
+        starts += 1
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => {},
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          setEffort: async (effort: string | undefined) => {
+            effortCalls.push(effort)
+          },
+          sendPrompt: async () => {
+            events.push({
+              type: "transcript" as const,
+              entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+            })
+          },
+        }
+      },
+    })
+
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "one", model: "claude-opus-4-1", modelOptions: { claude: { reasoningEffort: "max" } } })
+    await waitFor(() => store.turnFinishedCount === 1)
+    // A sub-chat report or a resume sends no effort, which resolves to the default.
+    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "two", model: "claude-opus-4-1" })
+    await waitFor(() => store.turnFinishedCount === 2)
+
+    expect(starts).toBe(1)
+    expect(effortCalls).toEqual(["high"])
+
+    events.close()
+  })
+
   test("auto plan controls the EnterPlanMode tool and restarts the session when it changes", async () => {
     const queues: AsyncEventQueue<any>[] = []
     const startSessionCalls: Array<{ planMode: boolean; autoPlan: boolean }> = []

@@ -214,6 +214,8 @@ interface ClaudeSessionHandle {
   setModel: (model: string) => Promise<void>
   setPermissionMode: (planMode: boolean) => Promise<void>
   setFastMode?: (fastMode: boolean) => Promise<void>
+  /** Changes reasoning effort on the live session; `undefined` goes back to the model default. */
+  setEffort?: (effort: string | undefined) => Promise<void>
   supportedModels?: () => Promise<ClaudeSdkModelInfo[]>
   supportedCommands?: () => Promise<SlashCommand[]>
 }
@@ -273,6 +275,12 @@ interface ClaudeSessionState {
    * quiet never produces one. Bounds "in progress" to activity actually seen.
    */
   backgroundTurnTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * Main-thread tool calls with no result yet. A tool running for minutes (a
+   * build, a test run, ffmpeg) writes nothing while it runs, so silence alone
+   * does not mean a background turn has gone quiet.
+   */
+  openToolIds: Set<string>
 }
 
 interface AgentCoordinatorArgs {
@@ -1109,6 +1117,9 @@ async function startClaudeSession(args: {
     },
     setFastMode: async (fastMode: boolean) => {
       await q.applyFlagSettings({ fastMode })
+    },
+    setEffort: async (effort: string | undefined) => {
+      await q.applyFlagSettings({ effortLevel: (effort ?? null) as "low" | "medium" | "high" | "max" | null })
     },
     supportedModels: async () => await q.supportedModels(),
     supportedCommands: async () => commandsRef.current ?? await q.supportedCommands(),
@@ -2361,10 +2372,16 @@ export class AgentCoordinator {
     // conversation carries over. The delegator instructions are part of the
     // system prompt, fixed at the same time, so a chat that became a
     // delegator or stopped being one restarts the same way.
+    //
+    // Effort is not a reason to restart when the session can take it live.
+    // A restart throws away the process — a cold start of a few seconds, a cold
+    // prompt cache, and every background shell or tool still running in it —
+    // and effort differs between senders all the time (the web composer, the
+    // phone, a sub-chat's report, a resume), so it was the commonest one.
     if (
       !session
       || session.localPath !== args.localPath
-      || session.effort !== args.effort
+      || (session.effort !== args.effort && !session.session.setEffort)
       || session.autoPlan !== args.autoPlan
       || session.delegator !== args.delegator
       || args.forkSession
@@ -2412,6 +2429,7 @@ export class AgentCoordinator {
         cancelledPromptSeqs: new Set(),
         lastResultAt: null,
         backgroundTurnTimer: null,
+        openToolIds: new Set(),
       }
       this.claudeSessions.set(args.chatId, session)
       void this.runClaudeSession(session)
@@ -2427,6 +2445,15 @@ export class AgentCoordinator {
       if (session.serviceTier !== args.serviceTier) {
         await session.session.setFastMode?.(args.serviceTier === "fast")
         session.serviceTier = args.serviceTier
+      }
+      if (session.effort !== args.effort && session.session.setEffort) {
+        // The turn still runs at the old effort if this fails, which beats
+        // failing it or tearing the session down over it.
+        await session.session.setEffort(args.effort).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          this.reportBackgroundError?.(`[claude] could not change effort on a live session: ${message}`)
+        })
+        session.effort = args.effort
       }
     }
 
@@ -2863,6 +2890,13 @@ export class AgentCoordinator {
       session.backgroundTurnTimer = null
       const current = this.activeTurns.get(session.chatId)
       if (!current || current.claudePromptSeq != null || current.pendingTool) return
+      // A tool still running is work, not silence: closing here read the chat
+      // as finished mid-build, and the user's next message landed on a turn
+      // that was still going. Check again later; its result re-arms anyway.
+      if (session.openToolIds.size > 0) {
+        this.armBackgroundTurnWatchdog(session)
+        return
+      }
       this.activeTurns.delete(session.chatId)
       this.emitStateChange(session.chatId)
       // Appending is a disk write, so it happens after the chat already reads
@@ -2919,6 +2953,15 @@ export class AgentCoordinator {
         }
 
         if (!event.entry || customToolEvents.skip(event.entry)) continue
+
+        if (!event.entry.parentToolUseId) {
+          if (event.entry.kind === "tool_call") session.openToolIds.add(event.entry.tool.toolId)
+          else if (event.entry.kind === "tool_result") session.openToolIds.delete(event.entry.toolId)
+          // A turn's end settles whatever it left open: an interrupt kills
+          // running tools, and an id left behind would hold every later
+          // background turn open forever.
+          else if (event.entry.kind === "result" || event.entry.kind === "interrupted") session.openToolIds.clear()
+        }
 
         const completedPromptSeqs = event.entry.kind === "result" || event.entry.kind === "interrupted"
           ? this.takeAnsweredClaudePrompts(session, event.promptIds, event.entry.kind === "interrupted" || event.entry.isError)
