@@ -315,8 +315,13 @@ export function getRelevantThreads(
     .sort((left, right) => relevantSortKey(right, draftStartTimes) - relevantSortKey(left, draftStartTimes))
 }
 
-/** How long a chat stays Relevant after it, or its draft, last moved. */
-export const RELEVANT_MAX_AGE_MS = 12 * 60 * 60 * 1000
+/**
+ * How long a chat stays Relevant after it, or its draft, last moved: about a
+ * working stretch. Long enough to hold the morning's chats through lunch,
+ * short enough that last night's are gone by the next morning. Marking a chat
+ * done is the way to clear it sooner.
+ */
+export const RELEVANT_MAX_AGE_MS = 6 * 60 * 60 * 1000
 
 /** Chat id → when its unsent draft appeared; see `useDraftStartTimes`. */
 export type DraftStartTimes = ReadonlyMap<string, number>
@@ -580,7 +585,11 @@ export function computeSidebarThreadSections(
     .filter(isHeldDelegator)
     .sort((left, right) => right.lastActivityAt - left.lastActivityAt || left.chatId.localeCompare(right.chatId))
   const unpinned = threads.filter((thread) => thread.row.pinnedAt == null && !isHeldDelegator(thread))
+  // Review shows in Relevant, so it keeps the same window: a reply nobody
+  // read or a question nobody answered weeks ago is not work in hand. It
+  // files under its date, unread dot and all.
   const review = getReviewThreads(unpinned, pendingSends)
+    .filter((thread) => nowMs - thread.lastActivityAt <= RELEVANT_MAX_AGE_MS)
   const inProgress = getInProgressThreads(
     unpinned,
     new Set(review.map((thread) => thread.chatId)),

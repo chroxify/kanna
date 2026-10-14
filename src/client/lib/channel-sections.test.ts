@@ -4,6 +4,7 @@ import { computeChannelSections, getChannelPeekGroups, RECENT_CHANNEL_DAYS } fro
 
 const NOW = new Date(2026, 9, 1, 12).getTime()
 const DAY = 24 * 60 * 60 * 1_000
+const HOUR = 60 * 60 * 1_000
 
 function chat(chatId: string, at: number, extra: Partial<SidebarChatRow> = {}): SidebarChatRow {
   return {
@@ -39,7 +40,7 @@ describe("computeChannelSections", () => {
   test("puts a project in the section of its highest-priority chat", () => {
     expect(sectionsOf([
       project("yesterday-and-older", [chat("a", NOW - DAY), chat("b", NOW - 9 * DAY)]),
-      project("today-and-relevant", [chat("c", NOW), chat("d", NOW - 9 * DAY, { unread: true })]),
+      project("today-and-relevant", [chat("c", NOW - DAY), chat("d", NOW - HOUR, { unread: true })]),
       project("running", [chat("e", NOW - DAY, { status: "running" }), chat("f", NOW)]),
       project("today", [chat("g", NOW)]),
     ])).toEqual([
@@ -113,7 +114,7 @@ describe("computeChannelSections", () => {
       project("delegator-running", [chat("a", NOW - 30 * DAY, { delegator: true, status: "running" })]),
       project("delegator-recent", [chat("b", NOW - DAY, { delegator: true })]),
       project("delegator-old", [chat("c", NOW - 30 * DAY, { delegator: true })]),
-      project("delegator-unread", [chat("d", NOW - 30 * DAY, { delegator: true, unread: true })]),
+      project("delegator-unread", [chat("d", NOW - HOUR, { delegator: true, unread: true })]),
       // Nothing has been said in it yet, so the project has no chat to show.
       project("delegator-empty", [chat("e", NOW, { delegator: true, lastMessageAt: undefined })]),
     ])).toEqual([
@@ -163,7 +164,7 @@ describe("getChannelPeekGroups", () => {
     expect(peek([
       chat("pinned", NOW - 9 * DAY, { pinnedAt: 1 }),
       chat("running", NOW, { status: "running" }),
-      chat("unread", NOW - DAY, { unread: true }),
+      chat("unread", NOW - HOUR, { unread: true }),
       chat("today", NOW),
       chat("yesterday", NOW - DAY),
     ])).toEqual([

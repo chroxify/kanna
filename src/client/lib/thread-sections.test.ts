@@ -606,18 +606,21 @@ describe("getRelevantThreads", () => {
     expect(kept.map((t) => t.chatId)).toEqual(["unsent"])
   })
 
-  test("a chat leaves when it is marked done, or after twelve hours untouched", () => {
+  test("a chat leaves when it is marked done, or after six hours untouched", () => {
     const data = makeData([
-      makeChatRow({ chatId: "fresh", title: "f", done: false, lastMessageAt: at(2026, 7, 15, 1) }),
+      makeChatRow({ chatId: "fresh", title: "f", done: false, lastMessageAt: at(2026, 7, 15, 7) }),
+      makeChatRow({ chatId: "old-unread", title: "u", unread: true, lastMessageAt: at(2026, 6, 24) }),
       makeChatRow({ chatId: "finished", title: "x", done: true, lastMessageAt: at(2026, 7, 15, 11) }),
       makeChatRow({ chatId: "stale", title: "s", done: false, lastMessageAt: at(2026, 7, 14, 23) }),
       makeChatRow({ chatId: "stale-draft", title: "d", lastMessageAt: at(2026, 6, 20) }),
     ])
-    const drafts = new Map([["stale-draft", at(2026, 7, 14, 20)]])
+    const drafts = new Map([["stale-draft", at(2026, 7, 15, 5)]])
 
     const sections = computeSidebarThreadSections(flattenSidebarThreads(data), NOW, drafts)
     expect(sections.relevant.map((t) => t.chatId)).toEqual(["fresh"])
     const bucketed = sections.buckets.flatMap((bucket) => bucket.threads.map((t) => t.chatId))
+    expect(sections.review).toEqual([])
+    expect(bucketed).toContain("old-unread")
     expect(bucketed).toContain("finished")
     expect(bucketed).toContain("stale")
     expect(bucketed).toContain("stale-draft")
@@ -774,8 +777,8 @@ describe("mergeRelevantThreads", () => {
     // Review's own order is oldest-first; merged it takes Relevant's ordering,
     // so the two sets interleave by activity rather than stacking.
     const data = makeData([
-      makeChatRow({ chatId: "unread-old", title: "a", unread: true, lastMessageAt: at(2026, 7, 9) }),
-      makeChatRow({ chatId: "dirty-mid", title: "b", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
+      makeChatRow({ chatId: "unread-old", title: "a", unread: true, lastMessageAt: at(2026, 7, 15, 7) }),
+      makeChatRow({ chatId: "dirty-mid", title: "b", done: false, lastMessageAt: at(2026, 7, 15, 9) }),
       makeChatRow({ chatId: "unread-new", title: "c", unread: true, lastMessageAt: at(2026, 7, 15) }),
       makeChatRow({ chatId: "clean", title: "d", lastMessageAt: at(2026, 7, 14) }),
     ])
