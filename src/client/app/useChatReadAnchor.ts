@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react"
 import type { ResolvedChatReadAnchor } from "../../shared/types"
+import { latchReadAnchor, readRememberedReadAnchor, rememberReadAnchor, sameReadAnchor, type LatchedReadAnchor } from "./chatReadAnchorCache"
 import type { KannaSocket } from "./socket"
 
 /**
@@ -28,12 +29,26 @@ export type ReadAnchorLayoutSource = ReadAnchorLayout | (() => ReadAnchorLayout 
 
 export interface ChatReadAnchorState {
   /**
-   * False until the chat's first snapshot lands. Consumers must wait for this
-   * before restoring scroll, otherwise they'd land on the fallback and then
-   * visibly jump when the anchor arrives.
+   * False until it is known where the chat opens: from this browser's copy of
+   * the position, or else from the chat's first snapshot. Consumers must wait
+   * for this before restoring scroll, otherwise they'd land on the fallback
+   * and then visibly jump when the anchor arrives.
    */
   resolved: boolean
+  /**
+   * Changes at most once after it resolves: when the chat opened from this
+   * browser's copy and the server's first word names a different place
+   * (another device moved it).
+   */
   anchor: ResolvedChatReadAnchor | null
+  /**
+   * The chat's first snapshot is in: the anchor is the server's, and the
+   * transcript is the server's too, not a cached window that may end short
+   * of it. A consumer that restored before this checks its position once
+   * more when it turns true, and moves if where to land has changed and the
+   * reader has not scrolled.
+   */
+  confirmed: boolean
 }
 
 export interface ChatReadAnchorSync {
@@ -53,6 +68,10 @@ export interface ChatReadAnchorSync {
  * probe followed by a re-subscription at a wider limit, which fetched the
  * transcript twice.
  *
+ * A chat this browser has seen opens from its own copy of the position
+ * (`chatReadAnchorCache`), so a transcript painted from the cache is in place
+ * before the snapshot lands. The snapshot then confirms it or corrects it.
+ *
  * Only the first snapshot per chat is consulted, so a device sitting on an
  * open chat never gets its viewport moved because another device scrolled.
  * Writes are throttled and ack-only.
@@ -66,20 +85,45 @@ export function useChatReadAnchor(
   // Latched per chat: later snapshots carry a moving anchor (it is recomputed
   // as entries append), and adopting those would let a background update
   // retarget a restore that already happened.
-  const latchedRef = useRef<{ chatId: string | null; anchor: ResolvedChatReadAnchor | null }>({
-    chatId: null,
-    anchor: null,
-  })
-  if (latchedRef.current.chatId !== activeChatId) {
-    latchedRef.current = { chatId: activeChatId, anchor: chatReady ? snapshotAnchor ?? null : null }
-  } else if (!latchedRef.current.anchor && chatReady && snapshotAnchor) {
-    latchedRef.current = { chatId: activeChatId, anchor: snapshotAnchor }
+  const latchedRef = useRef<LatchedReadAnchor>({ chatId: null, anchor: null, source: "none" })
+  // The snapshot's anchor counts only once it is there. `chatReady` alone
+  // does not say so: on the render that switches chats it is still true for
+  // the chat being left, while the new chat's transcript is already drawn
+  // from the cache. Reading that as "no stored position" would open the chat
+  // on its fallback.
+  const serverAnchor = activeChatId && chatReady ? snapshotAnchor : undefined
+  const previousLatch = latchedRef.current
+  const latched = latchReadAnchor(
+    previousLatch,
+    activeChatId,
+    serverAnchor,
+    activeChatId && previousLatch.chatId !== activeChatId ? readRememberedReadAnchor(activeChatId) : null,
+  )
+  if (latched !== previousLatch) {
+    latchedRef.current = latched
+    // The server's first word becomes this browser's copy, unless the copy
+    // has moved since the chat opened: the reader scrolled in the moment
+    // before the snapshot came, and their position is the newer one.
+    //
+    // Only for a chat that was waiting on that word. A latch that starts
+    // with a snapshot in hand is a chat already open, latched again after
+    // React rendered another chat and came back (a push landing mid-switch
+    // does that). Its snapshot's anchor is from when it opened, and the copy
+    // holds everything the reader has done since.
+    if (activeChatId && latched.source === "server" && serverAnchor !== undefined) {
+      const local = readRememberedReadAnchor(activeChatId)
+      const wasWaiting = previousLatch.chatId === activeChatId
+      if (!local || (wasWaiting && sameReadAnchor(local.anchor, previousLatch.anchor))) {
+        rememberReadAnchor(activeChatId, serverAnchor)
+      }
+    }
   }
 
+  const resolved = !activeChatId || latched.source !== "none"
+  const confirmed = !activeChatId || latched.source === "server"
   const anchorState = useMemo<ChatReadAnchorState>(
-    () => ({ resolved: !activeChatId || chatReady, anchor: latchedRef.current.anchor }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- latch is keyed by chat + readiness
-    [activeChatId, chatReady, latchedRef.current.anchor]
+    () => ({ resolved, anchor: latched.anchor, confirmed }),
+    [resolved, latched.anchor, confirmed]
   )
 
   const pendingRef = useRef<{
@@ -114,6 +158,9 @@ export function useChatReadAnchor(
     if (key === lastWrittenKeyRef.current) return
     lastWrittenKeyRef.current = key
     lastWriteAtRef.current = Date.now()
+    // This browser's copy moves with every write, so coming back to the chat
+    // opens where it was left without waiting on the server.
+    rememberReadAnchor(pending.chatId, { messageId: pending.messageId, atEnd: pending.atEnd, ...(layout ?? {}) })
 
     void socket.command({
       type: "chat.setReadAnchor",
@@ -130,6 +177,13 @@ export function useChatReadAnchor(
   const reportReadAnchor = useCallback((messageId: string, atEnd: boolean, layout?: ReadAnchorLayoutSource) => {
     if (!activeChatId) return
     pendingRef.current = { chatId: activeChatId, messageId, atEnd, layout }
+    // A measured position, not a function to measure one later, is the
+    // transcript's last sample as it is taken down. Kept here at once: the
+    // write goes out when effects run, after the transcript cache has already
+    // been cut to the position on record.
+    if (typeof layout !== "function") {
+      rememberReadAnchor(activeChatId, { messageId, atEnd, ...(layout ?? {}) })
+    }
     // Already scheduled — the newer position just replaces the pending one.
     if (timerRef.current !== null) return
     const delay = Math.max(0, READ_ANCHOR_WRITE_INTERVAL_MS - (Date.now() - lastWriteAtRef.current))

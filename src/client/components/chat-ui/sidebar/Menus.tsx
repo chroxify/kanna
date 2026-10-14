@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import { Archive, Code, Copy, EyeOff, FolderOpen, Github, Pencil, PencilOff, Pin, PinOff, RotateCcw, Split, SquarePen, Trash2, UserRoundPlus } from "lucide-react"
+import { DelegatorIcon } from "../delegator-icon"
 import { getRepoUrlLabel } from "../../../../shared/git-url"
 import {
   ContextMenu,
@@ -160,11 +161,21 @@ export function ChatRowMenu({
   onRestore,
   onClearDraft,
   onDelete,
+  delegator,
+  onToggleDelegator,
   leadingItems,
   children,
 }: {
   pinned?: boolean
   onTogglePin?: () => void
+  /** The chat is a delegator. */
+  delegator?: boolean
+  /**
+   * Makes the chat a delegator, or an ordinary chat again. Absent where that
+   * cannot be done: an archived chat, and a harness with no chat tools to
+   * delegate with.
+   */
+  onToggleDelegator?: () => void
   canFork?: boolean
   /** Archived chats swap the Archive item for a leading Restore item. */
   archived?: boolean
@@ -217,6 +228,14 @@ export function ChatRowMenu({
             <ContextMenuItem onSelect={onTogglePin}>
               {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
               <span className="text-xs font-medium">{pinned ? "Unpin" : "Pin"}</span>
+            </ContextMenuItem>
+          ) : null}
+          {onToggleDelegator ? (
+            // The chat's agent is told at the start of a turn, so one that is
+            // running goes on as it was until its next.
+            <ContextMenuItem onSelect={onToggleDelegator} title="Takes effect on this chat's next turn">
+              <DelegatorIcon className="h-3.5 w-3.5" />
+              <span className="text-xs font-medium">{delegator ? "Stop Delegating" : "Make Delegator"}</span>
             </ContextMenuItem>
           ) : null}
           {/* Draft leads: its own section, for something only this chat has and

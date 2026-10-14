@@ -10,6 +10,8 @@ import { CHAT_INPUT_ATTRIBUTE } from "../app/chatFocusPolicy"
  *      chat composer (a search box, the plan's edit box, a terminal).
  *   2. The viewer's pane, if it is open, closes. From anywhere, the main
  *      composer and a previewed chat's composer included, turn running or not.
+ *      On a delegator's page that is one level at a time: back to the list
+ *      of its chats from whatever is over it, then shut (`lib/viewer-levels`).
  *   3. Only with no pane open does Escape reach a running turn, and then it
  *      has to be held (`hold-to-confirm`): a press only starts the hold.
  *
@@ -43,6 +45,7 @@ export type EscapeAction =
   | "pass"
   /** To swallow and do nothing with: a repeat of a press already spent. */
   | "ignore"
+  /** Close the pane, or step it back a level where something is under it: whatever its Escape does. */
   | "close-pane"
   /** Begin the hold that interrupts the turn if it is kept up. */
   | "hold-to-interrupt"

@@ -1,6 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom"
 import { Flower } from "lucide-react"
+import { ChatMenuCommandsProvider, type ChatMenuCommands } from "../components/chat-ui/chat-menu-commands"
 import { StandaloneShareDialog } from "../components/chat-ui/StandaloneShareDialog"
 import { CommandPalette } from "../components/command-palette/CommandPalette"
 import { AppDialogProvider } from "../components/ui/app-dialog"
@@ -458,7 +459,17 @@ function KannaLayout() {
     })
   }, [navigate, resolveChatNotificationMessage])
 
+  // For every chat menu under the layout; see `ChatMenuCommands`.
+  const chatMenuCommands = useMemo<ChatMenuCommands>(() => ({
+    setDelegator: (chatId, delegator) => {
+      void state.socket.command({ type: "chat.setDelegator", chatId, delegator }).catch((error) => {
+        console.warn("[kanna] could not change whether the chat delegates:", error)
+      })
+    },
+  }), [state.socket])
+
   return (
+    <ChatMenuCommandsProvider value={chatMenuCommands}>
     <div className="flex h-[100dvh] min-h-[100dvh] overflow-hidden">
       {sidebarElement}
       <Outlet context={state} />
@@ -476,6 +487,7 @@ function KannaLayout() {
         onCopyLink={state.handleCopyStandaloneShareLink}
       />
     </div>
+    </ChatMenuCommandsProvider>
   )
 }
 

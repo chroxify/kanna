@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import type { ChatSnapshot, HydratedTranscriptMessage, ProviderCatalogEntry, TranscriptEntry, TranscriptOutlineEntry } from "../../shared/types"
-import { DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES, trimTranscriptWindow } from "../../shared/transcript-window"
+import { DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES } from "../../shared/transcript-window"
 import { useAppDialog } from "../components/ui/app-dialog"
 import { processTranscriptMessages } from "../lib/parseTranscript"
 import { useAppSettingsStore } from "../stores/appSettingsStore"
 import { findSidebarChat, useSidebarChatStatus } from "../stores/sidebarStore"
 import {
   cachedWindowToMessages,
+  canPaintCachedWindow,
   createTranscriptCacheWriter,
+  peekPaintableMemoryWindow,
   readCachedWindow,
   readMemoryCachedWindow,
+  trimCachedWindow,
   type CachedTranscriptWindow,
 } from "./chatTranscriptCache"
 import { canCancelStatus, getLatestToolIds, hasNoTurnStatus, isProcessingStatus } from "./derived"
@@ -67,7 +70,11 @@ export function useChatSession({ socket, chatId, fallbackProviders }: {
   const navigate = useNavigate()
   const dialog = useAppDialog()
   const [chatSnapshot, setChatSnapshot] = useState<ChatSnapshot | null>(null)
-  const [cachedTranscript, setCachedTranscript] = useState<CachedTranscriptWindow | null>(null)
+  // From memory in the first render, as `useKannaState` does on a switch, so
+  // the chat mounts with its rows and at its reader's place.
+  const [cachedTranscript, setCachedTranscript] = useState<CachedTranscriptWindow | null>(
+    () => peekPaintableMemoryWindow(chatId, transcriptWindowSize()),
+  )
   const [chatReady, setChatReady] = useState(false)
   const [commandError, setCommandError] = useState<string | null>(null)
   const [optimisticUserPrompts, setOptimisticUserPrompts] = useState<OptimisticUserPrompt[]>([])
@@ -107,14 +114,14 @@ export function useChatSession({ socket, chatId, fallbackProviders }: {
     function subscribeToChat(cached: CachedTranscriptWindow | null) {
       if (cancelled || subscribed) return
       subscribed = true
-      const trimmed = cached ? trimTranscriptWindow(cachedWindowToMessages(cached), transcriptWindowSize()) : null
-      const lastEntryId = trimmed?.messages[trimmed.messages.length - 1]?._id
+      const trimmed = cached ? trimCachedWindow(cached, transcriptWindowSize()) : null
+      const lastEntryId = trimmed?.entries[trimmed.entries.length - 1]?._id
       const span = trimmed && lastEntryId
-        ? { start: trimmed.startIndex, end: trimmed.startIndex + trimmed.messages.length, endEntryId: lastEntryId }
+        ? { start: trimmed.startIndex, end: trimmed.startIndex + trimmed.entries.length, endEntryId: lastEntryId }
         : null
       if (trimmed && span) {
-        base = trimmed
-        setCachedTranscript({ ...cached!, entries: trimmed.messages, startIndex: trimmed.startIndex })
+        base = cachedWindowToMessages(trimmed)
+        setCachedTranscript(canPaintCachedWindow(trimmed) ? trimmed : null)
       }
       unsubscribe = socket.subscribe<ChatSnapshot | null>(
         { type: "chat", chatId, ...(span ? { cachedSpan: span } : {}) },
@@ -148,8 +155,8 @@ export function useChatSession({ socket, chatId, fallbackProviders }: {
           return
         }
         if (receivedSnapshot || !cached) return
-        const trimmed = trimTranscriptWindow(cachedWindowToMessages(cached), transcriptWindowSize())
-        setCachedTranscript({ ...cached, entries: trimmed.messages, startIndex: trimmed.startIndex })
+        const trimmed = trimCachedWindow(cached, transcriptWindowSize())
+        if (canPaintCachedWindow(trimmed)) setCachedTranscript(trimmed)
       })
     }
 
@@ -300,7 +307,7 @@ export function useChatSession({ socket, chatId, fallbackProviders }: {
     commandError,
     readAnchorState,
     reportReadAnchor,
-    hasOlderMessages: (snapshot?.startIndex ?? 0) > 0,
+    hasOlderMessages: (snapshot?.startIndex ?? (cachedTranscript?.chatId === chatId ? cachedTranscript.startIndex : 0)) > 0,
     transcriptOutline: snapshot?.outline ?? EMPTY_OUTLINE,
     loadOlderMessages,
     isLoadingOlderMessages,

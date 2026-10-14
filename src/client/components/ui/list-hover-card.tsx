@@ -129,7 +129,6 @@ export function ListHoverCard({
   side,
   sideOffset = 15,
   alignOffset = 0,
-  keepOpenOnRowClick = false,
   holdRowUnderPointerOnMount = false,
   pinnedKey = null,
   onUnpin,
@@ -153,12 +152,6 @@ export function ListHoverCard({
    */
   sideOffset?: number
   /**
-   * A click anywhere outside the card closes it, the row it describes
-   * included: the click took you somewhere, and the card would hang over it.
-   * Set where clicking a row acts on its card instead of leaving it.
-   */
-  keepOpenOnRowClick?: boolean
-  /**
    * Treats the row the pointer is already on when this mounts as dismissed,
    * until the pointer leaves it. For a list that can be rebuilt by a click
    * on one of its own rows (the chat tabs: opening a chat in another project
@@ -173,10 +166,9 @@ export function ListHoverCard({
    * and what it opened should stay until another decision closes it, the way
    * a menu bar's menu does. While pinned, hovering other rows moves nothing.
    *
-   * The owner sets it (on a row click, typically with `keepOpenOnRowClick`)
-   * and clears it; `onUnpin` is the card asking for that, on Escape or a
-   * click outside. Clearing it leaves the card closed until the pointer
-   * reaches another row, like any dismissal.
+   * The owner sets it and clears it; `onUnpin` is the card asking for that,
+   * on Escape or a click outside. Clearing it leaves the card closed until
+   * the pointer reaches another row, like any dismissal.
    */
   pinnedKey?: string | null
   onUnpin?: () => void
@@ -605,13 +597,6 @@ export function ListHoverCard({
           onCloseAutoFocus={(event) => event.preventDefault()}
           onPointerLeave={handleContentPointerLeave}
           style={{ "--bridge": `${Math.max(0, sideOffset) + bridgeOverlap}px` } as CSSProperties}
-          onInteractOutside={(event) => {
-            const target = event.target
-            if (keepOpenOnRowClick && target instanceof Element && target.closest(`[${rowAttribute}]`)
-              && containerRef.current?.contains(target)) {
-              event.preventDefault()
-            }
-          }}
           className={cn(
             HOVER_CARD_SURFACE_CLASSNAME,
             // The bridge: an invisible part of the card over the gap to the

@@ -39,6 +39,28 @@ export const TOOL_CARD_CAPTION_CLASS = "truncate pl-[26px] text-xs leading-4 tex
 export const TOOL_QUOTE_CLASS = "not-prose flex min-w-0 flex-col gap-0.5 rounded-xl border border-border/50 bg-transparent px-2.5 py-1.5 text-left text-sm"
 
 /**
+ * A quote's measurements across, in px, for what has to line up with it from
+ * outside: the line that joins a quote to the bubble under it stands on the
+ * centre of the quote's leading mark (`ReplyQuoteRow`).
+ *
+ * The classes above are what draw these and Tailwind needs them written out,
+ * so they cannot be built from this. A test holds the two to each other: the
+ * border and `px-2.5` in `TOOL_QUOTE_CLASS`, the mark's `size-4` slot, and
+ * the caption's 26px indent, which is the mark and the gap after it.
+ */
+export const QUOTE_GEOMETRY = { borderPx: 1, paddingXPx: 10, markPx: 16, markGapPx: 10 } as const
+/** The centre of a quote's leading mark, from the quote's outer left edge. */
+export const QUOTE_MARK_CENTER_PX = QUOTE_GEOMETRY.borderPx + QUOTE_GEOMETRY.paddingXPx + QUOTE_GEOMETRY.markPx / 2
+
+/**
+ * The slot a card's leading mark is drawn in: one size for every mark, with
+ * the mark centred in it. Most marks are the slot's size. A spinner is 14px,
+ * and drawn bare it sat 1px left of where every other mark's centre is and
+ * pulled the title 2px with it.
+ */
+export const TOOL_CARD_MARK_SLOT_CLASS = "flex size-4 shrink-0 items-center justify-center"
+
+/**
  * How a card's border lights under the pointer and while its hover card is
  * up. A quote's lit border is the card's at half strength too, so the step
  * from resting to lit is the same on both.

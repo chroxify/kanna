@@ -1,5 +1,6 @@
 import { DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES, trimTranscriptWindow } from "../../shared/transcript-window"
 import type { ChatSnapshot, TranscriptEntry } from "../../shared/types"
+import { forgetReadAnchor, readRememberedReadAnchor } from "./chatReadAnchorCache"
 
 /**
  * Local cache of each chat's loaded transcript window.
@@ -77,6 +78,71 @@ export function readMemoryCachedWindow(chatId: string) {
   return cached
 }
 
+/**
+ * The memory window as it is, without counting as a use. For a read made
+ * while rendering, which React may run more than once or throw away.
+ */
+function peekMemoryCachedWindow(chatId: string) {
+  return memoryWindows.get(chatId) ?? null
+}
+
+/** The entry a chat's window has to reach back to: where the reader was, unless that is the end. */
+function readPositionEntryId(chatId: string) {
+  const anchor = readRememberedReadAnchor(chatId)?.anchor
+  return anchor && !anchor.atEnd ? anchor.messageId : undefined
+}
+
+const trimmedWindows = new WeakMap<CachedTranscriptWindow, { key: string; trimmed: CachedTranscriptWindow }>()
+
+/**
+ * A cached window cut to what an open paints: the size a fresh open would
+ * get, reaching back to the reader's position as the server's window does.
+ *
+ * The same window asked for twice gives the same object. An open asks while
+ * it renders and again when it subscribes, and two arrays holding the same
+ * entries would be a second pass over the transcript for nothing.
+ */
+export function trimCachedWindow(cached: CachedTranscriptWindow, assistantMessages: number): CachedTranscriptWindow {
+  const anchorEntryId = readPositionEntryId(cached.chatId)
+  const key = `${assistantMessages}:${anchorEntryId ?? ""}`
+  const held = trimmedWindows.get(cached)
+  if (held?.key === key) return held.trimmed
+  const cut = trimTranscriptWindow(cachedWindowToMessages(cached), assistantMessages, anchorEntryId)
+  const trimmed = cut.startIndex === cached.startIndex && cut.messages === cached.entries
+    ? cached
+    : { ...cached, entries: cut.messages, startIndex: cut.startIndex }
+  trimmedWindows.set(cached, { key, trimmed })
+  return trimmed
+}
+
+/**
+ * Whether a cached window can be drawn before the server answers.
+ *
+ * Only when it is known where the chat opens, and the window holds that
+ * place: the end, the fallback for a chat with no stored position, or the
+ * message the reader was at. Otherwise the window would be drawn at its end
+ * and moved when the server said where the reader was, which is the jump
+ * this exists to remove. Such a chat waits for the server, as one with no
+ * cache does.
+ */
+export function canPaintCachedWindow(window: CachedTranscriptWindow): boolean {
+  const remembered = readRememberedReadAnchor(window.chatId)
+  if (!remembered) return false
+  const anchor = remembered.anchor
+  return !anchor || anchor.atEnd || window.entries.some((entry) => entry._id === anchor.messageId)
+}
+
+/**
+ * The window a chat can be drawn from in the same render that opens it, or
+ * null. Memory only: disk is a read away, and the server may be too.
+ */
+export function peekPaintableMemoryWindow(chatId: string, assistantMessages: number): CachedTranscriptWindow | null {
+  const cached = peekMemoryCachedWindow(chatId)
+  if (!cached) return null
+  const trimmed = trimCachedWindow(cached, assistantMessages)
+  return canPaintCachedWindow(trimmed) ? trimmed : null
+}
+
 function setMemoryWindow(window: CachedTranscriptWindow) {
   memoryWindows.delete(window.chatId)
   memoryWindows.set(window.chatId, window)
@@ -123,7 +189,11 @@ export function persistWindow(chatId: string, snapshot: Pick<ChatSnapshot, "mess
 
 /** Trim the window, hold it in memory, and queue it for disk. */
 function retainWindow(value: CachedTranscriptWindow) {
-  const trimmed = trimTranscriptWindow(cachedWindowToMessages(value), DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES)
+  const trimmed = trimTranscriptWindow(
+    cachedWindowToMessages(value),
+    DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+    readPositionEntryId(value.chatId),
+  )
   const window = { ...value, startIndex: trimmed.startIndex, entries: trimmed.messages }
   setMemoryWindow(window)
   diskWrites.set(value.chatId, window)
@@ -199,6 +269,7 @@ export async function readCachedWindow(chatId: string): Promise<CachedTranscript
 export async function deleteCachedWindow(chatId: string): Promise<void> {
   memoryWindows.delete(chatId)
   diskWrites.delete(chatId)
+  forgetReadAnchor(chatId)
   const db = await getDatabase()
   if (!db) return
   try {

@@ -1,5 +1,6 @@
 import { memo, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ListHoverCard } from "../../ui/list-hover-card"
+import { waitingOnLabel } from "../../../lib/waiting-on"
 import { TURN_CARD_ROW_INSET, TurnCardMessage, TurnCardMetaRow, TurnCardTimingRow } from "../../ui/turn-card"
 import { GitBranch, PencilLine } from "lucide-react"
 import { getRepoUrlLabel } from "../../../../shared/git-url"
@@ -334,7 +335,7 @@ export function ChatHoverCardContent({
     // A turn has landed, but the chat has not: saying when would read as the
     // time it finished. The slot says what it is waiting on instead.
     : row.status === "waiting_on_subagent"
-      ? "Waiting on a subagent"
+      ? waitingOnLabel(row.waitingOn)
       : formatPromptTimestamp(new Date(row.lastTurnEndedAt).toISOString())
   // Both blocks are clickable whenever the surface offers the jump at all. The
   // card doesn't identify the messages and doesn't need to: it shows a chat's

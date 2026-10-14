@@ -1571,6 +1571,56 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
+  test("a chat made a delegator restarts its Claude session, which resumes with the delegator instructions", async () => {
+    const startSessionCalls: Array<{ delegator?: boolean; sessionToken: string | null }> = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async (args) => {
+        startSessionCalls.push({ delegator: args.delegator, sessionToken: args.sessionToken })
+        const events = new AsyncEventQueue<any>()
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => events.close(),
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async () => {
+            events.push({ type: "session_token" as const, sessionToken: "claude-session-1" })
+            events.push({
+              type: "transcript" as const,
+              entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+            })
+          },
+        }
+      },
+    })
+    const send = (content: string) => coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content, model: "claude-opus-4-1" })
+
+    await send("one")
+    await waitFor(() => store.turnFinishedCount === 1)
+    await send("two")
+    await waitFor(() => store.turnFinishedCount === 2)
+    // The system prompt is fixed when the session starts, so the flag is part
+    // of what a session is reused for.
+    ;(store.chat as { delegator?: true }).delegator = true
+    await send("three")
+    await waitFor(() => store.turnFinishedCount === 3)
+    delete (store.chat as { delegator?: true }).delegator
+    await send("four")
+    await waitFor(() => store.turnFinishedCount === 4)
+
+    expect(startSessionCalls).toEqual([
+      { delegator: false, sessionToken: null },
+      { delegator: true, sessionToken: "claude-session-1" },
+      { delegator: false, sessionToken: "claude-session-1" },
+    ])
+    coordinator.dispose()
+  })
+
   test("a Claude turn the CLI started on its own does not end the user's turn", async () => {
     const events = new AsyncEventQueue<any>()
     const promptIds: string[] = []
@@ -3328,6 +3378,30 @@ describe("waiting on a subagent", () => {
     agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 2000)
     expect(agent.getChatStatuses().has("chat-1")).toBe(false)
     expect(agent.getSubagents("chat-1").find((task) => task.id === "sh1")).toMatchObject({ status: "running" })
+  })
+
+  test("counts the agents a chat is waiting on, a workflow and its own agents as one", () => {
+    const agent = coordinator()
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a1", type: "subagent", label: "explore" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "a2", type: "subagent", label: "review" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "sh1", type: "shell", label: "bun run dev" }, 1000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "m1", type: "monitor", label: "Watch CI" }, 1000)
+    expect(agent.getWaitingOn("chat-1")).toEqual({ chats: 0, agents: 2 })
+
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "w1", type: "workflow", label: "review", workflowName: "review" }, 2000)
+    agent.applySubagentActivity("chat-1", { kind: "started", id: "wa1", type: "subagent", label: "general-purpose" }, 2100)
+    agent.applySubagentActivity("chat-1", {
+      kind: "progress",
+      id: "w1",
+      workflow: { phases: [], agents: [{ index: 0, label: "Review", state: "running", agentId: "wa1" }] },
+    }, 2200)
+    // The workflow's agent is the workflow's: three, not four.
+    expect(agent.getWaitingOn("chat-1")).toEqual({ chats: 0, agents: 3 })
+
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "a1", failed: false }, 3000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "w1", failed: false }, 3000)
+    agent.applySubagentActivity("chat-1", { kind: "stopped", id: "wa1", failed: false }, 3000)
+    expect(agent.getWaitingOn("chat-1")).toEqual({ chats: 0, agents: 1 })
   })
 
   test("only work handed to another agent is a wait", () => {

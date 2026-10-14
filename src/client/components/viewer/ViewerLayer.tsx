@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type Ref } from "react"
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from "react"
 import { PANE_CLOSE_MS, prefersReducedMotion } from "../../app/paneAnimation"
 import type { ChatViewerState } from "../../stores/rightSidebarStore"
 import { isChatTrailItem, useChatViewer, useViewerStore, type ViewerItem } from "../../stores/viewerStore"
@@ -6,7 +6,9 @@ import type { DiffViewerContext } from "../chat-ui/git/DiffViewer"
 import type { ChatPreviewContext } from "../../app/ChatPage/ChatPreview"
 import { OpenLocalLinkProvider, type OpenLocalLinkTarget } from "../messages/shared"
 import { cn } from "../../lib/utils"
-import { ViewerPlacementProvider, type ViewerPlacement } from "./ViewerSurface"
+import { viewerLevelBelow } from "../../lib/viewer-levels"
+import { viewerCardEnters, viewerPaneState, type ViewerPaneState } from "../../lib/viewer-split"
+import { ViewerCardPlaceholder, ViewerFloorProvider, ViewerMotionProvider, ViewerPlacementProvider, type ViewerFloorState, type ViewerMotion, type ViewerPlacement } from "./ViewerSurface"
 
 // Each view loads with its first use: the diff renderer (shiki grammars),
 // recharts and the markdown/table views are none of them first paint.
@@ -19,6 +21,7 @@ const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.F
 // the export viewer mounts this layer too, and never shows a chat.
 const ChatPreview = lazy(() => import("../../app/ChatPage/ChatPreview").then((m) => ({ default: m.ChatPreview })))
 // React Flow comes with it, and only a page that can preview a chat shows one.
+const DelegatedList = lazy(() => import("../../app/ChatPage/DelegatedList").then((m) => ({ default: m.DelegatedList })))
 const GraphViewer = lazy(() => import("../../app/ChatGraph/GraphViewer").then((m) => ({ default: m.GraphViewer })))
 
 /**
@@ -38,7 +41,8 @@ function showsOn(item: ViewerItem | null, projectId: string | null | undefined) 
  * transcript, composer, terminal) when expanded or on a phone; the export
  * viewer over the whole page. It covers what it's placed in with the page
  * background, so nothing behind shows through, and sets the card 8px in, the
- * widget column's gutter.
+ * widget column's gutter. Not at the bottom where the page has a pane for
+ * it: there the card runs off the bottom edge (see `ViewerSurface`).
  *
  * `diff` is what the page knows about the working tree; a page without one
  * (the export viewer) never opens a diff or a project file. `onOpenLocalLink`
@@ -65,8 +69,55 @@ export function ViewerLayer({ diff, chat, className, onOpenLocalLink, placement,
   // Counted while mounted, shown or not: it is what tells `useOpenChat` that
   // a chat clicked on this page has a previewer to open in.
   const canShowChat = Boolean(chat)
+  // In a pane with a floor (a delegator's page) what the views are handed
+  // as Close is Escape's step back a level, and their card draws a Back
+  // arrow beside an X that shuts the pane (`ViewerSurface`).
+  const floor = useViewerStore((store) => store.floor)
+  const viewer = presented ? presented.viewer : live
+  const stepBack = useViewerStore((store) => store.stepBack)
+  const shut = useViewerStore((store) => store.shut)
+  const below = floor && viewer ? viewerLevelBelow(viewer, floor) : null
+  const hasBack = below !== null && below !== "closed"
+  const backKind = hasBack ? below.item.kind : null
+  const floorState = useMemo<ViewerFloorState | null>(() => (floor ? {
+    onBack: hasBack ? stepBack : null,
+    backLabel: backKind === "chat" ? "Back to chat" : backKind === "graph" ? "Back to graph" : "Back to delegated chats",
+    onShut: shut,
+  } : null), [backKind, floor, hasBack, shut, stepBack])
   useEffect(() => (canShowChat ? useViewerStore.getState().registerChatPreviewHost() : undefined), [canShowChat])
-  if (!item || !showsOn(item, diff?.projectId) || (isChatTrailItem(item) && !chat)) return null
+  // A page that previews chats will be asked for one, and for a delegator's
+  // list: fetched ahead, in a quiet moment, so the first of each opens into
+  // the pane as it stands and not after a beat of empty card.
+  useEffect(() => {
+    if (!canShowChat) return
+    const timer = window.setTimeout(() => {
+      void import("../../app/ChatPage/ChatPreview")
+      void import("../../app/ChatPage/DelegatedList")
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [canShowChat])
+
+  // What a card mounting now animates (`ViewerMotion`): its entrance when
+  // the pane is opening, and otherwise nothing but a fade of its body. Each
+  // kind of content is its own card, so "the pane was already open" is known
+  // only here. `was` is the pane as of the last commit, held in state so
+  // that catching it up renders again: the card mounted by the commit that
+  // opens the pane enters, and one mounted any time after (other content,
+  // or its code arriving, which re-renders nothing above it) is told the
+  // pane is open.
+  const shown = item !== null && showsOn(item, diff?.projectId) && !(isChatTrailItem(item) && !chat)
+  const paneState = viewerPaneState(shown, viewer?.expanded ?? false)
+  const [was, setWas] = useState<ViewerPaneState>("closed")
+  const cardEnters = viewerCardEnters(was, paneState)
+  useLayoutEffect(() => {
+    setWas(paneState)
+  }, [paneState])
+  const changedByKey = useViewerStore((store) => store.changedByKey)
+  const motion = useMemo<ViewerMotion>(
+    () => ({ cardEnters, bodyEnters: !cardEnters && !changedByKey }),
+    [cardEnters, changedByKey],
+  )
+  if (!item || !shown) return null
   // In a pane, the pane closes around it. Over the chat it leaves the way it
   // came, faded and a touch small, quicker than it came.
   const overlayExit = exiting && !(placement && !placement.expanded)
@@ -77,13 +128,16 @@ export function ViewerLayer({ diff, chat, className, onOpenLocalLink, placement,
       inert={exiting || undefined}
       className={cn(
         "absolute inset-0 z-30 bg-background p-2",
+        placement && "pb-0",
         overlayExit && "opacity-0 transition-opacity duration-150 ease-snappy motion-safe:[&_[data-viewer-surface]]:scale-[0.98]",
         className,
       )}
     >
       <ViewerPlacementProvider value={placement ?? null}>
+      <ViewerFloorProvider value={floorState}>
+      <ViewerMotionProvider value={motion}>
       <OpenLocalLinkProvider onOpenLocalLink={onOpenLocalLink}>
-        <Suspense fallback={null}>
+        <Suspense fallback={<ViewerCardPlaceholder />}>
           {item.kind === "diff" && diff ? (
             <DiffViewer
               projectId={item.projectId}
@@ -107,9 +161,13 @@ export function ViewerLayer({ diff, chat, className, onOpenLocalLink, placement,
             <GraphViewer item={item} context={chat} onClose={close} />
           ) : item.kind === "chat" && chat ? (
             <ChatPreview item={item} context={chat} onClose={close} />
+          ) : item.kind === "delegated" ? (
+            <DelegatedList item={item} onClose={close} />
           ) : null}
         </Suspense>
       </OpenLocalLinkProvider>
+      </ViewerMotionProvider>
+      </ViewerFloorProvider>
       </ViewerPlacementProvider>
     </div>
   )

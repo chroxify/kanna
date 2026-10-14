@@ -7,6 +7,7 @@ import type {
   ChatTouchedFilesResult,
   KannaStatus,
   LocalProjectsSnapshot,
+  WaitingOn,
   SidebarChatRow,
   SidebarData,
   SidebarProjectGroup,
@@ -40,6 +41,15 @@ export function deriveStatus(chat: ChatRecord, activeStatus?: KannaStatus): Kann
   if (activeStatus) return activeStatus
   if (chat.lastTurnOutcome === "failed") return "failed"
   return "idle"
+}
+
+/**
+ * The count that goes with a status, on a row or a chat's runtime. Only with
+ * the status it explains: a chat whose last turn failed reads `failed` while
+ * work under it goes on, and a count there would be of nothing it shows.
+ */
+function waitingOnField(status: KannaStatus, waitingOn: WaitingOn | undefined) {
+  return status === "waiting_on_subagent" && waitingOn ? { waitingOn } : {}
 }
 
 function getSidebarChatSortTimestamp(chat: ChatRecord) {
@@ -200,6 +210,8 @@ export function deriveSidebarData(
     pendingToolKinds?: Map<string, string>
     /** Question or plan text per waiting chat; only read for chats in `pendingToolKinds`. */
     pendingUserInputPreviews?: Map<string, string>
+    /** What each chat that is waiting on a subagent is waiting on. */
+    waitingOn?: ReadonlyMap<string, WaitingOn>
     /** Per-project working-tree state, from `WorktreeProbe.getStates()`. */
     workingTrees?: ReadonlyMap<string, WorkingTreeProbe>
     /** Per-project repo/branch identity, from `WorktreeProbe.getRepoLabels()`. */
@@ -264,12 +276,13 @@ export function deriveSidebarData(
         // until their next turn records something.
         const uncommittedWork = dirtyTree != null
           && (chat.touchedFiles?.some((file) => isTouchLive(file, dirtyTree)) ?? false)
+        const status = deriveStatus(chat, activeStatuses.get(chat.id))
         return {
           _id: chat.id,
           _creationTime: chat.createdAt,
           chatId: chat.id,
           title: chat.title,
-          status: deriveStatus(chat, activeStatuses.get(chat.id)),
+          status,
           unread: chat.unread,
           ...(chat.doneAt ? { done: true, doneAt: chat.doneAt } : {}),
           localPath: project.localPath,
@@ -286,6 +299,7 @@ export function deriveSidebarData(
           // and only the hover card reads them (`chat.getPreview`).
           ...(pendingToolKind ? { pendingToolKind } : {}),
           ...(pendingUserInputPreview ? { pendingUserInputPreview } : {}),
+          ...waitingOnField(status, options?.waitingOn?.get(chat.id)),
           ...(uncommittedWork ? { uncommittedWork: true } : {}),
           ...(chat.archivedAt ? { archivedAt: chat.archivedAt } : {}),
           ...(chat.pinnedAt ? { pinnedAt: chat.pinnedAt } : {}),
@@ -293,6 +307,7 @@ export function deriveSidebarData(
           canFork: canForkChat(chat, activeStatuses, drainingChatIds) || undefined,
           ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
           ...(chat.parentChatId && chat.adopted ? { adopted: true as const } : {}),
+          ...(chat.delegator ? { delegator: true as const } : {}),
         }
       })
   }
@@ -431,7 +446,9 @@ export function deriveChatSnapshot(
   drainingChatIds: Set<string>,
   chatId: string,
   getMessages: (chatId: string) => Pick<ChatSnapshot, "messages" | "startIndex" | "readAnchor"> & { outline?: TranscriptOutlineEntry[] },
-  subagents?: readonly SubagentActivity[]
+  subagents?: readonly SubagentActivity[],
+  /** What the chat is waiting on, when it is. See `WaitingOn`. */
+  waitingOn?: WaitingOn
 ): ChatSnapshot | null {
   const chat = state.chatsById.get(chatId)
   if (!chat || chat.deletedAt) return null
@@ -446,12 +463,14 @@ export function deriveChatSnapshot(
     ))
     .sort((a, b) => a.createdAt - b.createdAt)
 
+  const status = deriveStatus(chat, activeStatuses.get(chat.id))
   const runtime: ChatRuntime = {
     chatId: chat.id,
     projectId: project.id,
     localPath: project.localPath,
     title: chat.title,
-    status: deriveStatus(chat, activeStatuses.get(chat.id)),
+    status,
+    ...waitingOnField(status, waitingOn),
     isDraining: drainingChatIds.has(chat.id),
     provider: chat.provider,
     planMode: chat.planMode,
@@ -459,6 +478,7 @@ export function deriveChatSnapshot(
     sessionToken: chat.sessionToken,
     ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
     ...(chat.parentChatId && chat.adopted ? { adopted: true as const } : {}),
+    ...(chat.delegator ? { delegator: true as const } : {}),
     ...(subagents?.length ? { subagents: [...subagents] } : {}),
     ...(schedules.length ? { schedules } : {}),
   }

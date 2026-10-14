@@ -125,6 +125,12 @@ export type TranscriptScrollTarget =
    */
   | { kind: "pin"; rowId: string; offsetFromMessage?: number }
 
+/** Whether two targets put the same row at the same place. */
+export function sameScrollTarget(left: TranscriptScrollTarget, right: TranscriptScrollTarget): boolean {
+  if (left.kind === "end" || right.kind === "end") return left.kind === right.kind
+  return left.rowId === right.rowId && (left.offsetFromMessage ?? 0) === (right.offsetFromMessage ?? 0)
+}
+
 /** Index of the row rendering the most recent assistant message, or null. */
 export function findLatestAssistantTextRowIndex(rows: ResolvedTranscriptRow[]): number | null {
   for (let index = rows.length - 1; index >= 0; index -= 1) {

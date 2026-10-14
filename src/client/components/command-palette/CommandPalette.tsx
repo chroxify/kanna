@@ -69,6 +69,8 @@ import { useSidebarStore } from "../../stores/sidebarStore"
 import { useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
 import { useChatViewer, useViewerStore } from "../../stores/viewerStore"
+import { toggleDelegatedPane } from "../chat-ui/DelegatedListButton"
+import { DelegatorIcon } from "../chat-ui/delegator-icon"
 import { PROVIDER_ICONS } from "../chat-ui/ChatPreferenceControls"
 import { UsageSection } from "../../app/settings/UsageSection"
 import { getOpenAppItems, openAppValue, OpenAppIcon, useInstalledEditors, useInstalledTerminals } from "../open-external-menu"
@@ -281,6 +283,8 @@ export function CommandPalette({ state }: { state: KannaState }) {
   // Reactive so the label says what choosing it will do. A chat picked from
   // the graph has taken the graph's place, so the graph is not "shown" then.
   const graphShown = useChatViewer()?.item.kind === "graph"
+  // The same open-ness the navbar's delegated button lights for.
+  const viewerShown = useChatViewer() !== null
   // The active chat's row plus the project group that owns it (for the
   // "Hide <project>" action, which needs the group key + title).
   const currentChat = useMemo(() => {
@@ -742,6 +746,22 @@ export function CommandPalette({ state }: { state: KannaState }) {
       })
     }
 
+    // The navbar's delegated button, for a delegator: the list of the chats
+    // under it, in the pane. No shortcut of its own, like Show Graph.
+    if (state.activeChatId && canShowGraph && currentChatRow?.delegator) {
+      const delegatorChatId = state.activeChatId
+      list.push({
+        id: "toggle-delegated",
+        title: viewerShown ? "Hide Delegated" : "Show Delegated",
+        keywords: ["delegated", "delegator", "delegate", "sub-chats", "subchats", "sub chats", "chats", "list", "pane", "show", "hide", "toggle"],
+        icon: <DelegatorIcon className={ICON_CLASS} />,
+        run: () => {
+          close()
+          toggleDelegatedPane(delegatorChatId)
+        },
+      })
+    }
+
     if (state.activeChatId) {
       list.push({
         id: "share-chat",
@@ -949,6 +969,8 @@ export function CommandPalette({ state }: { state: KannaState }) {
     focusModeEnabled,
     canShowGraph,
     graphShown,
+    viewerShown,
+    currentChatRow?.delegator,
     installedEditors,
     installedTerminals,
     isMac,
@@ -1279,6 +1301,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
         const firstThread = projectChatSections
           ? [
             ...projectChatSections.pinned,
+            ...projectChatSections.delegators,
             ...projectChatSections.inProgress,
             ...projectChatSections.review,
             ...projectChatSections.relevant,
@@ -1389,6 +1412,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     const projectChatSectionThreads = projectChatSections
       ? [
         ...projectChatSections.pinned,
+        ...projectChatSections.delegators,
         ...projectChatSections.inProgress,
         ...projectChatSections.review,
         ...projectChatSections.relevant,

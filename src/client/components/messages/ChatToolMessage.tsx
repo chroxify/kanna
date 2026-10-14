@@ -12,7 +12,7 @@ import { SidebarChatHoverCard } from "../chat-ui/sidebar/ChatHoverCard"
 import { ThreadRowMenu } from "../chat-ui/sidebar/ThreadRow"
 import { ThreadRowContent } from "../chat-ui/ThreadRowContent"
 import { useNow } from "../chat-ui/widgets/TasksWidget"
-import { resultRecord, text, TOOL_CARD_CAPTION_CLASS, toolCardClasses, toolCardErrorText, useToolCardPayload } from "./tool-card"
+import { resultRecord, text, TOOL_CARD_CAPTION_CLASS, TOOL_CARD_MARK_SLOT_CLASS, toolCardClasses, toolCardErrorText, useToolCardPayload } from "./tool-card"
 import type { ProcessedToolCall } from "./types"
 
 /**
@@ -205,7 +205,7 @@ export function ChatCard({ chatId, title, caption, pending = false, quote = fals
         <div className="flex min-w-0 items-center gap-2.5">
           {saidFirst}
           {pending
-            ? <Loader2 className="size-3.5 shrink-0 animate-spin text-logo" />
+            ? <span className={TOOL_CARD_MARK_SLOT_CLASS}><Loader2 className="size-3.5 animate-spin text-logo" /></span>
             : <MessageCircle className="size-4 shrink-0 text-muted-foreground" />}
           <span className={cn("min-w-0 truncate", !pending && "text-muted-foreground")}>{title}</span>
         </div>

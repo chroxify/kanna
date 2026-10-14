@@ -151,14 +151,23 @@ export function buildTranscriptOutline(entries: readonly TranscriptEntry[]): Tra
 /**
  * Cut a held window (a client's cache, say) down to the size a fresh open
  * would get, so a chat cached whole does not paint whole.
+ *
+ * `mustIncludeEntryId` is the entry the reader was at. The server widens a
+ * fresh open's window to reach it, so the cut here does too: a cache trimmed
+ * past the read position cannot open at it.
  */
 export function trimTranscriptWindow<T extends { messages: TranscriptEntry[]; startIndex: number }>(
   window: T,
-  assistantMessages: number
+  assistantMessages: number,
+  mustIncludeEntryId?: string
 ): T {
+  const mustIncludeIndex = mustIncludeEntryId === undefined
+    ? -1
+    : window.messages.findIndex((entry) => entry._id === mustIncludeEntryId)
   const start = findTranscriptWindowStart(window.messages, {
     endExclusive: window.messages.length,
     assistantMessages,
+    ...(mustIncludeIndex >= 0 ? { mustIncludeIndex } : {}),
   })
   if (start === 0) return window
   return { ...window, messages: window.messages.slice(start), startIndex: window.startIndex + start }

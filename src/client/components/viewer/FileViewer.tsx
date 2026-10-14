@@ -2,6 +2,7 @@ import { File as CodeFile, type FileOptions } from "@pierre/diffs/react"
 import { Code, FileCode, FileDiff, WrapText } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useTheme } from "../../hooks/useTheme"
+import { cn } from "../../lib/utils"
 import { openViewer } from "../../stores/viewerStore"
 import { OpenFileSelect } from "../open-external-menu"
 import { fetchTextPreview, TEXT_PREVIEW_LIMIT_BYTES } from "../messages/attachmentPreview"
@@ -9,7 +10,7 @@ import { Skeleton } from "../ui/skeleton"
 import type { DiffViewerContext } from "../chat-ui/git/DiffViewer"
 import { splitDiffPath } from "../chat-ui/git/shared"
 import { hasRenderedView, RenderedFilePreview } from "./AttachmentViewer"
-import { ViewerIconButton, ViewerPanes, ViewerSurface, ViewerToggle } from "./ViewerSurface"
+import { VIEWER_END_PAD_CLASS, ViewerIconButton, ViewerPanes, ViewerSurface, ViewerToggle } from "./ViewerSurface"
 
 type FileTextState =
   | { status: "loading" }
@@ -207,7 +208,7 @@ function CodeView({ name, contents, line, wrap }: { name: string; contents: stri
   }, [contents, line])
 
   return (
-    <div ref={containerRef} className="kanna-diff-patch">
+    <div ref={containerRef} className={cn("kanna-diff-patch", VIEWER_END_PAD_CLASS)}>
       <CodeFile file={file} selectedLines={selectedLines} options={options} />
     </div>
   )

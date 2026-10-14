@@ -38,7 +38,7 @@ describe("messageNamingParent", () => {
 })
 
 describe("the link between two chats", () => {
-  const quoteOf = (html: string) => html.slice(html.indexOf("not-prose"), html.indexOf("my-[3px] ml-[18px]"))
+  const quoteOf = (html: string) => html.slice(html.indexOf("not-prose"), html.indexOf("my-[3px] h-[14px]"))
 
   test("is one quote from both ends: on the message a sub-chat opens with, and on the report that comes back", () => {
     const inChild = renderToStaticMarkup(<SourcedMessage content="audit the parser" source={{ kind: "agent", chatId: "parent" }} />)
