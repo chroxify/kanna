@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SidebarChatRow, SidebarProjectGroup } from "../../shared/types"
-import { computeChannelSections, getChannelPeekGroups, RECENT_CHANNEL_DAYS } from "./channel-sections"
+import { computeChannelSections, getChannelPeekGroups, getRelevantCountsByProject, RECENT_CHANNEL_DAYS } from "./channel-sections"
 
 const NOW = new Date(2026, 9, 1, 12).getTime()
 const DAY = 24 * 60 * 60 * 1_000
@@ -217,5 +217,22 @@ describe("getChannelPeekGroups", () => {
 
   test("is empty for a project with no chats to show", () => {
     expect(peek([chat("unsent", NOW, { lastMessageAt: undefined })])).toEqual([])
+  })
+})
+
+describe("getRelevantCountsByProject", () => {
+  test("counts each project's chats in Relevant, and nothing older, done, or running", () => {
+    const counts = getRelevantCountsByProject([
+      project("a", [
+        chat("recent", NOW - HOUR, { done: false }),
+        chat("unread", NOW - HOUR, { unread: true }),
+        chat("old-unread", NOW - 21 * DAY, { unread: true }),
+        chat("done", NOW - HOUR, { done: true }),
+        chat("running", NOW, { status: "running" }),
+      ]),
+      project("b", [chat("old", NOW - 9 * DAY, { unread: true })]),
+    ], NOW)
+    expect(counts.get("a")).toBe(2)
+    expect(counts.get("b")).toBeUndefined()
   })
 })

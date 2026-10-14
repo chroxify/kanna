@@ -59,12 +59,12 @@ export interface ChannelSection {
  * section of their own, folded: a channel list has to keep them reachable,
  * which the Chats view has no need to.
  */
-export function computeChannelSections(
+function channelThreadSections(
   projectGroups: readonly SidebarProjectGroup[],
   nowMs: number,
   draftStartTimes?: DraftStartTimes,
   pendingSends?: PendingSendTimes,
-): ChannelSection[] {
+) {
   const threads = listedThreads(flattenSidebarThreads({ projectGroups: [...projectGroups] })).map((thread) => (
     thread.row.pinnedAt == null && !thread.row.delegator
       ? thread
@@ -73,6 +73,33 @@ export function computeChannelSections(
   const sections = computeSidebarThreadSections(threads, nowMs, draftStartTimes, pendingSends)
   // Review folded into Relevant, as the Chats view shows it.
   const relevant = mergeRelevantThreads(sections, draftStartTimes)
+  return { sections, relevant }
+}
+
+/**
+ * Each project's number in the channel list: how many of its chats are in
+ * Relevant, the same ones its peek card lists under that heading.
+ */
+export function getRelevantCountsByProject(
+  projectGroups: readonly SidebarProjectGroup[],
+  nowMs: number,
+  draftStartTimes?: DraftStartTimes,
+  pendingSends?: PendingSendTimes,
+): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const thread of channelThreadSections(projectGroups, nowMs, draftStartTimes, pendingSends).relevant) {
+    counts.set(thread.projectId, (counts.get(thread.projectId) ?? 0) + 1)
+  }
+  return counts
+}
+
+export function computeChannelSections(
+  projectGroups: readonly SidebarProjectGroup[],
+  nowMs: number,
+  draftStartTimes?: DraftStartTimes,
+  pendingSends?: PendingSendTimes,
+): ChannelSection[] {
+  const { sections, relevant } = channelThreadSections(projectGroups, nowMs, draftStartTimes, pendingSends)
 
   const groupsById = new Map(projectGroups.map((group) => [group.groupKey, group]))
   const placed = new Set<string>()

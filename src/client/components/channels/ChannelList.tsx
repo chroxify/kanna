@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react"
 import { ChevronDown, SquarePen } from "lucide-react"
 import type { SidebarProjectGroup } from "../../../shared/types"
-import { computeChannelSections, getChannelPeekGroups, type ChannelPeekGroup } from "../../lib/channel-sections"
+import { computeChannelSections, getChannelPeekGroups, getRelevantCountsByProject, type ChannelPeekGroup } from "../../lib/channel-sections"
 import { getThreadDetailLabel } from "../../lib/thread-detail-label"
 import { isSubChat, isUnreadForUser, type SidebarThread } from "../../lib/thread-sections"
 import { isBackgroundOpenClick } from "../../lib/background-open"
@@ -206,13 +206,15 @@ interface ChannelRowProps {
   /** Its menu is pinned open. Drawn as the hover it is holding. */
   menuPinned: boolean
   pinned: boolean
+  /** How many of its chats are in Relevant (`getRelevantCountsByProject`). */
+  relevantCount: number
   actions: ChannelActions
   onSelect: (projectId: string) => void
 }
 
 /**
- * A project as a channel: its mark, its name, and a count of the chats that
- * want you (unread, or waiting on an answer). The mark is the project's icon
+ * A project as a channel: its mark, its name, and a count of its chats in
+ * Relevant, the ones its peek card lists under that heading. The mark is the project's icon
  * while every chat in it is idle and read, and otherwise the status glyph of
  * its most pressing chat, in the icon's slot so the name never shifts. Bold
  * means something in it is unread, as a Slack channel's is.
@@ -220,15 +222,12 @@ interface ChannelRowProps {
  * The row has no hover card of its own: the list keeps one for all of them
  * and finds the row under the pointer by `CHANNEL_ROW_ATTRIBUTE`.
  */
-const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned, actions, onSelect }: ChannelRowProps) {
+const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned, relevantCount, actions, onSelect }: ChannelRowProps) {
   // A sub-chat finishing is its parent's news, not the channel's, so its
   // unread mark is not counted. One that stops to ask you something still is.
   // Nor is the mark of a chat still working, which the window's title and
   // the notifications leave out for the same reason (`isUnreadForUser`).
   const unread = group.chats.some(isUnreadForUser)
-  // Chats that want you: unread, or waiting on an answer. One chat counts
-  // once even when it is both.
-  const attentionCount = group.chats.filter((chat) => isUnreadForUser(chat) || chat.status === "waiting_for_user").length
   // The mark is the status of the channel's most pressing chat, drawn as that
   // chat's own row draws it: running, then waiting on you, then waiting on a
   // subagent, then unread.
@@ -285,9 +284,9 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
             {/* Neutral: the mark on the left carries the colour. A tint of the
                 text colour rather than `bg-muted`, which is the selected row's
                 own background and would hide the badge there. */}
-            {attentionCount > 0 ? (
+            {relevantCount > 0 ? (
               <span className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-[5px] bg-foreground/10 px-1 text-[11px] font-bold leading-none text-foreground">
-                {attentionCount}
+                {relevantCount}
               </span>
             ) : null}
           </span>
@@ -358,6 +357,10 @@ export function ChannelList({
     () => computeChannelSections(projectGroups, nowMs, draftStartTimes, pendingSends),
     [draftStartTimes, nowMs, pendingSends, projectGroups]
   )
+  const relevantCounts = useMemo(
+    () => getRelevantCountsByProject(projectGroups, nowMs, draftStartTimes, pendingSends),
+    [draftStartTimes, nowMs, pendingSends, projectGroups]
+  )
   // In a store, so the sections are as you left them when you come back from
   // a channel (which unmounts this list).
   const [expandOverrides, setSectionExpanded] = useSectionOverrides("channels")
@@ -384,6 +387,7 @@ export function ChannelList({
                     active={group.groupKey === activeProjectId}
                     menuPinned={group.groupKey === pinnedChannelId}
                     pinned={group.pinnedAt != null}
+                    relevantCount={relevantCounts.get(group.groupKey) ?? 0}
                     actions={actions}
                     onSelect={handleSelect}
 
