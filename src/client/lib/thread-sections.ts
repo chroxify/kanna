@@ -290,16 +290,22 @@ function userMessageAt(thread: SidebarThread, pendingSends?: PendingSendTimes): 
  *
  * Archived chats never qualify, even when flagged — archiving is an explicit
  * "done here", and promoting one back to the top would fight that.
+ *
+ * Nor does anything untouched for {@link RELEVANT_MAX_AGE_MS}: a dirty tree or
+ * a draft from weeks ago is not where you left off, and holding it above
+ * Today buried yesterday's work under it. It drops back into its date bucket.
  */
 export function getRelevantThreads(
   threads: SidebarThread[],
   exclude?: ReadonlySet<string>,
   /** Chats holding an unsent draft → when that draft appeared (`useDraftStartTimes`). */
   draftStartTimes?: DraftStartTimes,
+  nowMs = Date.now(),
 ): SidebarThread[] {
   return threads
     .filter((thread) => {
       if (thread.archived || exclude?.has(thread.chatId)) return false
+      if (nowMs - relevantSortKey(thread, draftStartTimes) > RELEVANT_MAX_AGE_MS) return false
       // A draft outranks the empty-chat rule below: a chat you opened, typed
       // into and walked away from is exactly the one that must not vanish,
       // and it is the only place that sentence exists.
@@ -309,6 +315,9 @@ export function getRelevantThreads(
     })
     .sort((left, right) => relevantSortKey(right, draftStartTimes) - relevantSortKey(left, draftStartTimes))
 }
+
+/** How long a chat stays Relevant after it, or its draft, last moved. */
+export const RELEVANT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000
 
 /** Chat id → when its unsent draft appeared; see `useDraftStartTimes`. */
 export type DraftStartTimes = ReadonlyMap<string, number>
@@ -579,7 +588,7 @@ export function computeSidebarThreadSections(
     pendingSends,
   )
   const pinnedIds = new Set([...pinned, ...delegators, ...review, ...inProgress].map((thread) => thread.chatId))
-  const relevant = getRelevantThreads(threads, pinnedIds, draftStartTimes)
+  const relevant = getRelevantThreads(threads, pinnedIds, draftStartTimes, nowMs)
   const excludeIds = new Set([...pinnedIds, ...relevant.map((thread) => thread.chatId)])
   const rest = threads.filter((thread) =>
     !thread.archived
