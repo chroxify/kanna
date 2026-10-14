@@ -13,6 +13,8 @@ import { createContext, useContext } from "react"
 export interface ChatMenuCommands {
   /** Makes the chat a delegator, or an ordinary chat again. Takes effect on its next turn. */
   setDelegator: (chatId: string, delegator: boolean) => void
+  /** Marks the chat done, which takes it out of Relevant, or not done. Its next turn clears it. */
+  setDone: (chatId: string, done: boolean) => void
 }
 
 const ChatMenuCommandsContext = createContext<ChatMenuCommands | null>(null)

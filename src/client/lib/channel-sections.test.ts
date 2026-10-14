@@ -16,6 +16,9 @@ function chat(chatId: string, at: number, extra: Partial<SidebarChatRow> = {}): 
     localPath: "/tmp/project",
     provider: null,
     lastMessageAt: at,
+    // Done unless a test says otherwise, so a recent chat is filed by its age
+    // rather than held in Relevant, which has tests of its own.
+    done: true,
     ...extra,
   } as SidebarChatRow
 }

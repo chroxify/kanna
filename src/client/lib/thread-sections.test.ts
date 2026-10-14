@@ -29,6 +29,9 @@ function makeChatRow(overrides: Partial<SidebarChatRow> & Pick<SidebarChatRow, "
     localPath: "/tmp/project",
     provider: "claude",
     hasAutomation: false,
+    // Done unless a test says otherwise, so a recent chat is filed by its date
+    // rather than held in Relevant, which has tests of its own.
+    done: true,
     ...overrides,
   }
 }
@@ -460,12 +463,12 @@ describe("computeSidebarThreadSections: delegators", () => {
       delegator("d-running", { status: "running", lastMessageAt: at(2026, 7, 15, 9) }),
       delegator("d-unread", { unread: true, lastMessageAt: at(2026, 7, 14) }),
       delegator("d-waiting", { status: "waiting_for_user", lastMessageAt: at(2026, 7, 13) }),
-      delegator("d-relevant", { uncommittedWork: true, lastMessageAt: at(2026, 7, 12) }),
+      delegator("d-relevant", { done: false, lastMessageAt: at(2026, 7, 12) }),
       delegator("d-old", { lastMessageAt: at(2026, 5, 1) }),
       // The same states in ordinary chats, each where it always was.
       plain("running", { status: "running" }),
       plain("unread", { unread: true }),
-      plain("relevant", { uncommittedWork: true }),
+      plain("relevant", { done: false }),
       plain("old", { lastMessageAt: at(2026, 5, 1) }),
     ])).toEqual({
       pinned: [],
@@ -516,7 +519,7 @@ describe("computeSidebarThreadSections: delegators", () => {
       { status: "waiting_for_user" },
       { status: "waiting_on_subagent", unread: true },
       { unread: true },
-      { uncommittedWork: true },
+      { done: false },
       { lastMessageAt: at(2026, 5, 1) },
       { lastMessageAt: undefined },
     ]
@@ -546,10 +549,10 @@ describe("computeSidebarThreadSections: delegators", () => {
 })
 
 describe("getRelevantThreads", () => {
-  test("keeps only flagged chats, newest first like the date buckets", () => {
+  test("keeps chats worked on lately and not marked done, newest first like the date buckets", () => {
     const data = makeData([
-      makeChatRow({ chatId: "newer", title: "n", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
-      makeChatRow({ chatId: "older", title: "o", uncommittedWork: true, lastMessageAt: at(2026, 7, 13) }),
+      makeChatRow({ chatId: "newer", title: "n", done: false, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "older", title: "o", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
       makeChatRow({ chatId: "clean", title: "c", lastMessageAt: at(2026, 7, 14) }),
     ])
 
@@ -562,22 +565,22 @@ describe("getRelevantThreads", () => {
   test("never surfaces archived chats, even when flagged", () => {
     const data = makeData(
       [],
-      [makeChatRow({ chatId: "archived", title: "a", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) })],
+      [makeChatRow({ chatId: "archived", title: "a", done: false, lastMessageAt: at(2026, 7, 15) })],
     )
 
     expect(getRelevantThreads(flattenSidebarThreads(data), undefined, undefined, NOW)).toEqual([])
   })
 
   test("skips empty new chats", () => {
-    const data = makeData([makeChatRow({ chatId: "draft", title: "d", uncommittedWork: true })])
+    const data = makeData([makeChatRow({ chatId: "draft", title: "d", done: false })])
 
     expect(getRelevantThreads(flattenSidebarThreads(data), undefined, undefined, NOW)).toEqual([])
   })
 
   test("honours the exclude set", () => {
     const data = makeData([
-      makeChatRow({ chatId: "a", title: "a", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
-      makeChatRow({ chatId: "b", title: "b", uncommittedWork: true, lastMessageAt: at(2026, 7, 14) }),
+      makeChatRow({ chatId: "a", title: "a", done: false, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "b", title: "b", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
     ])
 
     const kept = getRelevantThreads(flattenSidebarThreads(data), new Set(["a"]), undefined, NOW)
@@ -603,17 +606,19 @@ describe("getRelevantThreads", () => {
     expect(kept.map((t) => t.chatId)).toEqual(["unsent"])
   })
 
-  test("a chat untouched for over three days drops back into its date bucket", () => {
+  test("a chat leaves when it is marked done, or after twelve hours untouched", () => {
     const data = makeData([
-      makeChatRow({ chatId: "fresh", title: "f", uncommittedWork: true, lastMessageAt: at(2026, 7, 13) }),
-      makeChatRow({ chatId: "stale", title: "s", uncommittedWork: true, lastMessageAt: at(2026, 6, 24) }),
+      makeChatRow({ chatId: "fresh", title: "f", done: false, lastMessageAt: at(2026, 7, 15, 1) }),
+      makeChatRow({ chatId: "finished", title: "x", done: true, lastMessageAt: at(2026, 7, 15, 11) }),
+      makeChatRow({ chatId: "stale", title: "s", done: false, lastMessageAt: at(2026, 7, 14, 23) }),
       makeChatRow({ chatId: "stale-draft", title: "d", lastMessageAt: at(2026, 6, 20) }),
     ])
-    const drafts = new Map([["stale-draft", at(2026, 7, 1)]])
+    const drafts = new Map([["stale-draft", at(2026, 7, 14, 20)]])
 
     const sections = computeSidebarThreadSections(flattenSidebarThreads(data), NOW, drafts)
     expect(sections.relevant.map((t) => t.chatId)).toEqual(["fresh"])
     const bucketed = sections.buckets.flatMap((bucket) => bucket.threads.map((t) => t.chatId))
+    expect(bucketed).toContain("finished")
     expect(bucketed).toContain("stale")
     expect(bucketed).toContain("stale-draft")
   })
@@ -677,8 +682,8 @@ describe("computeSidebarThreadSections", () => {
 
   test("Relevant drains flagged chats out of the date buckets", () => {
     const data = makeData([
-      makeChatRow({ chatId: "dirty-old", title: "a", uncommittedWork: true, lastMessageAt: at(2026, 7, 13) }),
-      makeChatRow({ chatId: "dirty-new", title: "b", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "dirty-old", title: "a", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
+      makeChatRow({ chatId: "dirty-new", title: "b", done: false, lastMessageAt: at(2026, 7, 15) }),
       makeChatRow({ chatId: "clean", title: "c", lastMessageAt: at(2026, 7, 15) }),
     ])
 
@@ -692,9 +697,9 @@ describe("computeSidebarThreadSections", () => {
     // Asking for something now beats touching the current diff, so a flagged
     // chat that is also unread or running stays where it was.
     const data = makeData([
-      makeChatRow({ chatId: "unread", title: "u", unread: true, uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
-      makeChatRow({ chatId: "running", title: "r", status: "running", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
-      makeChatRow({ chatId: "idle-dirty", title: "d", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "unread", title: "u", unread: true, done: false, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "running", title: "r", status: "running", done: false, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "idle-dirty", title: "d", done: false, lastMessageAt: at(2026, 7, 15) }),
     ])
 
     const sections = computeSidebarThreadSections(flattenSidebarThreads(data), NOW)
@@ -707,7 +712,7 @@ describe("computeSidebarThreadSections", () => {
     // The chat itself is the stalest here; the sentence in it is the freshest.
     const data = makeData([
       makeChatRow({ chatId: "stale-chat", title: "s", lastMessageAt: at(2026, 6, 1) }),
-      makeChatRow({ chatId: "dirty-fresh", title: "f", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "dirty-fresh", title: "f", done: false, lastMessageAt: at(2026, 7, 15) }),
     ])
 
     const sections = computeSidebarThreadSections(
@@ -724,7 +729,7 @@ describe("computeSidebarThreadSections", () => {
     // sinking to the bottom.
     const data = makeData([
       makeChatRow({ chatId: "old-draft", title: "o", lastMessageAt: at(2026, 7, 15) }),
-      makeChatRow({ chatId: "dirty", title: "d", uncommittedWork: true, lastMessageAt: at(2026, 7, 13) }),
+      makeChatRow({ chatId: "dirty", title: "d", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
     ])
 
     const sections = computeSidebarThreadSections(
@@ -755,7 +760,7 @@ describe("computeSidebarThreadSections", () => {
   test("archived flagged chats stay in Archived", () => {
     const data = makeData(
       [],
-      [makeChatRow({ chatId: "archived", title: "a", uncommittedWork: true, lastMessageAt: at(2026, 7, 15) })],
+      [makeChatRow({ chatId: "archived", title: "a", done: false, lastMessageAt: at(2026, 7, 15) })],
     )
 
     const sections = computeSidebarThreadSections(flattenSidebarThreads(data), NOW)
@@ -770,7 +775,7 @@ describe("mergeRelevantThreads", () => {
     // so the two sets interleave by activity rather than stacking.
     const data = makeData([
       makeChatRow({ chatId: "unread-old", title: "a", unread: true, lastMessageAt: at(2026, 7, 9) }),
-      makeChatRow({ chatId: "dirty-mid", title: "b", uncommittedWork: true, lastMessageAt: at(2026, 7, 13) }),
+      makeChatRow({ chatId: "dirty-mid", title: "b", done: false, lastMessageAt: at(2026, 7, 15, 6) }),
       makeChatRow({ chatId: "unread-new", title: "c", unread: true, lastMessageAt: at(2026, 7, 15) }),
       makeChatRow({ chatId: "clean", title: "d", lastMessageAt: at(2026, 7, 14) }),
     ])
@@ -785,7 +790,7 @@ describe("mergeRelevantThreads", () => {
 
   test("a chat parked in plan mode leads on when its plan landed, not when it was sent", () => {
     const data = makeData([
-      makeChatRow({ chatId: "dirty", title: "a", uncommittedWork: true, lastMessageAt: at(2026, 7, 15, 9) }),
+      makeChatRow({ chatId: "dirty", title: "a", done: false, lastMessageAt: at(2026, 7, 15, 9) }),
       // Sent yesterday, plan came back just now and is waiting on the user. No
       // turn ended, so lastTurnEndedAt is unset — only lastAgentMessageAt moved.
       makeChatRow({
@@ -803,7 +808,7 @@ describe("mergeRelevantThreads", () => {
 
   test("a chat that is both unread and flagged appears once", () => {
     const data = makeData([
-      makeChatRow({ chatId: "both", title: "a", unread: true, uncommittedWork: true, lastMessageAt: at(2026, 7, 15) }),
+      makeChatRow({ chatId: "both", title: "a", unread: true, done: false, lastMessageAt: at(2026, 7, 15) }),
     ])
 
     const sections = computeSidebarThreadSections(flattenSidebarThreads(data), NOW)
@@ -975,7 +980,7 @@ describe("pinned sidebar chats", () => {
     const data = makeData([
       makeChatRow({ chatId: "running", title: "Running", pinnedAt: 1, status: "running", lastMessageAt: NOW }),
       makeChatRow({ chatId: "review", title: "Review", pinnedAt: 2, unread: true, lastMessageAt: NOW }),
-      makeChatRow({ chatId: "relevant", title: "Relevant", pinnedAt: 3, uncommittedWork: true, lastMessageAt: NOW }),
+      makeChatRow({ chatId: "relevant", title: "Relevant", pinnedAt: 3, done: false, lastMessageAt: NOW }),
       makeChatRow({ chatId: "empty", title: "Empty", pinnedAt: 4 }),
     ], [makeChatRow({ chatId: "archived", title: "Archived", pinnedAt: 5, lastMessageAt: NOW })])
     const threads = flattenSidebarThreads(data)

@@ -277,23 +277,22 @@ function userMessageAt(thread: SidebarThread, pendingSends?: PendingSendTimes): 
 }
 
 /**
- * Chats you have something outstanding with: work sitting in the project's
- * dirty tree (the same `uncommittedWork` flag that keeps the row's title at
- * full contrast), or a draft you typed and never sent. Pulled out of the date
- * buckets so everything outstanding sits together instead of scattered across
- * Today / This Week / Last 30 Days.
+ * The chats you are working on right now: every chat that moved in the last
+ * {@link RELEVANT_MAX_AGE_MS}, until you mark it done. Pulled out of the date
+ * buckets so the work in hand sits together instead of scattered across Today
+ * and Yesterday.
+ *
+ * Opening a chat and going to another does not move it out; only marking it
+ * done (`row.done`, cleared again by the chat's next turn) or leaving it alone
+ * for the window does. A draft you typed and never sent counts as moving, so
+ * the chat holding it is here too.
  *
  * Sorted NEWEST first, like the date buckets below it rather than the
  * oldest-first Review / In Progress sections above: those two are queues you
  * drain from the bottom, while this is a view of the work you're in the middle
  * of, where the chat you just touched is the one you want back.
  *
- * Archived chats never qualify, even when flagged — archiving is an explicit
- * "done here", and promoting one back to the top would fight that.
- *
- * Nor does anything untouched for {@link RELEVANT_MAX_AGE_MS}: a dirty tree or
- * a draft from weeks ago is not where you left off, and holding it above
- * Today buried yesterday's work under it. It drops back into its date bucket.
+ * Archived chats never qualify — archiving is an explicit "done here".
  */
 export function getRelevantThreads(
   threads: SidebarThread[],
@@ -306,18 +305,18 @@ export function getRelevantThreads(
     .filter((thread) => {
       if (thread.archived || exclude?.has(thread.chatId)) return false
       if (nowMs - relevantSortKey(thread, draftStartTimes) > RELEVANT_MAX_AGE_MS) return false
-      // A draft outranks the empty-chat rule below: a chat you opened, typed
-      // into and walked away from is exactly the one that must not vanish,
-      // and it is the only place that sentence exists.
+      // A draft outranks the rules below: a chat you opened, typed into and
+      // walked away from is exactly the one that must not vanish, and it is
+      // the only place that sentence exists.
       if (draftStartTimes?.has(thread.chatId)) return true
-      // Empty new chats are hidden everywhere else; don't let the flag resurface one.
-      return thread.row.lastMessageAt != null && Boolean(thread.row.uncommittedWork)
+      // Empty new chats are hidden everywhere else; don't surface one here.
+      return thread.row.lastMessageAt != null && !thread.row.done
     })
     .sort((left, right) => relevantSortKey(right, draftStartTimes) - relevantSortKey(left, draftStartTimes))
 }
 
 /** How long a chat stays Relevant after it, or its draft, last moved. */
-export const RELEVANT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000
+export const RELEVANT_MAX_AGE_MS = 12 * 60 * 60 * 1000
 
 /** Chat id → when its unsent draft appeared; see `useDraftStartTimes`. */
 export type DraftStartTimes = ReadonlyMap<string, number>

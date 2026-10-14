@@ -155,6 +155,9 @@ export function createChatCommands({ store, agent, analytics }: ChatCommandsDeps
 
     async setDone(chatId: string, done: boolean): Promise<ChatCommandOutcome> {
       await store.setChatDoneState(chatId, done)
+      // Done means nothing more to see, so an unread reply does not keep the
+      // chat waiting in Review.
+      if (done) await store.setChatReadState(chatId, false)
       return { result: undefined, changed: chatAndSidebar(chatId) }
     },
 

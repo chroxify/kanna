@@ -212,7 +212,7 @@ function ThreadSectionsImpl({
     && sections.archived.length === 0
   ) return null
 
-  const renderRow = (thread: SidebarThread) => (
+  const renderRow = (thread: SidebarThread, showDoneAction = false) => (
     <ThreadRow
       key={thread.chatId}
       thread={thread}
@@ -222,6 +222,7 @@ function ThreadSectionsImpl({
       nowMs={nowMs}
       dimIdleTitles={false}
       showProjectIcon={showProjectIcons}
+      showDoneAction={showDoneAction}
       onSelect={onSelectChat}
       onCreateChat={onCreateChat}
       onRenameChat={onRenameChat}
@@ -250,7 +251,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {group.threads.map(renderRow)}
+                {group.threads.map((thread) => renderRow(thread))}
               </div>
             ) : null}
           </div>
@@ -274,7 +275,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {relevant.map(renderRow)}
+                {relevant.map((thread) => renderRow(thread, true))}
               </div>
             ) : null}
           </div>
@@ -294,7 +295,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {bucket.threads.map(renderRow)}
+                {bucket.threads.map((thread) => renderRow(thread))}
               </div>
             ) : null}
           </div>

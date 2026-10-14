@@ -1,5 +1,5 @@
 import type { ReactNode } from "react"
-import { Archive, Code, Copy, EyeOff, FolderOpen, Github, Pencil, PencilOff, Pin, PinOff, RotateCcw, Split, SquarePen, Trash2, UserRoundPlus } from "lucide-react"
+import { Archive, CircleCheck, CircleDashed, Code, Copy, EyeOff, FolderOpen, Github, Pencil, PencilOff, Pin, PinOff, RotateCcw, Split, SquarePen, Trash2, UserRoundPlus } from "lucide-react"
 import { DelegatorIcon } from "../delegator-icon"
 import { getRepoUrlLabel } from "../../../../shared/git-url"
 import {
@@ -163,9 +163,15 @@ export function ChatRowMenu({
   onDelete,
   delegator,
   onToggleDelegator,
+  done,
+  onToggleDone,
   leadingItems,
   children,
 }: {
+  /** The chat is marked done. */
+  done?: boolean
+  /** Marks the chat done or not done. Absent where there is no socket, and on an archived chat. */
+  onToggleDone?: () => void
   pinned?: boolean
   onTogglePin?: () => void
   /** The chat is a delegator. */
@@ -223,6 +229,12 @@ export function ChatRowMenu({
               {leadingItems}
               <ContextMenuSeparator />
             </>
+          ) : null}
+          {onToggleDone ? (
+            <ContextMenuItem onSelect={onToggleDone}>
+              {done ? <CircleDashed className="h-3.5 w-3.5" /> : <CircleCheck className="h-3.5 w-3.5" />}
+              <span className="text-xs font-medium">{done ? "Mark Not Done" : "Mark Done"}</span>
+            </ContextMenuItem>
           ) : null}
           {onTogglePin ? (
             <ContextMenuItem onSelect={onTogglePin}>

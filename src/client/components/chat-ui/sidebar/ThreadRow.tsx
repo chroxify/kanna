@@ -1,5 +1,5 @@
 import { memo, type HTMLAttributes, type ReactNode, type Ref } from "react"
-import { Archive, RotateCcw, Split } from "lucide-react"
+import { Archive, CircleCheck, RotateCcw, Split } from "lucide-react"
 import { getThreadDetailLabel, type ThreadDetailScope } from "../../../lib/thread-detail-label"
 import type { SidebarThread } from "../../../lib/thread-sections"
 import { cn, normalizeChatId } from "../../../lib/utils"
@@ -36,6 +36,8 @@ interface ThreadRowProps {
   dimIdleTitles?: boolean
   /** See `ThreadRowContent`. */
   showProjectIcon?: boolean
+  /** Adds a hover "Mark done" button, for rows in Relevant: done is how a chat leaves it. */
+  showDoneAction?: boolean
   onSelect: (chatId: string) => void
   onCreateChat: (projectId: string) => void
   onRenameChat: (chat: SidebarThread["row"]) => void
@@ -52,7 +54,7 @@ interface ThreadRowProps {
 type ThreadRowBodyProps = Pick<
   ThreadRowProps,
   | "thread" | "isActive" | "archived" | "detailScope" | "nowMs" | "detailLabelOverride"
-  | "dimIdleTitles" | "showProjectIcon" | "onSelect" | "onForkChat" | "onArchiveChat" | "onRestoreChat"
+  | "dimIdleTitles" | "showProjectIcon" | "showDoneAction" | "onSelect" | "onForkChat" | "onArchiveChat" | "onRestoreChat"
 > & Omit<HTMLAttributes<HTMLDivElement>, "onSelect"> & { ref?: Ref<HTMLDivElement> }
 
 /**
@@ -76,6 +78,7 @@ export function ThreadRowBody({
   detailLabelOverride,
   dimIdleTitles = true,
   showProjectIcon = false,
+  showDoneAction = false,
   onSelect,
   onForkChat,
   onArchiveChat,
@@ -89,6 +92,7 @@ export function ThreadRowBody({
   // text itself, from inside its own open subtree.
   const hasDraft = useChatHasDraft(thread.row.chatId)
   const detailLabel = detailLabelOverride ?? getThreadDetailLabel(thread, detailScope, nowMs)
+  const commands = useChatMenuCommands()
   const hoverActions = archived ? (
     <Button
       variant="ghost"
@@ -104,6 +108,20 @@ export function ThreadRowBody({
     </Button>
   ) : (
     <>
+      {showDoneAction && commands ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 cursor-pointer rounded-sm hover:!bg-transparent !border-0"
+          onClick={(event) => {
+            event.stopPropagation()
+            commands.setDone(thread.row.chatId, true)
+          }}
+          title="Mark done"
+        >
+          <CircleCheck className="size-3.5" />
+        </Button>
+      ) : null}
       {thread.row.canFork ? (
         <Button
           variant="ghost"
@@ -198,6 +216,7 @@ function ThreadRowImpl({
   detailLabelOverride,
   dimIdleTitles = true,
   showProjectIcon = false,
+  showDoneAction = false,
   onSelect,
   onCreateChat,
   onRenameChat,
@@ -235,6 +254,7 @@ function ThreadRowImpl({
         detailLabelOverride={detailLabelOverride}
         dimIdleTitles={dimIdleTitles}
         showProjectIcon={showProjectIcon}
+        showDoneAction={showDoneAction}
         onSelect={onSelect}
         onForkChat={onForkChat}
         onArchiveChat={onArchiveChat}
@@ -292,6 +312,8 @@ export function ThreadRowMenu({
       leadingItems={leadingItems}
       delegator={delegator}
       onToggleDelegator={canToggleDelegator ? () => commands.setDelegator(thread.row.chatId, !delegator) : undefined}
+      done={Boolean(thread.row.done)}
+      onToggleDone={commands && !archived ? () => commands.setDone(thread.row.chatId, !thread.row.done) : undefined}
       canFork={thread.row.canFork}
       archived={archived}
       pinned={Boolean(thread.row.pinnedAt)}

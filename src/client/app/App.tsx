@@ -466,6 +466,11 @@ function KannaLayout() {
         console.warn("[kanna] could not change whether the chat delegates:", error)
       })
     },
+    setDone: (chatId, done) => {
+      void state.socket.command({ type: "chat.setDone", chatId, done }).catch((error) => {
+        console.warn("[kanna] could not mark the chat done:", error)
+      })
+    },
   }), [state.socket])
 
   return (
