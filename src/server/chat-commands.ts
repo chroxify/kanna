@@ -47,6 +47,7 @@ interface ChatCommandsDeps {
   store: Pick<
     EventStore,
     | "createChat"
+    | "setChatDelegator"
     | "renameChat"
     | "setChatPinned"
     | "getChat"
@@ -66,8 +67,12 @@ function chatAndSidebar(chatId: string): ChatChange {
 
 export function createChatCommands({ store, agent, analytics }: ChatCommandsDeps) {
   return {
-    async create(projectId: string, lineage?: ChatLineage): Promise<ChatCommandOutcome<{ chatId: string }>> {
-      const chat = await store.createChat(projectId, lineage)
+    async create(
+      projectId: string,
+      lineage?: ChatLineage,
+      options?: { delegator?: boolean; chatId?: string },
+    ): Promise<ChatCommandOutcome<{ chatId: string }>> {
+      const chat = await store.createChat(projectId, lineage, options)
       // The count is of chats people start.
       if (!lineage?.createdByChatId) analytics.track("chat_created")
       return {
@@ -84,6 +89,15 @@ export function createChatCommands({ store, agent, analytics }: ChatCommandsDeps
 
     async rename(chatId: string, title: string): Promise<ChatCommandOutcome> {
       await store.renameChat(chatId, title)
+      return { result: undefined, changed: chatAndSidebar(chatId) }
+    },
+
+    /**
+     * Takes effect on the chat's next turn. A turn already running keeps the
+     * instructions it started with.
+     */
+    async setDelegator(chatId: string, delegator: boolean): Promise<ChatCommandOutcome> {
+      await store.setChatDelegator(chatId, delegator)
       return { result: undefined, changed: chatAndSidebar(chatId) }
     },
 

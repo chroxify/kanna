@@ -8,7 +8,7 @@ import { isDiffPathChecked, useDiffCommitStore } from "../../../stores/diffCommi
 import { useRightSidebarStore } from "../../../stores/rightSidebarStore"
 import { useViewerStore, type ViewerAttachment } from "../../../stores/viewerStore"
 import { hasRenderedView, RenderedFilePreview } from "../../viewer/AttachmentViewer"
-import { ViewerDivider, ViewerIconButton, ViewerSurface, ViewerToggle } from "../../viewer/ViewerSurface"
+import { VIEWER_END_PAD_CLASS, ViewerDivider, ViewerIconButton, ViewerSurface, ViewerToggle } from "../../viewer/ViewerSurface"
 import { DiffPatchSkeleton, DiffPatchView } from "./DiffPatchView"
 import { diffHold, DiffFileStat, diffStatus, getDiffPreviewAttachment, sortByPath, splitDiffPath, type DiffFile, type DiffRenderMode } from "./shared"
 
@@ -475,7 +475,7 @@ export function DiffViewer({
       )}
     >
       {/* relative: each file's offsetTop is then its place in the scroll. */}
-      <div ref={listRef} className="relative">
+      <div ref={listRef} className={cn("relative", VIEWER_END_PAD_CLASS)}>
         {shown.map((file) => {
           const full = fullFiles.has(file.path)
           const entry = patches[patchKey(file.path, full)]

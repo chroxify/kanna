@@ -222,6 +222,7 @@ describe("ChatHoverCardContent", () => {
     const time = new Date(endedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
     const html = render({
       status: "waiting_on_subagent",
+      waitingOn: { chats: 2, agents: 1 },
       turnCount: 3,
       lastTurnStartedAt: endedAt - 60_000,
       lastTurnEndedAt: endedAt,
@@ -229,7 +230,8 @@ describe("ChatHoverCardContent", () => {
 
     const anchored = html.slice(html.indexOf("ml-auto"))
     expect(anchored).toContain("3 turns")
-    expect(anchored).toContain("Waiting on a subagent")
+    // The transcript's own line, count and all.
+    expect(anchored).toContain("Waiting on 2 chats and 1 agent")
     expect(html).not.toContain(time)
   })
 

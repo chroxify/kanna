@@ -6,6 +6,7 @@ import type { ChatInputHandle } from "../../components/chat-ui/ChatInput"
 import { ChatNavbar, ChatNavbarWash } from "../../components/chat-ui/ChatNavbar"
 import { ChatNavbarTitle } from "../../components/chat-ui/ChatNavbarTitle"
 import { ChatTabs } from "../../components/chat-ui/ChatTabs"
+import { DelegatedListButton } from "../../components/chat-ui/DelegatedListButton"
 import { SidebarChatHoverCard } from "../../components/chat-ui/sidebar/ChatHoverCard"
 import type { SidebarThread } from "../../lib/thread-sections"
 import type { ThreadRowMenuActions } from "../../components/chat-ui/sidebar/ThreadRow"
@@ -43,8 +44,11 @@ import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
 import { getChatViewer, openViewer, useChatViewer, useViewerStore, viewerWidthClass } from "../../stores/viewerStore"
 import type { ChatPreviewContext } from "./ChatPreview"
 import { useOpenChat } from "../useOpenChat"
+import { useNewChatDelegate } from "./useNewChatDelegate"
+import { useDelegateStore } from "../../stores/delegateStore"
+import { useAppDialog } from "../../components/ui/app-dialog"
 import type { DiffViewerContext } from "../../components/chat-ui/git/DiffViewer"
-import { useProjectRepoUrl, useSidebarChatHasMessages } from "../../stores/sidebarStore"
+import { useChatIsDelegator, useProjectRepoUrl, useSidebarChatHasMessages } from "../../stores/sidebarStore"
 import { useAppSettingsStore } from "../../stores/appSettingsStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, isTerminalVisible, useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { usePaneChatKey } from "../../lib/paneVisibility"
@@ -517,11 +521,17 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   // sidebar knows has messages, though: that one is headed for a transcript,
   // and holding the empty state there left the new chat page's list over it
   // until the snapshot came.
+  //
+  // A chat started from this window a moment ago does not wait either. It is
+  // known to be empty, so its page is the new chat page from the click, until
+  // something is sent from it: that prompt shows before the snapshot can.
   const settledShowEmptyStateRef = useRef(false)
   const isChatLoading = Boolean(state.activeChatId && !state.runtime)
   const activeChatHasMessages = useSidebarChatHasMessages(state.activeChatId)
   const showEmptyState = isChatLoading
-    ? settledShowEmptyStateRef.current && !activeChatHasMessages
+    ? state.activeChatStarted
+      ? state.messages.length === 0
+      : settledShowEmptyStateRef.current && !activeChatHasMessages
     : state.messages.length === 0 && state.runtime?.title === "New Chat"
   settledShowEmptyStateRef.current = showEmptyState
   const projectId = state.activeProjectId
@@ -550,7 +560,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   const setViewerChat = useViewerStore((store) => store.setChat)
   const toggleViewerExpanded = useViewerStore((store) => store.toggleExpanded)
   const setViewerWidth = useViewerStore((store) => store.setWidth)
-  const closeViewerPane = useViewerStore((store) => store.closeAll)
+  const closeViewerPane = useViewerStore((store) => store.shut)
   // The viewer is the chat's: this chat's opens here, and another chat's
   // waits in the store for you to go back to it. Before paint, so a switch
   // never shows one frame of the last chat's viewer.
@@ -597,6 +607,34 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   }, [state.chatSnapshot?.messages])
 
   const isMobileViewport = useIsMobileViewport()
+  // On a delegator the list of the chats under it is the floor of the pane:
+  // whatever is opened there sits over it, and Back returns to it
+  // (`lib/viewer-levels`). Where there is a pane: on a phone the transcript
+  // is the page and the list is the navbar button's overlay.
+  //
+  // The list is in the pane the first time a delegator's page is opened in
+  // this browser. After that the pane is as it was left, open or shut, like
+  // any chat's viewer, and the navbar's button brings it back.
+  //
+  // After `setViewerChat` above, in the same commit, so a delegator opened
+  // for the first time is never painted with its pane shut.
+  const isDelegator = useChatIsDelegator(state.activeChatId)
+  const viewerFloorChatId = isDelegator && !isMobileViewport ? state.activeChatId : null
+  const setViewerFloor = useViewerStore((store) => store.setFloor)
+  useLayoutEffect(() => {
+    // Not before the sidebar has said what the chat is: until then "not a
+    // delegator" is not known, and taking the floor away would shut a list
+    // that a reload had just brought back, with its width.
+    if (!state.sidebarReady) return
+    if (!viewerFloorChatId) {
+      setViewerFloor(null)
+      return
+    }
+    const delegateStore = useDelegateStore.getState()
+    const firstTime = !delegateStore.paneShown[viewerFloorChatId]
+    setViewerFloor({ kind: "delegated", chatId: viewerFloorChatId }, { openByDefault: firstTime })
+    if (firstTime) delegateStore.markPaneShown(viewerFloorChatId)
+  }, [setViewerFloor, state.sidebarReady, viewerFloorChatId])
   const navigate = useNavigate()
   // The graph of a sub-chat is the graph of its top-most ancestor, so the
   // URL is rewritten to name that chat. One tree then has one address, and
@@ -732,6 +770,13 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
       />
     )
   }, [chatTabsEnabled, handleCloseLastChatTab, handleOpenProjectFolder, handleRenameActiveChat, handleRenameChatTab, handleSelectChatTab, navbarBranchName, navbarTitleActions, navbarTitleText, renderChatTabHoverCard, state.activeChatId, state.editorLabel, state.handleCompose])
+  // On a phone a delegator has no pane to keep its list in, so the list is a
+  // button in the navbar instead, always there. Memoized for the navbar's memo.
+  const delegatedListChatId = isDelegator ? state.activeChatId : null
+  const navbarActions = useMemo(
+    () => (delegatedListChatId ? <DelegatedListButton chatId={delegatedListChatId} overlay={isMobileViewport} /> : null),
+    [delegatedListChatId, isMobileViewport],
+  )
   const terminalLayout = useMemo(() => {
     const mainSizes = getEffectiveTerminalMainSizes(storedTerminalLayout.mainSizes, isMobileViewport)
     return mainSizes === storedTerminalLayout.mainSizes ? storedTerminalLayout : { ...storedTerminalLayout, mainSizes }
@@ -819,6 +864,8 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     fallbackRef: chatInputElementRef,
     enabled: state.hasSelectedProject,
     canCancel: state.canCancel,
+    // Every navigation has its own key, one to the chat already open too.
+    arrivalKey: location.key,
   })
 
   // The viewer takes focus when it opens (and the chat is inert under it
@@ -1002,6 +1049,21 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     transcriptListRef.current?.scrollToEnd()
   }, [clearShowScrollTimeout])
 
+  // The new chat page can send to one of the project's delegators instead of
+  // starting a chat. Only there: a chat with messages sends to itself.
+  const appDialog = useAppDialog()
+  const { delegate: composerDelegate, sendToDelegator } = useNewChatDelegate({
+    // Not on a delegator's own empty page: what is typed there is for it.
+    // Nor on a page whose chat is still loading, where the empty state is
+    // only being held over from the last page. A chat started here is known
+    // to be empty, so the control is in the composer from its first frame.
+    enabled: showEmptyState && !graphView && (!isChatLoading || state.activeChatStarted) && !isDelegator,
+    projectId,
+    socket: state.socket,
+    dialog: appDialog,
+  })
+  const delegateTargetChatId = composerDelegate?.target?.chatId ?? null
+
   const handleChatSubmit = useCallback(async (
     content: string,
     options?: Parameters<typeof state.handleSend>[1],
@@ -1013,8 +1075,15 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     // (see `attachDelegationBlock`). It is attached here, where the view is
     // known, and from here on it is part of the message: sent, queued or
     // steered the same.
+    //
+    // From the new chat page with delegating on, the message is not for this
+    // chat at all: it goes to the delegator, and the app goes with it.
+    if (delegateTargetChatId) {
+      await sendToDelegator(delegateTargetChatId, content, options)
+      return
+    }
     await state.handleSend(graphView ? attachDelegationBlock(content) : content, options)
-  }, [graphView, state.handleSend])
+  }, [delegateTargetChatId, graphView, sendToDelegator, state.handleSend])
 
   const handleListSkills = useCallback(
     (provider: AgentProvider) =>
@@ -1061,11 +1130,12 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     return () => clearShowScrollTimeout()
   }, [clearShowScrollTimeout])
 
-  useEffect(() => {
-    isAtEndRef.current = true
-    clearShowScrollTimeout()
-    setShowScrollToBottom(false)
-  }, [clearShowScrollTimeout, state.activeChatId])
+  // Nothing here resets the scroll-to-bottom button on a chat switch. The
+  // transcript says where the new chat stands as it mounts, before it is
+  // painted (`onIsAtEndChange`): at the end while it has no rows, then
+  // wherever it positions them. A reset from an effect here ran after that
+  // and undid it: between two chats both read part-way, the button went out
+  // and came back.
 
   useEffect(() => {
     function handleGlobalKeydown(event: KeyboardEvent) {
@@ -1241,13 +1311,14 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
 
   useEffect(() => () => viewerExpandAnimationRef.current?.cancel(), [])
 
-  // Opening slides the pane in, as the terminal and widget column slide, and
-  // so does going between a review and a preview; closing slides it shut
-  // around the viewer, which stays on screen for it (usePresentedViewer).
-  // Another chat, or a group that's new (another project, a phone turned
-  // desktop), takes its layout without the slide, as does reduced motion.
-  // Stepping between files of one kind leaves the split as it is. A width
-  // you dragged the pane to is the chat's, and it opens at it again.
+  // Opening slides the pane in, as the terminal and widget column slide;
+  // closing slides it shut around the viewer, which stays on screen for it
+  // (usePresentedViewer). Another chat, or a group that's new (another
+  // project, a phone turned desktop), takes its layout without the slide, as
+  // does reduced motion. While the pane stays open the split holds, whatever
+  // comes to be shown in it: it takes its width when it opens, from what it
+  // opens on. A width you dragged the pane to is the chat's, and it opens at
+  // it again.
   //
   // Expanded over the chat, the split is left alone, and coming out of
   // expanded it's set in one step behind the card: the chat's width is
@@ -1258,11 +1329,10 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     const state = viewerPaneState(viewerPaneOpen, viewerExpanded)
     viewerSplitStateRef.current = { group, state, chatKey: viewerChatKey }
     if (!group) return
-    const move = resolveViewerSplitMove(
-      previous.state,
-      state,
-      previous.group === group && previous.chatKey === viewerChatKey && !prefersReducedMotion(),
-    )
+    const move = resolveViewerSplitMove(previous.state, state, {
+      samePane: previous.group === group && previous.chatKey === viewerChatKey,
+      reducedMotion: prefersReducedMotion(),
+    })
     // A slide already under way goes on to where it was headed.
     if (move.to === "hold") return
     if (viewerSplitAnimationRef.current !== null) {
@@ -1301,6 +1371,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     const viewerWidth = splitWidth * ((layout.viewerPane ?? 0) / 100)
     if (splitWidth <= 0) return
     // Dragged shut is shut: not back to the chat preview under what was open.
+    // Dragged shut is shut: not back to what was under what was open.
     if (viewerWidth < VIEWER_PANE_CLOSE_WIDTH_PX) closeViewerPane()
     else setViewerWidth(Math.round(viewerWidth))
   }, [closeViewerPane, setViewerWidth, viewerDocked])
@@ -1352,6 +1423,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
           latestToolIds={state.latestToolIds}
           isProcessing={state.isProcessing}
           runtimeStatus={state.runtimeStatus}
+          waitingOn={state.runtime?.waitingOn}
           isDraining={state.isDraining}
           commandError={state.commandError}
           onStopDraining={state.handleStopDraining}
@@ -1412,6 +1484,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
         onCancel={handleCancel}
         onEditModels={handleEditModels}
         onListSkills={handleListSkills}
+        delegate={composerDelegate}
       />
       <DefaultModelsDialog
         open={defaultModelsDialogOpen}
@@ -1652,6 +1725,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
       rightSidebarShortcut={resolvedKeybindings.bindings.toggleRightSidebar}
       branchName={state.chatDiffSnapshot?.branchName}
       titleSlot={navbarTitle}
+      actionsSlot={navbarActions}
       hideBranchLabel={chatTabsEnabled}
       repoUrl={activeProjectRepoUrl}
       hasGitRepo={state.chatDiffSnapshot?.status !== "no_repo"}

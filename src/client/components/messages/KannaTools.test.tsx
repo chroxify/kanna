@@ -81,7 +81,9 @@ test("the expand button is a circle in the corner, named for assistive tech, wit
   const html = renderToStaticMarkup(<TooltipProvider><VisualizationExpandButton onClick={() => {}} /></TooltipProvider>)
   const { size, inset } = VISUALIZATION_EXPAND_BUTTON
   expect(html).toContain('aria-label="Expand"')
-  expect(html).toContain(`top:${inset}px;right:${inset}px;width:${size}px;height:${size}px`)
+  // Flush in the corner: React writes a zero without a unit.
+  expect(inset).toBe(0)
+  expect(html).toContain(`top:0;right:0;width:${size}px;height:${size}px`)
   expect(html).toContain("visualization-expand absolute")
   expect(html).toContain("rounded-full")
   expect(html).not.toContain(">Expand<")

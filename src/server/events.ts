@@ -153,6 +153,13 @@ export interface ChatRecord {
    * the parent like any sub-chat's.
    */
   adopted?: true
+  /**
+   * Set on a chat that coordinates work and hands it to other chats instead
+   * of doing it. Its agent is told so in its session instructions
+   * (`KANNA_DELEGATOR_INSTRUCTIONS`), and every chat it starts or messages
+   * becomes its sub-chat (`ChatOrchestrator`). Otherwise an ordinary chat.
+   */
+  delegator?: true
   /** The chat this one was forked from. */
   forkedFromChatId?: string
   /** The chat whose agent created this one. Absent when a user did. */
@@ -278,6 +285,15 @@ export type ChatEvent =
       parentChatId?: string
       forkedFromChatId?: string
       createdByChatId?: string
+      delegator?: boolean
+    }
+  | {
+      v: 2
+      /** Makes an existing chat a delegator, or an ordinary chat again. */
+      type: "chat_delegator_set"
+      timestamp: number
+      chatId: string
+      delegator: boolean
     }
   | {
       v: 2

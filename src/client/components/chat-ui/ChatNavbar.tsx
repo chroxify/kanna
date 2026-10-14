@@ -137,6 +137,8 @@ interface Props {
    * node, so memoize it: this bar is.
    */
   titleSlot?: ReactNode
+  /** Sits immediately left of the widgets toggle: a delegator's list button. */
+  actionsSlot?: ReactNode
   /**
    * Drops the branch name (or "Setup Git") from the right sidebar's button,
    * leaving its icon. For the tab bar, where every pixel of the bar is a
@@ -287,6 +289,7 @@ function ChatNavbarImpl({
   rightSidebarShortcut,
   branchName,
   titleSlot,
+  actionsSlot,
   hideBranchLabel = false,
   repoUrl,
   hasGitRepo = true,
@@ -455,6 +458,7 @@ function ChatNavbarImpl({
                     )}
                   </Button>
                 ) : null}
+                {actionsSlot}
                 {onToggleWidgets ? (
                   <HotkeyTooltip>
                     <HotkeyTooltipTrigger asChild>

@@ -1,6 +1,6 @@
 import { useCallback } from "react"
 import { create } from "zustand"
-import { SIDEBAR_PINNED_EXPANDED_STORAGE_KEY } from "../lib/storageKeys"
+import { SIDEBAR_DELEGATORS_EXPANDED_STORAGE_KEY, SIDEBAR_PINNED_EXPANDED_STORAGE_KEY } from "../lib/storageKeys"
 
 /**
  * Which sidebar sections you have opened or folded, against their defaults.
@@ -12,11 +12,11 @@ import { SIDEBAR_PINNED_EXPANDED_STORAGE_KEY } from "../lib/storageKeys"
  *
  * One set of overrides per list (`scope`), keyed by the section's stable key.
  *
- * In memory, so a reload starts from the defaults, except for Pinned, which
- * is kept in this browser. The other sections are named for what is in them
- * today (a date, "Relevant"), and a fold that outlived the day would hide
- * tomorrow's chats under the same name. Pinned is the one section that is
- * the same thing every day, and folding it is a standing choice.
+ * In memory, so a reload starts from the defaults, except for Pinned and
+ * Delegators, which are kept in this browser. The other sections are named
+ * for what is in them today (a date, "Relevant"), and a fold that outlived
+ * the day would hide tomorrow's chats under the same name. Those two are the
+ * same thing every day, and folding one is a standing choice.
  */
 
 type SectionOverrides = Readonly<Record<string, boolean>>
@@ -28,32 +28,42 @@ interface SidebarSectionState {
 
 const NO_OVERRIDES: SectionOverrides = {}
 
-/** The one section whose fold is remembered across reloads. */
-const PERSISTED_SECTION_KEY = "pinned"
+/**
+ * The sections whose fold is remembered across reloads, and where. One
+ * storage key each, holding a map of list to expanded: Pinned's was there
+ * first, in that shape, and a second key leaves it as it is.
+ */
+const PERSISTED_SECTIONS: Readonly<Record<string, string>> = {
+  pinned: SIDEBAR_PINNED_EXPANDED_STORAGE_KEY,
+  delegators: SIDEBAR_DELEGATORS_EXPANDED_STORAGE_KEY,
+}
 
 function readStoredOverrides(): Record<string, SectionOverrides> {
   if (typeof window === "undefined") return {}
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(SIDEBAR_PINNED_EXPANDED_STORAGE_KEY) ?? "{}")
-    if (!parsed || typeof parsed !== "object") return {}
-    return Object.fromEntries(
-      Object.entries(parsed)
-        .filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean")
-        .map(([scope, expanded]) => [scope, { [PERSISTED_SECTION_KEY]: expanded }])
-    )
-  } catch {
-    return {}
+  const overrides: Record<string, Record<string, boolean>> = {}
+  for (const [sectionKey, storageKey] of Object.entries(PERSISTED_SECTIONS)) {
+    try {
+      const parsed: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}")
+      if (!parsed || typeof parsed !== "object") continue
+      for (const [scope, expanded] of Object.entries(parsed)) {
+        if (typeof expanded === "boolean") (overrides[scope] ??= {})[sectionKey] = expanded
+      }
+    } catch {
+      // Unreadable: that section starts from its default.
+    }
   }
+  return overrides
 }
 
-function persistPinnedOverrides(overrides: Readonly<Record<string, SectionOverrides>>) {
-  if (typeof window === "undefined") return
+function persistOverrides(sectionKey: string, overrides: Readonly<Record<string, SectionOverrides>>) {
+  const storageKey = PERSISTED_SECTIONS[sectionKey]
+  if (typeof window === "undefined" || !storageKey) return
   const stored = Object.fromEntries(
     Object.entries(overrides).flatMap(([scope, sections]) => (
-      PERSISTED_SECTION_KEY in sections ? [[scope, sections[PERSISTED_SECTION_KEY]]] : []
+      sectionKey in sections ? [[scope, sections[sectionKey]]] : []
     ))
   )
-  window.localStorage.setItem(SIDEBAR_PINNED_EXPANDED_STORAGE_KEY, JSON.stringify(stored))
+  window.localStorage.setItem(storageKey, JSON.stringify(stored))
 }
 
 const useSidebarSectionStore = create<SidebarSectionState>()((set) => ({
@@ -63,7 +73,7 @@ const useSidebarSectionStore = create<SidebarSectionState>()((set) => ({
       ...state.overrides,
       [scope]: { ...state.overrides[scope], [sectionKey]: expanded },
     }
-    if (sectionKey === PERSISTED_SECTION_KEY) persistPinnedOverrides(overrides)
+    persistOverrides(sectionKey, overrides)
     return { overrides }
   }),
 }))

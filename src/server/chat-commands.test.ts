@@ -44,6 +44,23 @@ describe("chat commands", () => {
     expect(outcome.changed).toEqual({ sidebar: true, localProjects: true, chatIds: [outcome.result.chatId] })
   })
 
+  test("a chat takes the id its client made for it, if that is a UUID nothing else has", async () => {
+    const { commands, project, store } = await setup()
+    const chatId = "0b9c4d0e-6f0a-4a57-9d55-1f3a6c1d2e77"
+    const outcome = await commands.create(project.id, undefined, { chatId })
+    expect(outcome.result.chatId).toBe(chatId)
+    expect(store.getChat(chatId)).toMatchObject({ projectId: project.id, title: "New Chat" })
+
+    await expect(commands.create(project.id, undefined, { chatId })).rejects.toThrow("Chat already exists")
+    // The id becomes file names.
+    for (const bad of ["../../etc/passwd", "chat-1", "", "0B9C4D0E-6F0A-4A57-9D55-1F3A6C1D2E77", `${chatId}/x`]) {
+      await expect(commands.create(project.id, undefined, { chatId: bad })).rejects.toThrow("Invalid chat id")
+    }
+    // A deleted chat keeps its id.
+    await commands.delete(chatId)
+    await expect(commands.create(project.id, undefined, { chatId })).rejects.toThrow("Chat already exists")
+  })
+
   test("a chat an agent creates carries its lineage and is not counted as the user's", async () => {
     const { commands, project, store, tracked } = await setup()
     const mine = await commands.create(project.id)

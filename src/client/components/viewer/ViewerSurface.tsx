@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Maximize2, Minimize2, X } from "lucide-react"
+import { ArrowLeft, ChevronDown, ChevronUp, Maximize2, Minimize2, X } from "lucide-react"
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
 import { isEscapeClaimed, resolveEscapePress, VIEWER_FIELDS_KEEP_ESCAPE_ATTRIBUTE } from "../../lib/escape-key"
@@ -12,6 +12,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
  * chat, and expands over the chat (navbar, transcript, composer) on
  * request; elsewhere it covers the page.
  *
+ * In a pane (docked or expanded) the card runs off the bottom of what it is
+ * placed in: square bottom corners, no bottom border, nothing under it. It
+ * is a sheet standing on the window's bottom edge, like the chat beside it,
+ * and not a card floating over it. So a composer docked at its bottom (a
+ * previewed chat's) sits at the height of the chat's own, where a card inset
+ * all round held it 9px higher: its 8px margin and its border. On a phone
+ * and in the export viewer it is an inset card with all four corners.
+ *
  * One header grammar: what it is (icon, title, a muted subtitle), then the
  * view's own controls, then stepping between items when there are several,
  * then expand and close. The body scrolls; the header stays.
@@ -22,11 +30,25 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
  * only for what is nearer the key: an open menu or dialog, and a field that
  * is not a composer, so Esc in vim in the terminal below is still vim's.
  *
+ * Where the pane has a floor (a delegator's page: `ViewerFloorProvider`)
+ * what is over the floor has two ways out: a Back arrow at the head of the
+ * card, to the floor, and Close, which shuts the pane. Esc there is Back,
+ * one level at a time, so it shuts the pane only from the floor itself.
+ *
  * j/k (or ]/[) step when there's more than one item, but never while you're
  * typing in a field. In a pane beside the chat they're the viewer's only
  * while focus is in it: the chat is live then, and a j typed there is the
  * chat's. Over the chat they're the viewer's from anywhere but a field.
  */
+
+/**
+ * Bottom padding for content that scrolls in the card and would otherwise end
+ * hard on the window's edge where the card runs off it: a file's last line,
+ * the last changed file. Nothing where the card is inset and has its own
+ * bottom edge. Not for content that fills the card (a chat, a graph, a
+ * table), which is meant to meet the edge.
+ */
+export const VIEWER_END_PAD_CLASS = "group-data-[bleed]/viewer:pb-4"
 
 /** The page gave the viewer a pane beside the chat, which it can widen over the chat. */
 export interface ViewerPlacement {
@@ -37,10 +59,107 @@ export interface ViewerPlacement {
 const ViewerPlacementContext = createContext<ViewerPlacement | null>(null)
 export const ViewerPlacementProvider = ViewerPlacementContext.Provider
 
+/**
+ * The pane this card is in has a floor under what is opened in it (see
+ * `lib/viewer-levels`). `onBack` goes down one level, and is null for the
+ * card that is the floor. `onShut` closes the pane from any level: the
+ * card's Close, where `onClose` (what Escape does) would only step back.
+ */
+export interface ViewerFloorState {
+  onBack: (() => void) | null
+  /** What Back returns to, for its label. */
+  backLabel: string
+  onShut: () => void
+}
+
+const ViewerFloorContext = createContext<ViewerFloorState | null>(null)
+export const ViewerFloorProvider = ViewerFloorContext.Provider
+
+/**
+ * What a card mounting now should animate, which depends on what was there a
+ * moment ago and only the layer that places cards knows that.
+ *
+ * Every kind of content draws its own card, so a change of kind unmounts one
+ * card and mounts another in the same place. The frame is identical before
+ * and after, and a frame that is the same must not move: played on each
+ * mount, the card's entrance made the whole pane leave and come back to show
+ * a chat picked from a list. So the entrance belongs to the pane opening
+ * (`viewerCardEnters`), and a card mounted into an open pane arrives still.
+ *
+ * What does change then is the body, and it gets the least that takes the
+ * snap off: opacity, 150ms, on the app's strong ease-out. Nothing moves, and
+ * the header changes in place. Not for a change made from the keyboard, which
+ * should land at once, and not under reduced motion.
+ */
+export interface ViewerMotion {
+  /** The pane is opening: the card grows in. */
+  cardEnters: boolean
+  /** The pane was open and its content changed by pointer: the body fades in. */
+  bodyEnters: boolean
+}
+
+/** With no layer to say otherwise (a card used on its own), a card is something that just opened. */
+const ViewerMotionContext = createContext<ViewerMotion>({ cardEnters: true, bodyEnters: false })
+export const ViewerMotionProvider = ViewerMotionContext.Provider
+export function useViewerMotion(): ViewerMotion {
+  return useContext(ViewerMotionContext)
+}
+
+/**
+ * The body's fade, as classes for whatever is mounting with new content: a
+ * transition from `@starting-style`, so it needs no state, and a second
+ * change mid-fade simply mounts the next thing.
+ */
+export const VIEWER_BODY_ENTER_CLASS = "transition-opacity duration-150 ease-snappy starting:opacity-0 motion-reduce:transition-none"
+
+/** The card's frame, shared with its stand-in below so the two cannot drift. */
+function viewerCardClass(inPane: boolean, enters: boolean) {
+  return cn(
+    "group/viewer flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border outline-none",
+    // Grown from the edge it stands on. From its centre, as the inset
+    // card grows, the 2% it is short of at the start would lift its foot
+    // off the window's edge and show what is under it for the length of
+    // the entrance. `ViewerLayer` takes the padding out from under it.
+    inPane && "origin-bottom rounded-b-none border-b-0",
+    // The card says once what colour it is, and is painted from that. A
+    // transcript shown in it (a previewed chat) fades and fills with the
+    // same `surface`, in either theme, wherever the card is placed.
+    "bg-surface [--surface:var(--color-background)] dark:[--surface:var(--color-card)]",
+    // Opens like the modal it effectively is: a touch small and faded,
+    // 200ms. Only when the pane itself is opening (`ViewerMotion`): the
+    // transition is always there, for the layer's exit to use, and what
+    // starts it on mount is the starting style. It leaves at once: closing
+    // is you done with it, and a fade would hold it over the chat you went
+    // back to.
+    "transition-[opacity,scale] duration-200 ease-snappy",
+    enters && "starting:scale-[0.98] starting:opacity-0 motion-reduce:starting:scale-100",
+  )
+}
+
+/**
+ * The card with nothing in it yet: what holds the pane while the code for a
+ * view is still being fetched, the first time one of its kind is opened.
+ * Without it the pane was bare for that moment, and the card that then
+ * arrived was one more thing leaving and coming back.
+ */
+export function ViewerCardPlaceholder() {
+  const placement = useContext(ViewerPlacementContext)
+  const motion = useContext(ViewerMotionContext)
+  const [enters] = useState(motion.cardEnters)
+  return (
+    <div aria-hidden data-bleed={placement ? "" : undefined} className={viewerCardClass(placement !== null, enters)}>
+      <div className="h-[49px] shrink-0 border-b border-border" />
+    </div>
+  )
+}
+
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false
   return target.isContentEditable || target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT"
 }
+
+/** Where each remembered body was left; see `scrollMemoryKey`. */
+const scrollMemory = new Map<string, number>()
 
 export interface ViewerNavigation {
   index: number
@@ -60,6 +179,8 @@ export function ViewerSurface({
   bodyClassName,
   label,
   scrollKey,
+  scrollMemoryKey,
+  quietFocus = false,
   center,
   leading,
   fieldsKeepEscape = false,
@@ -92,10 +213,30 @@ export function ViewerSurface({
    * scrolled to the file you clicked).
    */
   scrollKey?: string
+  /**
+   * Names a body whose scroll is worth coming back to: a card mounting with
+   * a key opens where the last card with that key was left. For a list that
+   * things are opened from and gone back to, which is a new card each time.
+   * Kept for the life of the page.
+   */
+  scrollMemoryKey?: string
+  /** Does not take focus from something focused outside the pane when it mounts. See the focus effect. */
+  quietFocus?: boolean
 }) {
   const surfaceRef = useRef<HTMLDivElement | null>(null)
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const placement = useContext(ViewerPlacementContext)
+  const floor = useContext(ViewerFloorContext)
+  // As it was when this card mounted: these are entrances, and a card that
+  // has arrived does not play one again because something later changed.
+  const motion = useContext(ViewerMotionContext)
+  const [cardEnters] = useState(motion.cardEnters)
+  const [bodyEnters] = useState(motion.bodyEnters)
+  // The view's own Back (a previewed chat names what it goes back to), or
+  // the pane's, for a view that has none of its own.
+  const back = leading ?? (floor?.onBack ? (
+    <ViewerIconButton label={`${floor.backLabel} (Esc)`} onClick={floor.onBack}><ArrowLeft /></ViewerIconButton>
+  ) : null)
   const docked = placement !== null && !placement.expanded
   const dockedRef = useRef(docked)
   dockedRef.current = docked
@@ -109,9 +250,29 @@ export function ViewerSurface({
     if (scrollKey !== undefined) bodyRef.current?.scrollTo({ top: 0 })
   }, [scrollKey])
 
+  // Before paint, so the list is never seen at its top first.
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (!scrollMemoryKey || !body) return
+    const remembered = scrollMemory.get(scrollMemoryKey)
+    if (remembered) body.scrollTop = remembered
+    const remember = () => scrollMemory.set(scrollMemoryKey, body.scrollTop)
+    body.addEventListener("scroll", remember, { passive: true })
+    return () => body.removeEventListener("scroll", remember)
+  }, [scrollMemoryKey])
+
   // Focus comes here on open, so its keys work at once and nothing behind
-  // (the composer, now inert) keeps it.
+  // (the composer, now inert) keeps it. A card that asks to be quiet about
+  // it leaves focus where it is when that is somewhere outside the pane: a
+  // delegator's list is there when its page opens, and the composer the
+  // page focused must keep what is typed next. Coming back to such a card
+  // from one that had focus and is gone, it takes it like any other.
+  const quietFocusRef = useRef(quietFocus)
   useEffect(() => {
+    if (quietFocusRef.current) {
+      const active = document.activeElement
+      if (active && active !== document.body && !active.closest("[data-viewer-surface]")) return
+    }
     surfaceRef.current?.focus({ preventScroll: true })
   }, [])
 
@@ -173,18 +334,11 @@ export function ViewerSurface({
       {...{ [FOCUS_FALLBACK_IGNORE_ATTRIBUTE]: "" }}
       data-state={docked ? undefined : "open"}
       data-viewer-surface
+      // For what is shown in it, which keeps its last line clear of the
+      // window's edge once the card no longer does (`VIEWER_END_PAD_CLASS`).
+      data-bleed={placement ? "" : undefined}
       {...(fieldsKeepEscape ? { [VIEWER_FIELDS_KEEP_ESCAPE_ATTRIBUTE]: "" } : {})}
-      className={cn(
-        "flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border outline-none",
-        // The card says once what colour it is, and is painted from that. A
-        // transcript shown in it (a previewed chat) fades and fills with the
-        // same `surface`, in either theme, wherever the card is placed.
-        "bg-surface [--surface:var(--color-background)] dark:[--surface:var(--color-card)]",
-        // Opens like the modal it effectively is: from its own centre, a
-        // touch small and faded, 200ms. It leaves at once: closing is you
-        // done with it, and a fade would hold it over the chat you went back to.
-        "transition-[opacity,scale] duration-200 ease-snappy starting:scale-[0.98] starting:opacity-0 motion-reduce:starting:scale-100",
-      )}
+      className={viewerCardClass(placement !== null, cardEnters)}
     >
       {/* pr-2 matches the gap-2 either side of a divider, so the close
           button sits centred between the last divider and the card's edge. */}
@@ -200,7 +354,7 @@ export function ViewerSurface({
         <div className={cn("flex min-w-0 items-center gap-2", !center && "flex-1")}>
           {/* Pulled out by the header's own left padding less the 8px the
               close button keeps on the right, so the two sit alike. */}
-          {leading ? <div className="-ml-2 flex shrink-0 items-center">{leading}</div> : null}
+          {back ? <div className="-ml-2 flex shrink-0 items-center">{back}</div> : null}
           {icon ? <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4">{icon}</span> : null}
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <span className="min-w-0 max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">{title}</span>
@@ -224,10 +378,11 @@ export function ViewerSurface({
               {placement.expanded ? <Minimize2 /> : <Maximize2 />}
             </ViewerIconButton>
           ) : null}
-          <ViewerIconButton label="Close (Esc)" onClick={onClose}><X /></ViewerIconButton>
+          {/* Esc is Back while there is one, so Close names the key only where it is what the key does. */}
+          <ViewerIconButton label={back && floor ? "Close" : "Close (Esc)"} onClick={floor ? floor.onShut : onClose}><X /></ViewerIconButton>
         </div>
       </header>
-      <div ref={bodyRef} className={cn("min-h-0 flex-1 overflow-auto", bodyClassName)}>{children}</div>
+      <div ref={bodyRef} className={cn("min-h-0 flex-1 overflow-auto", bodyEnters && VIEWER_BODY_ENTER_CLASS, bodyClassName)}>{children}</div>
     </div>
   )
 }

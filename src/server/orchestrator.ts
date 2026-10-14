@@ -38,6 +38,11 @@ import {
  * it and may be one the user works in. It gets the first behaviour whole. It
  * holds the parent only while it owes a report, and stopping the parent
  * leaves it running. `ChatRecord.adopted` marks it.
+ *
+ * A delegator (`ChatRecord.delegator`) is a chat whose job is to hand work
+ * on and hear back. Its agent is asked to keep every chat it uses under it,
+ * and that is not left to the asking: whatever it passes, a chat it creates
+ * or forks is its sub-chat, and a chat it messages is adopted.
  */
 
 /** Agent-created chats nest at most this deep below a chat the user started. */
@@ -146,6 +151,8 @@ export interface AgentChatSummary {
   parentChatId?: string
   /** The parent adopted it and did not start it. See `ChatRecord.adopted`. */
   adopted?: true
+  /** It hands work to the chats under it instead of doing it. See `ChatRecord.delegator`. */
+  delegator?: true
   forkedFromChatId?: string
   createdByChatId?: string
   lastMessageAt?: string
@@ -343,6 +350,11 @@ export class ChatOrchestrator {
     return this.childrenOf(chatId).some((child) => this.holdsParent(child))
   }
 
+  /** How many sub-chats are holding this chat in its wait: the count behind `hasLiveSubchats`. */
+  countSubchatsHolding(chatId: string) {
+    return this.childrenOf(chatId).filter((child) => this.holdsParent(child)).length
+  }
+
   /**
    * Whether this sub-chat keeps its parent from being finished. One the
    * parent started does for as long as it works. An adopted one has turns its
@@ -433,6 +445,7 @@ export class ChatOrchestrator {
       planMode: chat.planMode,
       ...(chat.parentChatId ? { parentChatId: chat.parentChatId } : {}),
       ...(chat.adopted ? { adopted: true as const } : {}),
+      ...(chat.delegator ? { delegator: true as const } : {}),
       ...(chat.forkedFromChatId ? { forkedFromChatId: chat.forkedFromChatId } : {}),
       ...(chat.createdByChatId ? { createdByChatId: chat.createdByChatId } : {}),
       ...(chat.lastMessageAt ? { lastMessageAt: iso(chat.lastMessageAt) } : {}),
@@ -704,7 +717,8 @@ export class ChatOrchestrator {
     subchat?: boolean
   }) {
     const caller = this.requireChat(actorChatId)
-    const subchat = input.subchat ?? true
+    // A delegator's chats are always under it. See the note at the top.
+    const subchat = caller.delegator ? true : input.subchat ?? true
     const projectId = input.projectId ?? caller.projectId
     if (!this.store.getProject(projectId)) {
       throw new Error(`Project ${projectId} not found. get_context lists the projects.`)
@@ -736,7 +750,8 @@ export class ChatOrchestrator {
   }) {
     const source = this.requireChat(input.chatId ?? actorChatId)
     // A fork handed work is delegation, so it reports back unless told not to.
-    const subchat = input.subchat ?? Boolean(input.message)
+    // A delegator's fork is under it either way.
+    const subchat = this.requireChat(actorChatId).delegator ? true : input.subchat ?? Boolean(input.message)
     this.checkBudget(actorChatId)
     const forked = await this.commands.fork(source.id, {
       createdByChatId: actorChatId,
@@ -775,7 +790,8 @@ export class ChatOrchestrator {
     })
     // Before the send: the turn it starts is told who its parent is, and the
     // report it earns is addressed by the link.
-    const adoption = input.adopt ? await this.adopt(actorChatId, target) : null
+    const delegating = Boolean(this.requireChat(actorChatId).delegator)
+    const adoption = input.adopt || delegating ? await this.adopt(actorChatId, target, { forced: delegating && !input.adopt }) : null
     let sent: { queuedMessageId?: string }
     try {
       sent = await this.send(actorChatId, target, input.message, run, {
@@ -819,10 +835,12 @@ export class ChatOrchestrator {
    * every chat under it, goes on counting against whichever conversation
    * created it.
    */
-  private async adopt(actorChatId: string, target: ChatRecord) {
+  private async adopt(actorChatId: string, target: ChatRecord, options?: { forced?: boolean }) {
     if (target.parentChatId === actorChatId) return null
     if (this.isParentOf(actorChatId, target.id)) {
-      throw new Error(`Chat ${target.id} is above this chat in the chain of chats that started it, so adopting it would make a loop. Send the message without adopt.`)
+      throw new Error(`Chat ${target.id} is above this chat in the chain of chats that started it, so adopting it would make a loop. ${options?.forced
+        ? "This chat is a delegator, which adopts every chat it messages, so it cannot message that one. What this chat says when its turn ends is reported to it."
+        : "Send the message without adopt."}`)
     }
     const former = {
       parent: target.parentChatId ? { parentChatId: target.parentChatId, adopted: Boolean(target.adopted) } : null,

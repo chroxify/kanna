@@ -143,7 +143,7 @@ describe("QueuedUserMessage", () => {
     expect(html.indexOf('aria-label="Remove from queue"')).toBeGreaterThan(bubble)
     // The same line as over a delivered bubble. Its 20px keep the quote, which
     // can reach over the corner Remove is on, well clear of Remove.
-    expect(html).toContain("my-[3px] ml-[18px] h-[14px] w-[3px] rounded-full bg-border")
+    expect(html).toContain('class="my-[3px] h-[14px] w-[3px] rounded-full bg-border" style="margin-left:17.5px"')
     expect(html).toContain("right-0 translate-x-[28%]")
   })
 

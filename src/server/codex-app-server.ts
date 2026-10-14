@@ -186,6 +186,8 @@ export interface StartCodexSessionArgs {
 export interface StartCodexTurnArgs {
   chatId: string
   model: string
+  /** The chat is a delegator, which its instructions say. */
+  delegator?: boolean
   effort?: CodexReasoningEffort
   serviceTier?: ServiceTier
   content: string
@@ -1110,7 +1112,7 @@ export class CodexAppServerManager {
             // Codex's instruction channel is per-turn, not per-session: this is
             // re-sent every turn by design. It appends to the built-in
             // developer message rather than replacing it.
-            developer_instructions: buildKannaSystemInstructions(buildKannaAgentId("codex", args.model)),
+            developer_instructions: buildKannaSystemInstructions(buildKannaAgentId("codex", args.model), { delegator: args.delegator }),
           },
         },
       } satisfies TurnStartParams)

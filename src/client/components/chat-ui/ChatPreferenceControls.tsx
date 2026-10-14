@@ -69,12 +69,15 @@ export function InputPopover({
   trigger,
   triggerClassName,
   disabled = false,
+  disabledTitle,
   align = "center",
   children,
 }: {
   trigger: React.ReactNode
   triggerClassName?: string
   disabled?: boolean
+  /** Why it is disabled, as the control's tooltip. */
+  disabledTitle?: string
   /** Where the panel lines up with the trigger. Composer controls center it; a trigger pinned to an edge wants "start". */
   align?: "start" | "center" | "end"
   children: React.ReactNode | ((close: () => void) => React.ReactNode)
@@ -85,6 +88,7 @@ export function InputPopover({
     return (
       <button
         disabled
+        title={disabledTitle}
         className={cn(
           "flex items-center gap-1.5 px-2 py-1 text-sm rounded-md text-muted-foreground [&>svg]:shrink-0 opacity-70 cursor-default [&>span]:whitespace-nowrap",
           triggerClassName
@@ -218,6 +222,14 @@ interface ChatPreferenceControlsProps {
    */
   hideDefaults?: boolean
   className?: string
+  /** Drawn first in the row, before the harness: the new chat page's delegate control. */
+  leading?: React.ReactNode
+  /**
+   * The values shown are another chat's and are not this row's to change:
+   * every control is dimmed and opens nothing. `readOnlyTitle` says whose.
+   */
+  readOnly?: boolean
+  readOnlyTitle?: string
 }
 
 const MODE_ICONS: Record<ChatMode, typeof LockOpen> = {
@@ -243,6 +255,9 @@ export function ChatPreferenceControls({
   includeMode = true,
   hideDefaults = false,
   className,
+  leading,
+  readOnly = false,
+  readOnlyTitle,
 }: ChatPreferenceControlsProps) {
   const providerConfig = availableProviders.find((provider) => provider.id === selectedProvider) ?? availableProviders[0]
   const unauthenticatedHarnesses = useUnauthenticatedHarnesses()
@@ -293,9 +308,11 @@ export function ChatPreferenceControls({
 
   return (
     <div className={cn("flex md:justify-center items-center gap-0.5", className)}>
+      {leading}
       {showProviderPicker ? (
         <InputPopover
-          disabled={providerLocked || !onProviderChange}
+          disabled={readOnly || providerLocked || !onProviderChange}
+          disabledTitle={readOnly ? readOnlyTitle : undefined}
           trigger={(
             <>
               <ProviderIcon className="h-3.5 w-3.5" />
@@ -329,6 +346,8 @@ export function ChatPreferenceControls({
       ) : null}
 
       <InputPopover
+        disabled={readOnly}
+        disabledTitle={readOnlyTitle}
         trigger={(
           <>
             <ModelIcon className="h-3.5 w-3.5" />
@@ -371,6 +390,8 @@ export function ChatPreferenceControls({
 
       {controls.reasoning ? (
         <InputPopover
+          disabled={readOnly}
+          disabledTitle={readOnlyTitle}
           trigger={(
             <>
               <Brain className="h-3.5 w-3.5" />
@@ -400,6 +421,8 @@ export function ChatPreferenceControls({
 
       {contextWindowControl ? (
         <InputPopover
+          disabled={readOnly}
+          disabledTitle={readOnlyTitle}
           trigger={(
             <>
               <ContextWindowIcon className="h-3.5 w-3.5" />
@@ -432,6 +455,8 @@ export function ChatPreferenceControls({
         const fastLabel = selectedProvider === "cursor" ? "Fast" : "Fast Mode"
         return (
           <InputPopover
+            disabled={readOnly}
+            disabledTitle={readOnlyTitle}
             trigger={(
               <>
                 {fastEnabled
@@ -473,6 +498,8 @@ export function ChatPreferenceControls({
         const TriggerIcon = MODE_ICONS[modeControl.selected]
         return (
           <InputPopover
+            disabled={readOnly}
+            disabledTitle={readOnlyTitle}
             trigger={(
               <>
                 <TriggerIcon className="h-3.5 w-3.5" />

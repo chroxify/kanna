@@ -1259,6 +1259,52 @@ describe("ws-router", () => {
     expect(ws.sent).toHaveLength(6)
   })
 
+  test("a waiting chat's count reaches the sidebar when it changes, though its status has not", async () => {
+    const state = createEmptyState()
+    state.projectsById.set("project-1", { id: "project-1", localPath: "/tmp/project", title: "Project", createdAt: 1, updatedAt: 1 })
+    state.chatsById.set("chat-1", {
+      id: "chat-1",
+      projectId: "project-1",
+      title: "Chat",
+      createdAt: 1,
+      updatedAt: 1,
+      unread: false,
+      provider: null,
+      planMode: false,
+      autoPlan: false,
+      sessionToken: null,
+      lastTurnOutcome: null,
+    })
+    let chats = 2
+    const router = createTestRouter({
+      // Versioned, as the real store is, so the sidebar is memoized: a count
+      // left out of the memo's key would be served stale from it.
+      store: createFakeStore({ state, stateVersion: 1 }),
+      agent: {
+        getActiveStatuses: () => new Map(),
+        getChatStatuses: () => new Map([["chat-1", "waiting_on_subagent"]]),
+        getWaitingOn: () => ({ chats, agents: 0 }),
+        getDrainingChatIds: () => new Set(),
+      } as never,
+    })
+    const ws = new FakeWebSocket()
+    router.handleOpen(ws as never)
+    ws.data.subscriptions.set("sidebar-1", { type: "sidebar" })
+
+    await router.broadcastChatChange({ sidebar: true })
+    expect(JSON.stringify(ws.sent.at(-1))).toContain('"waitingOn":{"chats":2,"agents":0}')
+    const sentBefore = ws.sent.length
+
+    // Nothing moved: nothing sent.
+    await router.broadcastChatChange({ sidebar: true })
+    expect(ws.sent).toHaveLength(sentBefore)
+
+    chats = 1
+    await router.broadcastChatChange({ sidebar: true })
+    expect(ws.sent.length).toBeGreaterThan(sentBefore)
+    expect(JSON.stringify(ws.sent.at(-1))).toContain('"chats":1')
+  })
+
   test("subscribes to project git snapshots independently from chat snapshots", async () => {
     const state = createEmptyState()
     state.projectsById.set("project-1", {
@@ -2745,5 +2791,127 @@ describe("transcript windows", () => {
     // The first push and the unsubscribe ack, nothing after.
     expect(ws.sent).toHaveLength(2)
     expect(ws.sent[1]).toEqual({ v: PROTOCOL_VERSION, type: "ack", id: "bg" })
+  })
+
+  test("chat.create makes a delegator when asked, and chat.setDelegator changes one", async () => {
+    const calls: unknown[] = []
+    const router = createTestRouter({
+      store: createFakeStore({
+        createChat: async (projectId: string, lineage: unknown, options: unknown) => {
+          calls.push(["create", projectId, lineage, options])
+          return { id: `chat-${calls.length}` }
+        },
+        setChatDelegator: async (chatId: string, delegator: boolean) => { calls.push(["set", chatId, delegator]) },
+      }),
+    })
+    const ws = new FakeWebSocket()
+    const send = (id: string, command: unknown) => router.handleMessage(ws as never, JSON.stringify({ v: 1, type: "command", id, command }))
+
+    await send("a", { type: "chat.create", projectId: "project-1", delegator: true })
+    await send("b", { type: "chat.create", projectId: "project-1" })
+    await send("c", { type: "chat.setDelegator", chatId: "chat-1", delegator: false })
+
+    expect(calls).toEqual([
+      ["create", "project-1", undefined, { delegator: true }],
+      ["create", "project-1", undefined, { delegator: undefined }],
+      ["set", "chat-1", false],
+    ])
+    // The new chat's id comes back on the ack, as for any chat.
+    expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "a", result: { chatId: "chat-1" } })
+    expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "c" })
+  })
+
+  // The web client goes to a new chat's page as it sends `chat.create`, with
+  // an id of its own making, so the page's subscription can be handled while
+  // the chat is still being written. Whichever lands first, the socket ends
+  // up holding the chat.
+  test.each(["create first", "subscribe first"])("a chat made with the client's id reaches a subscription sent alongside it (%s)", async (order) => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "kanna-client-chat-id-"))
+    try {
+      const store = new EventStore(dataDir)
+      await store.initialize()
+      const project = await store.openProject(dataDir)
+      const router = createTestRouter({ store })
+      const ws = new FakeWebSocket()
+      router.handleOpen(ws as never)
+      const chatId = "0b9c4d0e-6f0a-4a57-9d55-1f3a6c1d2e77"
+      const create = () => router.handleMessage(ws as never, JSON.stringify({
+        v: PROTOCOL_VERSION, type: "command", id: "create", command: { type: "chat.create", projectId: project.id, chatId },
+      }))
+      const subscribe = () => router.handleMessage(ws as never, JSON.stringify({
+        v: PROTOCOL_VERSION, type: "subscribe", id: "chat-sub", topic: { type: "chat", chatId },
+      }))
+
+      // Neither is awaited before the other is handed over, as on a socket.
+      await Promise.all(order === "create first" ? [create(), subscribe()] : [subscribe(), create()])
+
+      expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "create", result: { chatId } })
+      const pushes = ws.sent.filter((message): message is { id: string; snapshot: { data: { runtime: { chatId: string; title: string } } | null } } => (
+        (message as { type?: string; id?: string }).type === "snapshot" && (message as { id?: string }).id === "chat-sub"
+      ))
+      expect(pushes.at(-1)?.snapshot.data?.runtime).toMatchObject({ chatId, title: "New Chat", projectId: project.id })
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  // What the new chat's page sends behind its `chat.create` is handled while
+  // the chat is still on its way to disk. It waits for the chat, rather than
+  // being told there is no such chat.
+  test("what names a chat still being made waits for it", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "kanna-client-chat-id-"))
+    try {
+      const store = new EventStore(dataDir)
+      await store.initialize()
+      const project = await store.openProject(dataDir)
+      const router = createTestRouter({ store })
+      const ws = new FakeWebSocket()
+      router.handleOpen(ws as never)
+      const chatId = "5d2f8a10-3c4b-4e6f-8a9b-0c1d2e3f4a5b"
+      const send = (envelope: Record<string, unknown>) => router.handleMessage(ws as never, JSON.stringify({ v: PROTOCOL_VERSION, ...envelope }))
+
+      await Promise.all([
+        send({ type: "command", id: "create", command: { type: "chat.create", projectId: project.id, chatId } }),
+        send({ type: "command", id: "rename", command: { type: "chat.rename", chatId, title: "Named at once" } }),
+        // Left as soon as it was opened: the subscription must not outlive it.
+        send({ type: "subscribe", id: "chat-sub", topic: { type: "chat", chatId } }),
+        send({ type: "unsubscribe", id: "chat-sub" }),
+      ])
+
+      expect(ws.sent.filter((message) => (message as { type?: string }).type === "error")).toEqual([])
+      expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "rename" })
+      expect(store.getChat(chatId)?.title).toBe("Named at once")
+      expect(ws.data.subscriptions.has("chat-sub")).toBe(false)
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("a chat that could not be made fails what waited on it, and holds nothing back afterwards", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "kanna-client-chat-id-"))
+    try {
+      const store = new EventStore(dataDir)
+      await store.initialize()
+      const router = createTestRouter({ store })
+      const ws = new FakeWebSocket()
+      router.handleOpen(ws as never)
+      const chatId = "7e1a9b22-4d5c-4f70-9b8a-1d2e3f4a5b6c"
+      const send = (id: string, command: Record<string, unknown>) => router.handleMessage(ws as never, JSON.stringify({ v: PROTOCOL_VERSION, type: "command", id, command }))
+
+      await Promise.all([
+        send("create", { type: "chat.create", projectId: "no-such-project", chatId }),
+        send("rename", { type: "chat.rename", chatId, title: "Never" }),
+      ])
+      await send("later", { type: "chat.rename", chatId, title: "Never" })
+
+      const errors = ws.sent.filter((message) => (message as { type?: string }).type === "error") as Array<{ id: string; message: string }>
+      expect(errors.map((error) => [error.id, error.message])).toEqual([
+        ["create", "Project not found"],
+        ["rename", "Chat not found"],
+        ["later", "Chat not found"],
+      ])
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
   })
 })

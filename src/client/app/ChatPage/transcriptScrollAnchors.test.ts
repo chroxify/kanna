@@ -8,6 +8,7 @@ import {
   isOptimisticMessageId,
   resolveJumpTarget,
   resolveRestoreTarget,
+  sameScrollTarget,
   shouldPinForNewPrompt,
 } from "./transcriptScrollAnchors"
 
@@ -282,5 +283,19 @@ describe("resolveRestoreTarget with a recorded layout", () => {
   test("falls back to the latest prompt when the anchored message is gone, offset and all", () => {
     expect(resolveRestoreTarget(rows, { ...anchor, messageId: "gone" }, map, 800))
       .toEqual({ kind: "pin", rowId: rows[2]!.id })
+  })
+})
+
+describe("sameScrollTarget", () => {
+  test("the end is only the same as the end", () => {
+    expect(sameScrollTarget({ kind: "end" }, { kind: "end" })).toBe(true)
+    expect(sameScrollTarget({ kind: "end" }, { kind: "pin", rowId: "a" })).toBe(false)
+  })
+
+  test("a pin is the same row at the same depth, and no depth is the row's top", () => {
+    expect(sameScrollTarget({ kind: "pin", rowId: "a" }, { kind: "pin", rowId: "a", offsetFromMessage: 0 })).toBe(true)
+    expect(sameScrollTarget({ kind: "pin", rowId: "a", offsetFromMessage: 40 }, { kind: "pin", rowId: "a", offsetFromMessage: 40 })).toBe(true)
+    expect(sameScrollTarget({ kind: "pin", rowId: "a", offsetFromMessage: 40 }, { kind: "pin", rowId: "a" })).toBe(false)
+    expect(sameScrollTarget({ kind: "pin", rowId: "a" }, { kind: "pin", rowId: "b" })).toBe(false)
   })
 })

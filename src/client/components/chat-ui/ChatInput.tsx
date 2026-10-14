@@ -25,6 +25,8 @@ import { NEW_CHAT_COMPOSER_ID, type ComposerState, useChatPreferencesStore } fro
 import { CHAT_INPUT_ATTRIBUTE, focusNextChatInput, REQUEST_ATTACH_FILES_EVENT } from "../../app/chatFocusPolicy"
 import { isEscapeClaimed, isViewerPaneOpen, resolveEscapePress } from "../../lib/escape-key"
 import { HoldToStopHint, HoldToStopRing, useHoldToStop } from "./HoldToStop"
+import type { ComposerDelegate } from "./DelegateControl"
+import { delegatorDisplayTitle } from "../../lib/delegators"
 import { abbreviatePathHead, formatPathWithTilde } from "../../lib/pathUtils"
 import { copyTextToClipboard } from "../../lib/clipboard"
 import { buildUploadErrorReport, simpleUploadError, type UploadErrorReport } from "../../lib/uploadError"
@@ -222,6 +224,12 @@ interface Props {
    * command palette's "Attach Files") to the main one.
    */
   secondary?: boolean
+  /**
+   * The new chat page's delegate control, and the delegator its message goes
+   * to if it is going to one. See `ComposerDelegate`. The send itself is
+   * `onSubmit`'s: this only changes what the composer shows and carries.
+   */
+  delegate?: ComposerDelegate
 }
 
 export interface ChatInputHandle {
@@ -259,6 +267,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onListSkills,
   placeholder: placeholderOverride,
   secondary = false,
+  delegate,
 }, forwardedRef) {
   // Actions only. Selecting the whole store re-rendered this component on
   // every keystroke in any composer, and on every attachment change anywhere.
@@ -280,9 +289,16 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const initializeComposerForChat = useChatPreferencesStore((state) => state.initializeComposerForChat)
   // Canonical composer semantics (provider lock, model catalog, plan-mode
   // support) shared with the command palette — see lib/composer.ts.
+  // Delegating to a delegator that has run: the harness, model and effort
+  // in the options row are that chat's, shown and sent as its own composer
+  // would send them, and not this page's to change. One that has never run
+  // has none, so the row stays this page's and what it holds goes with the
+  // first message.
+  const delegateTarget = delegate?.target ?? null
+  const delegateSettings = delegateTarget?.provider ? delegateTarget : null
   const composer = useComposer({
-    chatId: chatId ?? null,
-    activeProvider,
+    chatId: delegateSettings?.chatId ?? chatId ?? null,
+    activeProvider: delegateSettings ? delegateSettings.provider : activeProvider,
     availableProviders,
   })
   const { composerChatId, providerSwitchPending, selectedProvider } = composer
@@ -338,7 +354,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // or ellipsize the way a span would: a long path runs past the pill. Keep
   // the path short enough to fit the narrowest composer (a phone) instead.
   const projectLabel = projectRepoLabel ?? (projectPath ? abbreviatePathHead(formatPathWithTilde(projectPath), 40) : null)
-  const placeholder = placeholderOverride ?? (projectLabel ? `Build in ${projectLabel}` : "Build something...")
+  const placeholder = placeholderOverride
+    // Who the message goes to, when that is not a new chat in the project.
+    ?? (delegateTarget ? `Message ${delegatorDisplayTitle(delegateTarget.title)}` : projectLabel ? `Build in ${projectLabel}` : "Build something...")
 
   const activeContextWindow = useMemo(() => {
     if (providerPrefs.provider !== "claude") {
@@ -1004,7 +1022,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
     // Cycles the provider's modes in picker order: two for codex
     // (Full Access → Plan Mode), three for claude (… → Auto Plan).
-    if (event.key === "Tab" && event.shiftKey && showModePicker) {
+    if (event.key === "Tab" && event.shiftKey && showModePicker && !delegateSettings) {
       event.preventDefault()
       composer.cycleMode()
       return
@@ -1441,6 +1459,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
             includeMode={showModePicker}
             hideDefaults
             className="max-w-[840px] mx-auto"
+            leading={delegate?.control}
+            readOnly={Boolean(delegateSettings)}
+            readOnlyTitle={delegateSettings ? `${delegatorDisplayTitle(delegateSettings.title)}'s setting. Change it in that chat.` : undefined}
           />
           {activeContextWindow ? (
             <div className="mx-[13px] flex items-center gap-2 md:hidden">

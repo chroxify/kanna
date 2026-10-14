@@ -1067,6 +1067,18 @@ export type KannaStatus =
   | "failed"
 
 /**
+ * What a chat reading `waiting_on_subagent` is waiting on, counted by the rule
+ * that gives it the status, so a line that says how many never disagrees with
+ * it. `chats` are the Kanna sub-chats holding it: working, or with a report on
+ * its way. `agents` are its provider's own (a subagent, a workflow, a Codex
+ * agent), which are not chats and cannot be opened.
+ */
+export interface WaitingOn {
+  chats: number
+  agents: number
+}
+
+/**
  * Work is still going in the chat without needing the user: a turn in flight,
  * or handed-off work the chat is waiting on. Such a chat is in progress, not
  * ready to review, however its last turn ended.
@@ -1173,6 +1185,13 @@ export interface SidebarChatRow {
    * `shared/sub-chat.ts` is the rule. Never false; absent on every other row.
    */
   adopted?: true
+  /**
+   * Set on a delegator: a chat that hands work to the chats under it instead
+   * of doing it. Never false; absent on every other row.
+   */
+  delegator?: true
+  /** With `status: "waiting_on_subagent"`, and only then: how many of what. */
+  waitingOn?: WaitingOn
 }
 
 /**
@@ -2632,6 +2651,10 @@ export interface ChatRuntime {
   parentChatId?: string
   /** Set when that parent adopted the chat. The same value as `SidebarChatRow.adopted`. */
   adopted?: true
+  /** Set on a delegator. The same value as `SidebarChatRow.delegator`. */
+  delegator?: true
+  /** With `status: "waiting_on_subagent"`, and only then. The same value as `SidebarChatRow.waitingOn`. */
+  waitingOn?: WaitingOn
 }
 
 export interface ChatSnapshot {
