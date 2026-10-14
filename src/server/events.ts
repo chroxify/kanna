@@ -1,4 +1,4 @@
-import type { AgentProvider, ChatSchedule, ProjectSummary, QueuedChatMessage, TranscriptEntry } from "../shared/types"
+import type { AgentProvider, ChatSchedule, ModelOptions, ProjectSummary, QueuedChatMessage, TranscriptEntry } from "../shared/types"
 
 export interface ProjectRecord extends ProjectSummary {
   sidebarTitle?: string
@@ -75,6 +75,12 @@ export interface ChatRecord {
    * whatever the composer happens to be set to now.
    */
   lastModel?: string
+  /**
+   * The options the most recent turn ran with, kept like {@link lastModel}.
+   * A turn the user didn't type (a sub-chat's report, an agent's message, a
+   * schedule, a resume) carries none of its own and runs with these.
+   */
+  lastModelOptions?: ModelOptions
   /** When the last turn ended (finished/failed/cancelled) — i.e. when the last agent response was received. */
   lastTurnEndedAt?: number
   /**
@@ -454,6 +460,8 @@ export type TurnEvent =
       chatId: string
       /** Model this turn runs with. Optional — absent on every pre-existing log line. */
       model?: string
+      /** The options (effort, fast mode, context window) it ran with, for the provider it ran on. */
+      modelOptions?: ModelOptions
     }
   | {
       v: 2

@@ -15,6 +15,7 @@ import type {
   AgentProvider,
   AskUserQuestionItem,
   ChatAttachment,
+  ChatProviderPreferences,
   ChatSkillsSnapshot,
   CodexReasoningEffort,
   ContextWindowUsageSnapshot,
@@ -330,6 +331,11 @@ interface AgentCoordinatorArgs {
    * {@link BACKGROUND_RESUME_GRACE_MS}.
    */
   backgroundResumeGraceMs?: number
+  /**
+   * The user's provider defaults (Settings → Providers), the last place a
+   * turn that names no options looks before the built-in defaults.
+   */
+  getProviderDefaults?: () => ChatProviderPreferences | undefined
 }
 
 
@@ -385,6 +391,8 @@ interface StartTurnArgs {
   model: string
   effort?: string
   serviceTier?: "fast"
+  /** The options this turn resolved to, recorded on the chat for turns that bring none. */
+  modelOptions?: ModelOptions
   planMode: boolean
   autoPlan: boolean
   appendUserPrompt: boolean
@@ -1145,6 +1153,7 @@ export class AgentCoordinator {
   private readonly checkSessionArtifactFn: NonNullable<AgentCoordinatorArgs["checkSessionArtifact"]>
   private readonly backgroundTurnIdleMs: number
   private readonly backgroundResumeGraceMs: number
+  private readonly getProviderDefaults: () => ChatProviderPreferences | undefined
   private reportBackgroundError: ((message: string) => void) | null = null
   private onClaudeRateLimit: ((info: ClaudeRateLimitInfoRaw) => void) | null = null
   private cursorModelCatalogApplied = false
@@ -1210,6 +1219,7 @@ export class AgentCoordinator {
     this.checkSessionArtifactFn = args.checkSessionArtifact ?? checkSessionArtifact
     this.backgroundTurnIdleMs = args.backgroundTurnIdleMs ?? BACKGROUND_TURN_IDLE_MS
     this.backgroundResumeGraceMs = args.backgroundResumeGraceMs ?? BACKGROUND_RESUME_GRACE_MS
+    this.getProviderDefaults = args.getProviderDefaults ?? (() => undefined)
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
@@ -1733,7 +1743,14 @@ export class AgentCoordinator {
     return options.provider ?? currentProvider ?? "claude"
   }
 
-  private getProviderSettings(provider: AgentProvider, options: SendMessageOptions) {
+  /**
+   * The options a turn runs with. `chatId` names the chat it runs in: a turn
+   * that brings no options of its own for `provider` (a sub-chat's report, an
+   * agent's message, a schedule, a resume) takes them from there instead of
+   * the built-in defaults — see {@link withInheritedModelOptions}.
+   */
+  private getProviderSettings(provider: AgentProvider, requested: SendMessageOptions, chatId?: string) {
+    const options = chatId ? this.withInheritedModelOptions(chatId, provider, requested) : requested
     const catalog = getServerProviderCatalog(provider)
     if (provider === "claude") {
       const model = normalizeServerModel(provider, options.model)
@@ -1744,6 +1761,7 @@ export class AgentCoordinator {
         serviceTier: serviceTierFromModelOptions(modelOptions),
         planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
         autoPlan: catalog.supportsAutoPlanMode ? Boolean(options.autoPlan) : false,
+        modelOptions: { claude: modelOptions } as ModelOptions,
       }
     }
 
@@ -1755,6 +1773,7 @@ export class AgentCoordinator {
         serviceTier: undefined,
         planMode: false,
         autoPlan: false,
+        modelOptions: { cursor: modelOptions } as ModelOptions,
       }
     }
 
@@ -1766,6 +1785,7 @@ export class AgentCoordinator {
         serviceTier: undefined,
         planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
         autoPlan: false,
+        modelOptions: { grok: modelOptions } as ModelOptions,
       }
     }
 
@@ -1777,6 +1797,7 @@ export class AgentCoordinator {
         serviceTier: undefined,
         planMode: false,
         autoPlan: false,
+        modelOptions: { pi: modelOptions } as ModelOptions,
       }
     }
 
@@ -1788,8 +1809,50 @@ export class AgentCoordinator {
       serviceTier: serviceTierFromModelOptions(modelOptions),
       planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
       autoPlan: catalog.supportsAutoPlanMode ? Boolean(options.autoPlan) : false,
+      modelOptions: { codex: modelOptions } as ModelOptions,
     }
   }
+
+  /**
+   * Fills in the options a turn didn't bring, so it runs the way the user set
+   * things up rather than at the built-in defaults. In order: what this chat
+   * last ran with, what the chat that started it last ran with (on up the
+   * chain), then the user's defaults for the model in Settings → Providers.
+   *
+   * Only options for `provider` count: a chat that last ran on another
+   * provider has nothing to say about this one. An effort the sender named
+   * (an agent's message, a schedule) still wins over an inherited one.
+   */
+  private withInheritedModelOptions(chatId: string, provider: AgentProvider, options: SendMessageOptions): SendMessageOptions {
+    if (options.modelOptions?.[provider]) return options
+    const inherited = this.inheritedModelOptions(chatId, provider, options.model)
+    if (!inherited) return options
+    const fromInherited: Record<string, unknown> = { ...inherited }
+    if (options.effort) delete fromInherited.reasoningEffort
+    return { ...options, modelOptions: { ...options.modelOptions, [provider]: fromInherited } }
+  }
+
+  private inheritedModelOptions(chatId: string, provider: AgentProvider, model: string | undefined) {
+    let chat = this.store.getChat(chatId)
+    const defaults = this.getProviderDefaults()?.[provider]
+    const modelId = normalizeServerModel(provider, model ?? chat?.lastModel)
+    // Per-model defaults are newer than the setting itself, so may be absent.
+    const perModel = (defaults as { modelDefaults?: Record<string, unknown> } | undefined)?.modelDefaults?.[modelId]
+    const seen = new Set<string>()
+    while (chat && !seen.has(chat.id)) {
+      seen.add(chat.id)
+      const own = chat.lastModelOptions?.[provider]
+      // A chat's options were picked for its model. On another model that the
+      // user gave defaults of its own ("Fable always high"), those win.
+      const sameModel = !chat.lastModel || normalizeServerModel(provider, chat.lastModel) === modelId
+      if (own && (sameModel || !perModel)) return own
+      const upId = chat.parentChatId ?? chat.createdByChatId
+      chat = upId ? this.store.getChat(upId) : null
+    }
+    if (!defaults) return undefined
+    return (perModel ?? defaults.modelOptions) as NonNullable<ModelOptions[typeof provider]>
+  }
+
 
   private async enqueueMessage(
     chatId: string,
@@ -1816,7 +1879,7 @@ export class AgentCoordinator {
     await this.store.removeQueuedMessage(chatId, queuedMessage.id)
     const chat = this.store.requireChat(chatId)
     const provider = this.resolveProvider(queuedMessage, chat.provider)
-    const settings = this.getProviderSettings(provider, queuedMessage)
+    const settings = this.getProviderSettings(provider, queuedMessage, chatId)
     await this.startTurnForChat({
       chatId,
       provider,
@@ -1825,6 +1888,7 @@ export class AgentCoordinator {
       model: settings.model,
       effort: settings.effort,
       serviceTier: settings.serviceTier,
+      modelOptions: settings.modelOptions,
       planMode: settings.planMode,
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
@@ -2096,7 +2160,7 @@ export class AgentCoordinator {
       )
       await this.store.appendMessage(args.chatId, userPromptEntry)
     }
-    await this.store.recordTurnStarted(args.chatId, args.model)
+    await this.store.recordTurnStarted(args.chatId, args.model, args.modelOptions)
 
     if (shouldGenerateTitle) {
       void this.generateTitleInBackground(args.chatId, args.content, project.localPath, optimisticTitle ?? "New Chat")
@@ -2514,7 +2578,7 @@ export class AgentCoordinator {
     }
 
     const provider = this.resolveProvider(command, chat.provider)
-    const settings = this.getProviderSettings(provider, command)
+    const settings = this.getProviderSettings(provider, command, chatId)
     // The count is of messages people send.
     if (!extras?.source) this.analytics.track("message_sent")
     await this.startTurnForChat({
@@ -2525,6 +2589,7 @@ export class AgentCoordinator {
       model: settings.model,
       effort: settings.effort,
       serviceTier: settings.serviceTier,
+      modelOptions: settings.modelOptions,
       planMode: settings.planMode,
       autoPlan: settings.autoPlan,
       appendUserPrompt: true,
@@ -2774,14 +2839,12 @@ export class AgentCoordinator {
     if (!chat.sessionToken && !chat.pendingForkSessionToken) return false
 
     // Everything the chat record remembers about how the turn was running:
-    // the model it actually ran with plus the two persisted modes. Reasoning
-    // effort and fast mode are picked in the composer and never stored server
-    // side, so the resumed turn falls back to the provider defaults for those.
+    // the model and options it actually ran with plus the two persisted modes.
     const settings = this.getProviderSettings(chat.provider, {
       model: chat.lastModel,
       planMode: chat.planMode,
       autoPlan: chat.autoPlan,
-    })
+    }, chatId)
     await this.startTurnForChat({
       chatId,
       provider: chat.provider,
@@ -2790,6 +2853,7 @@ export class AgentCoordinator {
       model: settings.model,
       effort: settings.effort,
       serviceTier: settings.serviceTier,
+      modelOptions: settings.modelOptions,
       planMode: settings.planMode,
       autoPlan: settings.autoPlan,
       appendUserPrompt: false,

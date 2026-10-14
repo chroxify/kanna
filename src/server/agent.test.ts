@@ -18,7 +18,7 @@ import {
 } from "./agent"
 import type { HarnessTurn } from "./harness-types"
 import type { SubagentActivityUpdate } from "./background-tasks"
-import type { ChatAttachment, TranscriptEntry } from "../shared/types"
+import type { ChatAttachment, ModelOptions, TranscriptEntry } from "../shared/types"
 import type { SessionArtifactStatus } from "./session-artifacts"
 import { timestamped } from "./transcript"
 
@@ -1784,47 +1784,121 @@ describe("AgentCoordinator claude integration", () => {
     events.close()
   })
 
-  test("a different effort is applied to the live session instead of restarting it", async () => {
-    const events = new AsyncEventQueue<any>()
-    const store = createFakeStore()
-    let starts = 0
-    const effortCalls: Array<string | undefined> = []
-    const coordinator = new AgentCoordinator({
-      store: store as never,
-      onStateChange: () => {},
-      startClaudeSession: async () => {
-        starts += 1
-        return {
-          provider: "claude",
-          stream: events,
-          getAccountInfo: async () => null,
-          interrupt: async () => {},
-          close: () => {},
-          setModel: async () => {},
-          setPermissionMode: async () => {},
-          setEffort: async (effort: string | undefined) => {
-            effortCalls.push(effort)
-          },
-          sendPrompt: async () => {
-            events.push({
-              type: "transcript" as const,
-              entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
-            })
-          },
-        }
-      },
+  describe("effort", () => {
+    function effortHarness(options?: Parameters<typeof createFakeStore>[0] & { providerDefaults?: unknown }) {
+      const events = new AsyncEventQueue<any>()
+      const store = createFakeStore(options)
+      const startedWith: Array<string | undefined> = []
+      const effortCalls: Array<string | undefined> = []
+      const coordinator = new AgentCoordinator({
+        store: store as never,
+        onStateChange: () => {},
+        getProviderDefaults: () => options?.providerDefaults as never,
+        startClaudeSession: async (args) => {
+          startedWith.push(args.effort)
+          return {
+            provider: "claude",
+            stream: events,
+            getAccountInfo: async () => null,
+            interrupt: async () => {},
+            close: () => {},
+            setModel: async () => {},
+            setPermissionMode: async () => {},
+            setEffort: async (effort: string | undefined) => {
+              effortCalls.push(effort)
+            },
+            sendPrompt: async () => {
+              events.push({
+                type: "transcript" as const,
+                entry: timestamped({ kind: "result", subtype: "success", isError: false, durationMs: 0, result: "done" }),
+              })
+            },
+          }
+        },
+      })
+      return { events, store, coordinator, startedWith, effortCalls }
+    }
+
+    test("a different effort is applied to the live session instead of restarting it", async () => {
+      const { events, store, coordinator, startedWith, effortCalls } = effortHarness()
+      await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "one", model: "claude-opus-4-1", modelOptions: { claude: { reasoningEffort: "max" } } })
+      await waitFor(() => store.turnFinishedCount === 1)
+      await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "two", model: "claude-opus-4-1", modelOptions: { claude: { reasoningEffort: "medium" } } })
+      await waitFor(() => store.turnFinishedCount === 2)
+
+      expect(startedWith).toEqual(["max"])
+      expect(effortCalls).toEqual(["medium"])
+      events.close()
     })
 
-    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "one", model: "claude-opus-4-1", modelOptions: { claude: { reasoningEffort: "max" } } })
-    await waitFor(() => store.turnFinishedCount === 1)
-    // A sub-chat report or a resume sends no effort, which resolves to the default.
-    await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "two", model: "claude-opus-4-1" })
-    await waitFor(() => store.turnFinishedCount === 2)
+    test("a turn that brings no options runs with the ones the chat last ran with", async () => {
+      const { events, store, coordinator, startedWith, effortCalls } = effortHarness()
+      await coordinator.send({ type: "chat.send", chatId: "chat-1", provider: "claude", content: "one", model: "claude-opus-4-1", modelOptions: { claude: { reasoningEffort: "max" } } })
+      await waitFor(() => store.turnFinishedCount === 1)
+      // A sub-chat's report, as the orchestrator sends it: no options at all.
+      await coordinator.send(
+        { type: "chat.send", chatId: "chat-1", provider: "claude", content: "report", model: "claude-opus-4-1" },
+        { source: { kind: "agent", chatId: "chat-2" } },
+      )
+      await waitFor(() => store.turnFinishedCount === 2)
 
-    expect(starts).toBe(1)
-    expect(effortCalls).toEqual(["high"])
+      expect(startedWith).toEqual(["max"])
+      expect(effortCalls).toEqual([])
+      expect(store.getChat("chat-1")?.lastModelOptions?.claude?.reasoningEffort).toBe("max")
+      events.close()
+    })
 
-    events.close()
+    test("a sub-chat's first turn runs with its parent's options", async () => {
+      const parent = createFakeChat("chat-1", "project-1")
+      parent.lastModel = "claude-opus-4-1"
+      parent.lastModelOptions = { claude: { reasoningEffort: "max" } }
+      const child = createFakeChat("chat-2", "project-1")
+      child.createdByChatId = "chat-1"
+      child.parentChatId = "chat-1"
+      const { events, store, coordinator, startedWith } = effortHarness({ chats: [parent, child] })
+
+      await coordinator.send(
+        { type: "chat.send", chatId: "chat-2", provider: "claude", content: "go", model: "claude-opus-4-1" },
+        { source: { kind: "agent", chatId: "chat-1" } },
+      )
+      await waitFor(() => store.turnFinishedCount === 1)
+
+      expect(startedWith).toEqual(["max"])
+      events.close()
+    })
+
+    test("with no history anywhere, a turn runs with the user's provider defaults", async () => {
+      const { events, store, coordinator, startedWith } = effortHarness({
+        providerDefaults: {
+          claude: { model: "opus", modelOptions: { reasoningEffort: "low", contextWindow: "200k", fastMode: false }, modelDefaults: {}, planMode: false, autoPlan: false },
+        },
+      })
+      await coordinator.send(
+        { type: "chat.send", chatId: "chat-1", provider: "claude", content: "go", model: "claude-opus-4-1" },
+        { source: { kind: "agent", chatId: "chat-9" } },
+      )
+      await waitFor(() => store.turnFinishedCount === 1)
+
+      expect(startedWith).toEqual(["low"])
+      events.close()
+    })
+
+    test("an effort the sender names wins over the inherited one", async () => {
+      const chat = createFakeChat("chat-1", "project-1")
+      chat.lastModel = "claude-opus-4-1"
+      chat.lastModelOptions = { claude: { reasoningEffort: "max" } }
+      const { events, store, coordinator, startedWith } = effortHarness({ chats: [chat] })
+
+      // A schedule or an agent's send_message that set an effort.
+      await coordinator.send(
+        { type: "chat.send", chatId: "chat-1", provider: "claude", content: "go", model: "claude-opus-4-1", effort: "low" },
+        { source: { kind: "agent", chatId: "chat-9" } },
+      )
+      await waitFor(() => store.turnFinishedCount === 1)
+
+      expect(startedWith).toEqual(["low"])
+      events.close()
+    })
   })
 
   test("auto plan controls the EnterPlanMode tool and restarts the session when it changes", async () => {
@@ -3217,6 +3291,9 @@ function createFakeChat(id: string, projectId: string, title = "New Chat") {
     pendingForkSessionToken: null as string | null,
     resumePending: undefined as boolean | undefined,
     lastModel: undefined as string | undefined,
+    lastModelOptions: undefined as ModelOptions | undefined,
+    parentChatId: undefined as string | undefined,
+    createdByChatId: undefined as string | undefined,
     deletedAt: undefined as number | undefined,
   }
 }
@@ -3269,8 +3346,11 @@ function createFakeStore(options?: {
     async appendMessage(_chatId: string, entry: TranscriptEntry) {
       this.messages.push(entry)
     },
-    async recordTurnStarted() {
+    async recordTurnStarted(chatId: string, model?: string, modelOptions?: ModelOptions) {
       this.turnStartedCount += 1
+      const started = chatsById.get(chatId)
+      if (started && model) started.lastModel = model
+      if (started && modelOptions) started.lastModelOptions = modelOptions
     },
     async recordTurnFinished() {
       this.turnFinishedCount += 1
