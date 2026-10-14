@@ -12,6 +12,10 @@ function row(overrides: Partial<SidebarChatRow> & Pick<SidebarChatRow, "chatId">
     localPath: "/tmp/p",
     provider: "claude",
     hasAutomation: false,
+    // Recent, so a chat that wants the user is inside Relevant's window, and
+    // done, so one that does not is outside it: the count is Relevant's.
+    lastMessageAt: Date.now() - 60_000,
+    done: true,
     ...overrides,
   }
 }
@@ -51,7 +55,8 @@ describe("chat notifications and sub-chats", () => {
   test("a sub-chat that stops to ask something is announced", () => {
     const before = sidebar([row({ chatId: "child", parentChatId: "parent", status: "running" })])
     const after = sidebar([row({ chatId: "child", parentChatId: "parent", status: "waiting_for_user" })])
-    expect(getNotificationTitleCount(after)).toBe(1)
+    // Announced, but not counted: the count is Relevant's, which lists no sub-chats.
+    expect(getNotificationTitleCount(after)).toBe(0)
     expect(getChatNotificationEvents(before, after).map((event) => event.chatId)).toEqual(["child"])
   })
 })

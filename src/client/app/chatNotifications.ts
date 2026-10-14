@@ -1,5 +1,12 @@
 import type { SidebarChatRow, SidebarData, SidebarProjectGroup } from "../../shared/types"
-import { isUnreadForUser } from "../lib/thread-sections"
+import {
+  computeSidebarThreadSections,
+  flattenSidebarThreads,
+  isUnreadForUser,
+  listedThreads,
+  type DraftStartTimes,
+  type PendingSendTimes,
+} from "../lib/thread-sections"
 
 const BROWSER_CHAT_TITLE_MAX_LENGTH = 80
 
@@ -13,12 +20,27 @@ function getSidebarGroupChats(group: SidebarProjectGroup): SidebarChatRow[] {
  */
 const countsAsUnread = isUnreadForUser
 
-export function getNotificationTitleCount(sidebarData: SidebarData) {
-  return sidebarData.projectGroups.reduce((count, group) => (
-    count + group.chats.reduce((chatCount, chat) => (
-      chatCount + (countsAsUnread(chat) ? 1 : 0) + (chat.status === "waiting_for_user" ? 1 : 0)
-    ), 0)
-  ), 0)
+/** What the count needs besides the snapshot: the clock, and what only this browser knows. */
+export interface RelevantCountContext {
+  nowMs?: number
+  draftStartTimes?: DraftStartTimes
+  pendingSends?: PendingSendTimes
+}
+
+/**
+ * The number on the tab (the title's `[n]`, Floaty's badge): how many chats
+ * the sidebar's Relevant section holds, worked out the way that section is,
+ * so the two never disagree. Pinned, delegators and In Progress are their own
+ * sections and are not in it.
+ */
+export function getNotificationTitleCount(sidebarData: SidebarData, context: RelevantCountContext = {}) {
+  const sections = computeSidebarThreadSections(
+    listedThreads(flattenSidebarThreads(sidebarData)),
+    context.nowMs ?? Date.now(),
+    context.draftStartTimes,
+    context.pendingSends,
+  )
+  return sections.review.length + sections.relevant.length
 }
 
 export function getBrowserWindowTitle(args: {
@@ -26,8 +48,9 @@ export function getBrowserWindowTitle(args: {
   sidebarData: SidebarData
   activeProjectId: string | null
   activeChatId: string | null
+  relevant?: RelevantCountContext
 }) {
-  const notificationCount = getNotificationTitleCount(args.sidebarData)
+  const notificationCount = getNotificationTitleCount(args.sidebarData, args.relevant)
   const baseTitle = notificationCount > 0 ? `[${notificationCount}] ${args.appName}` : args.appName
   const projectGroupById = args.activeProjectId
     ? args.sidebarData.projectGroups.find((group) => group.groupKey === args.activeProjectId)
@@ -86,8 +109,9 @@ export type BrowserPageStatus = "idle" | "working" | "waiting" | "done" | "faile
 export function getBrowserPageStatus(args: {
   sidebarData: SidebarData
   activeChatId: string | null
+  relevant?: RelevantCountContext
 }): { status: BrowserPageStatus; badge: number } {
-  const badge = getNotificationTitleCount(args.sidebarData)
+  const badge = getNotificationTitleCount(args.sidebarData, args.relevant)
   if (!args.activeChatId) return { status: "idle", badge }
 
   let chat: SidebarChatRow | undefined

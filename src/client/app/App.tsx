@@ -19,6 +19,8 @@ import type { ChatPreview, ChatTouchedFilesResult, ProviderAuthSnapshot } from "
 import { playChatNotificationSound, shouldPlayChatSound } from "../lib/chatSounds"
 import { getBrowserPageStatus, getBrowserWindowTitle, getChatNotificationEvents, getChatSoundBurstCount, type ChatNotificationEvent } from "./chatNotifications"
 import { KannaSidebar } from "./KannaSidebar"
+import { useDraftStartTimes } from "../stores/chatInputStore"
+import { usePendingSendTimes } from "../stores/pendingSendStore"
 import { ChatPage } from "./ChatPage"
 import { LocalProjectsPage } from "./LocalProjectsPage"
 import { OpenRouterCallbackPage } from "./OpenRouterCallbackPage"
@@ -279,11 +281,26 @@ function KannaLayout() {
   // Selected as the finished string rather than derived from the snapshot: the
   // title changes when a chat is renamed or a badge count moves, and this hook
   // should not re-render the layout for anything else the sidebar carries.
+  // The tab's number is the Relevant section's count, which moves with the
+  // clock (a chat leaves after RELEVANT_MAX_AGE_MS) and with drafts and sends
+  // only this browser knows about.
+  const [relevantNowMs, setRelevantNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setRelevantNowMs(Date.now()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const draftStartTimes = useDraftStartTimes()
+  const pendingSends = usePendingSendTimes()
+  const relevantCount = useMemo(
+    () => ({ nowMs: relevantNowMs, draftStartTimes, pendingSends }),
+    [draftStartTimes, pendingSends, relevantNowMs],
+  )
   const browserTitle = useSidebarStore((store) => getBrowserWindowTitle({
     appName: APP_NAME,
     sidebarData: store.data,
     activeProjectId: state.activeProjectId,
     activeChatId: state.activeChatId,
+    relevant: relevantCount,
   }))
   const handleSidebarCreateChat = useCallback((projectId: string) => {
     void state.handleCreateChat(projectId)
@@ -397,6 +414,7 @@ function KannaLayout() {
   const pageStatus = useSidebarStore(useShallow((store) => getBrowserPageStatus({
     sidebarData: store.data,
     activeChatId: state.activeChatId,
+    relevant: relevantCount,
   })))
   useLayoutEffect(() => {
     setMetaTag("floaty:status", pageStatus.status)

@@ -46,44 +46,32 @@ describe("auth boot helpers", () => {
 })
 
 describe("getNotificationTitleCount", () => {
-  test("counts unread chats and waiting-for-user chats", () => {
+  test("counts the chats in Relevant: each once, recent ones only, none marked done", () => {
+    const now = Date.now()
+    const chat = (chatId: string, extra: Partial<SidebarChatRow>): SidebarChatRow => ({
+      _id: chatId,
+      _creationTime: 1,
+      chatId,
+      title: chatId,
+      status: "idle",
+      unread: false,
+      localPath: "/tmp/project",
+      provider: null,
+      hasAutomation: false,
+      lastMessageAt: now - 60_000,
+      ...extra,
+    })
     expect(getNotificationTitleCount({
       projectGroups: [createProjectGroup([
-          {
-            _id: "chat-1",
-            _creationTime: 1,
-            chatId: "chat-1",
-            title: "Unread",
-            status: "idle",
-            unread: true,
-            localPath: "/tmp/project",
-            provider: null,
-            hasAutomation: false,
-          },
-          {
-            _id: "chat-2",
-            _creationTime: 2,
-            chatId: "chat-2",
-            title: "Waiting",
-            status: "waiting_for_user",
-            unread: false,
-            localPath: "/tmp/project",
-            provider: null,
-            hasAutomation: false,
-          },
-          {
-            _id: "chat-3",
-            _creationTime: 3,
-            chatId: "chat-3",
-            title: "Both",
-            status: "waiting_for_user",
-            unread: true,
-            localPath: "/tmp/project",
-            provider: null,
-            hasAutomation: false,
-          },
-        ])],
-    })).toBe(4)
+        chat("unread", { unread: true }),
+        chat("waiting", { status: "waiting_for_user" }),
+        chat("both", { status: "waiting_for_user", unread: true }),
+        chat("worked-on", {}),
+        chat("done", { done: true }),
+        chat("running", { status: "running" }),
+        chat("old-unread", { unread: true, lastMessageAt: now - 30 * 24 * 60 * 60 * 1000 }),
+      ])],
+    }, { nowMs: now })).toBe(4)
   })
 })
 
@@ -184,7 +172,7 @@ describe("getBrowserWindowTitle", () => {
         projectGroups: [createProjectGroup([
           {
             _id: "chat-1",
-            _creationTime: 1,
+            _creationTime: Date.now(),
             chatId: "chat-1",
             title: "Unread",
             status: "idle",
@@ -192,10 +180,11 @@ describe("getBrowserWindowTitle", () => {
             localPath: "/tmp/project",
             provider: null,
             hasAutomation: false,
+            lastMessageAt: Date.now(),
           },
           {
             _id: "chat-2",
-            _creationTime: 2,
+            _creationTime: Date.now(),
             chatId: "chat-2",
             title: "Waiting",
             status: "waiting_for_user",
@@ -203,6 +192,7 @@ describe("getBrowserWindowTitle", () => {
             localPath: "/tmp/project",
             provider: null,
             hasAutomation: false,
+            lastMessageAt: Date.now(),
           },
         ], "Project title")],
       },
