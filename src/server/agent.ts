@@ -27,9 +27,11 @@ import type {
   SubagentActivity,
   MessageSource,
   TranscriptEntry,
+  WaitingOn,
 } from "../shared/types"
 import { normalizeToolCall } from "../shared/tools"
 import type { ClientCommand } from "../shared/protocol"
+import { stripDelegationBlock } from "../shared/delegation-block"
 import { AsyncQueue } from "./async-queue"
 import { resolveClaudeExecutable } from "./claude-executable"
 import { KannaToolRuntime, KannaToolEventFilter, type KannaToolHost } from "./kanna-tools"
@@ -233,6 +235,8 @@ interface ClaudeSessionState {
   serviceTier?: "fast"
   planMode: boolean
   autoPlan: boolean
+  /** Baked into the system-prompt append, like `promptAgentId`. */
+  delegator: boolean
   sessionToken: string | null
   accountInfoLoaded: boolean
   nextPromptSeq: number
@@ -275,6 +279,7 @@ interface AgentCoordinatorArgs {
     serviceTier?: "fast"
     planMode: boolean
     autoPlan: boolean
+    delegator?: boolean
     sessionToken: string | null
     forkSession: boolean
     customTools?: KannaToolHost
@@ -889,6 +894,8 @@ async function startClaudeSession(args: {
   serviceTier?: "fast"
   planMode: boolean
   autoPlan: boolean
+  /** The chat is a delegator, which its system prompt says. See `ChatRecord.delegator`. */
+  delegator?: boolean
   sessionToken: string | null
   forkSession: boolean
   customTools?: KannaToolHost
@@ -988,7 +995,7 @@ async function startClaudeSession(args: {
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: buildKannaSystemInstructions(buildKannaAgentId("claude", args.model)),
+        append: buildKannaSystemInstructions(buildKannaAgentId("claude", args.model), { delegator: args.delegator }),
       },
       // fastMode must go through the flag-settings layer: the CLI only allows
       // fast mode in Agent SDK sessions when flagSettings.fastMode is true,
@@ -1278,6 +1285,25 @@ export class AgentCoordinator {
       if (!statuses.has(chatId)) statuses.set(chatId, "waiting_on_subagent")
     }
     return statuses
+  }
+
+  /**
+   * What a chat that reads `waiting_on_subagent` is waiting on, by the two
+   * checks `getChatStatuses` makes. Meaningful only for such a chat.
+   *
+   * An agent running inside a workflow that is itself running is that
+   * workflow's, and is not counted beside it: the Tasks widget gives it no
+   * row of its own either.
+   */
+  getWaitingOn(chatId: string): WaitingOn {
+    const byId = this.subagents.get(chatId)
+    let agents = 0
+    for (const activity of byId?.values() ?? []) {
+      if (activity.status !== "running" || !isDelegatedTask(activity.type)) continue
+      if (activity.workflowId && byId?.get(activity.workflowId)?.status === "running") continue
+      agents += 1
+    }
+    return { chats: this.orchestration?.countSubchatsHolding(chatId) ?? 0, agents }
   }
 
   getPendingTool(chatId: string): PendingToolSnapshot | null {
@@ -2099,6 +2125,9 @@ export class AgentCoordinator {
       wireContent = buildHandoffMessageContent(contextBlock.text, wireContent)
     }
 
+    // Read at each turn start, so a chat made a delegator mid-way is told on
+    // its next turn. Grok has no chat tools, so it is told nothing of it.
+    const delegator = Boolean(this.store.getChat(args.chatId)?.delegator)
     let turn: HarnessTurn
     if (args.provider === "claude") {
       turn = await this.startClaudeTurn({
@@ -2109,6 +2138,7 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         planMode: args.planMode,
         autoPlan: args.autoPlan,
+        delegator,
         sessionToken: chat.pendingForkSessionToken ?? chat.sessionToken,
         forkSession: Boolean(chat.pendingForkSessionToken),
         onToolRequest,
@@ -2123,7 +2153,7 @@ export class AgentCoordinator {
       // so Kanna's session instructions ride the user-text path instead.
       cursorContent = appendSystemMessageBlock(
         cursorContent,
-        buildKannaSystemMessage(buildKannaAgentId("cursor", args.model))
+        buildKannaSystemMessage(buildKannaAgentId("cursor", args.model), { delegator })
       )
       // Cursor cannot fork (see canForkChat), so a turn always resumes its own session.
       turn = await this.cursorManager.startTurn({
@@ -2165,6 +2195,7 @@ export class AgentCoordinator {
         sessionToken: chat.pendingForkSessionToken ?? chat.sessionToken,
         forkSession: Boolean(chat.pendingForkSessionToken),
         connection,
+        delegator,
       })
     } else {
       const started = await this.codexManager.startSession({
@@ -2189,6 +2220,7 @@ export class AgentCoordinator {
         effort: args.effort as CodexReasoningEffort | undefined,
         serviceTier: args.serviceTier,
         planMode: args.planMode,
+        delegator,
         onToolRequest,
       })
     }
@@ -2277,6 +2309,7 @@ export class AgentCoordinator {
     serviceTier?: "fast"
     planMode: boolean
     autoPlan: boolean
+    delegator: boolean
     sessionToken: string | null
     forkSession: boolean
     customTools?: KannaToolHost
@@ -2287,12 +2320,15 @@ export class AgentCoordinator {
     // autoPlan changes the SDK's `tools` allowlist, which is fixed at query()
     // time — unlike planMode (setPermissionMode) it can only be applied by
     // restarting the session. The restart resumes by sessionToken, so the
-    // conversation carries over.
+    // conversation carries over. The delegator instructions are part of the
+    // system prompt, fixed at the same time, so a chat that became a
+    // delegator or stopped being one restarts the same way.
     if (
       !session
       || session.localPath !== args.localPath
       || session.effort !== args.effort
       || session.autoPlan !== args.autoPlan
+      || session.delegator !== args.delegator
       || args.forkSession
     ) {
       if (session) {
@@ -2307,6 +2343,7 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         planMode: args.planMode,
         autoPlan: args.autoPlan,
+        delegator: args.delegator,
         sessionToken: args.sessionToken,
         forkSession: args.forkSession,
         onToolRequest: args.onToolRequest,
@@ -2327,6 +2364,7 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         planMode: args.planMode,
         autoPlan: args.autoPlan,
+        delegator: args.delegator,
         sessionToken: args.sessionToken,
         accountInfoLoaded: false,
         nextPromptSeq: 0,
@@ -2376,12 +2414,16 @@ export class AgentCoordinator {
       if (!command.projectId) {
         throw new Error("Missing projectId for new chat")
       }
-      const created = await this.store.createChat(command.projectId)
+      const created = await this.store.createChat(command.projectId, undefined, { delegator: command.delegator })
       chatId = created.id
       this.analytics.track("chat_created")
     }
 
     const chat = this.store.requireChat(chatId)
+    // A delegator is told to delegate in its session instructions. The block
+    // the graph page adds to a message says the same, narrower, so it is
+    // dropped here and the turn carries one or the other, never both.
+    if (chat.delegator) command = { ...command, content: stripDelegationBlock(command.content) }
     // Sending a message to an archived chat resurrects it (viewing alone
     // never unarchives).
     if (chat.archivedAt) {
@@ -2431,7 +2473,9 @@ export class AgentCoordinator {
     extras?: { source?: MessageSource; effort?: string },
   ) {
     if (!extras?.source) this.analytics.track("message_sent")
-    const queuedMessage = await this.enqueueMessage(command.chatId, command.content, command.attachments ?? [], {
+    // As in `send`: a delegator's turn does not also carry the graph page's block.
+    const content = this.store.getChat(command.chatId)?.delegator ? stripDelegationBlock(command.content) : command.content
+    const queuedMessage = await this.enqueueMessage(command.chatId, content, command.attachments ?? [], {
       provider: command.provider,
       model: command.model,
       modelOptions: command.modelOptions,

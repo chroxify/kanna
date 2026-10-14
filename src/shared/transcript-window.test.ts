@@ -128,4 +128,16 @@ describe("trimTranscriptWindow", () => {
     const small = { messages: turn(), startIndex: 0 }
     expect(trimTranscriptWindow(small, 50)).toBe(small)
   })
+
+  test("reaches back to the entry the reader was at, as a fresh open's window does", () => {
+    const entries = [...turn(), ...turn(), ...turn()]
+    // The first turn's second text: two turns before where the count stops.
+    const readAt = entries[6]!._id
+    const trimmed = trimTranscriptWindow({ messages: entries, startIndex: 100 }, 2, readAt)
+    expect(trimmed.messages.some((entry) => entry._id === readAt)).toBe(true)
+    expect(trimmed.startIndex).toBe(106)
+    // Inside the window already, or not in it at all: the plain cut.
+    expect(trimTranscriptWindow({ messages: entries, startIndex: 100 }, 2, entries[20]!._id).startIndex).toBe(114)
+    expect(trimTranscriptWindow({ messages: entries, startIndex: 100 }, 2, "gone").startIndex).toBe(114)
+  })
 })

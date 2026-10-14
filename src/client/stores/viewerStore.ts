@@ -4,6 +4,7 @@ import type { ChatAttachment } from "../../shared/types"
 import type { VisualizationArtifact } from "../../shared/visualization"
 import type { ChatJumpTarget } from "../lib/chat-navigation"
 import { generateUUID } from "../lib/utils"
+import { viewerLevelBelow } from "../lib/viewer-levels"
 import { settledChatViewer, useRightSidebarStore, type ChatViewerState } from "./rightSidebarStore"
 
 /**
@@ -42,19 +43,28 @@ export type ViewerItem =
    *
    * `graph` is set on a chat opened from the graph (below): the chat the
    * graph was opened for. It is the start of that chat's trail, so Back from
-   * it, or from the first chat on `back`, returns to the graph.
+   * it, or from the first chat on `back`, returns to the graph. `delegated`
+   * is the same for a chat picked from a delegator's list: the delegator.
    */
-  | { kind: "chat"; chatId: string; back?: string[]; graph?: string }
+  | { kind: "chat"; chatId: string; back?: string[]; graph?: string; delegated?: string }
   /**
    * The tree of sub-chats `chatId` is in, drawn from its root (see
    * `app/ChatGraph`). Selecting a chat in it puts that chat in its place.
    */
   | { kind: "graph"; chatId: string }
+  /**
+   * The chats under the delegator `chatId`, as a list to pick from. On a
+   * delegator's page this is the pane's floor (see `lib/viewer-levels`):
+   * under whatever else is opened there, and the last thing in the pane
+   * before it is shut. The navbar's button opens it, in the pane or, on a
+   * phone, over the transcript.
+   */
+  | { kind: "delegated"; chatId: string }
 
 /**
- * What a pane's dragged width belongs to. A review, a preview and a chat
- * each open at a width of their own, and a width you dragged holds while you
- * go between things of one class.
+ * What decides the width a pane opens at: a review, a preview and a chat
+ * each open at a width of their own. Only that. Once open, the pane keeps
+ * the width it has, whatever is shown in it next (`lib/viewer-split`).
  */
 export type ViewerWidthClass = "review" | "chat" | "preview"
 
@@ -64,13 +74,17 @@ export function viewerWidthClass(item: ViewerItem): ViewerWidthClass {
 }
 
 /**
- * A chat, or the graph chats are picked from: the previewer's own subject,
- * as against a file or image opened over it. The two share a width, so the
- * pane holds still while a graph turns into the chat picked from it.
+ * A chat, or what chats are picked from (the graph, a delegator's list): the
+ * previewer's own subject, as against a file or image opened over it. They
+ * share a width, so the pane holds still while a graph or a list turns into
+ * the chat picked from it.
  */
-export function isChatTrailItem(item: ViewerItem): item is Extract<ViewerItem, { kind: "chat" | "graph" }> {
-  return item.kind === "chat" || item.kind === "graph"
+export function isChatTrailItem(item: ViewerItem): item is Extract<ViewerItem, { kind: "chat" | "graph" | "delegated" }> {
+  return item.kind === "chat" || item.kind === "graph" || item.kind === "delegated"
 }
+
+/** The pane's floor on a delegator's page: that delegator's list. */
+export type ViewerFloor = Extract<ViewerItem, { kind: "delegated" }>
 
 /** A message to land on in the previewed chat: the transcript's one-shot jump, kept here until it is spent. */
 export interface ViewerChatJump {
@@ -101,11 +115,45 @@ interface ViewerState {
   chatJump: ViewerChatJump | null
   /** The chat a mounted previewer holds a subscription on; see `usePreviewedChatId`. */
   liveChatId: string | null
+  /**
+   * Whether what the pane shows was last changed from the keyboard (Escape,
+   * Enter on Back, the command palette). What arrives then arrives at once:
+   * the fade a pointer's change gets would only be a delay on a key.
+   */
+  changedByKey: boolean
+  /**
+   * What is under everything else in the page's pane (`lib/viewer-levels`),
+   * or null on a page with nothing there: every page but a delegator's on a
+   * desktop, where it is the list of the delegator's chats.
+   */
+  floor: ViewerFloor | null
   setChat: (chatId: string | null) => void
+  /**
+   * Called by the page, after `setChat`. `openByDefault` puts the floor in
+   * an empty pane: a delegator's list is there the first time its page is
+   * opened. After that the pane is as it was left, open or shut, like any
+   * chat's (the page remembers which, and passes false).
+   */
+  setFloor: (floor: ViewerFloor | null, options?: { openByDefault?: boolean }) => void
   /** `expanded` opens it over the chat whatever the pane was, and only for as long as it is open. */
   open: (item: ViewerItem, options?: { expanded?: boolean }) => void
+  /**
+   * The Close button and Escape. Shuts the pane, or goes back to the chat
+   * that what is open was opened over. On a page with a floor it is Escape
+   * only, and one level down: to the floor from what is over it, then shut.
+   * The Close button there is `shut`.
+   */
   close: () => void
+  /**
+   * For content that is gone (the chat it previewed was deleted): as far
+   * down as that leaves something to show. Shut, or on a page with a floor,
+   * to the floor.
+   */
   closeAll: () => void
+  /** Shuts the pane, whatever is in it or under it: dragged shut, the Close button on a page with a floor, the navbar's toggle. */
+  shut: () => void
+  /** The Back arrow: one level down (`viewerLevelBelow`), shutting the pane if that is what is under it. */
+  stepBack: () => void
   setScrolledDiffPath: (path: string | null) => void
   toggleExpanded: () => void
   /** The width you dragged the pane to, kept for this chat. */
@@ -116,6 +164,18 @@ interface ViewerState {
   /** Called by the previewer's chat for as long as it is subscribed. */
   holdLiveChat: (chatId: string) => () => void
   clearChatJump: (requestId: string) => void
+}
+
+/**
+ * Whether the action being handled right now came from the keyboard: a key,
+ * or the click a key makes on a focused button (`detail` 0). Read off the
+ * event in flight, like `isBackgroundOpenClick`, since the store's actions
+ * are called through several layers that do not carry it.
+ */
+function isKeyboardInitiated() {
+  const event = typeof window === "undefined" ? undefined : window.event
+  if (typeof KeyboardEvent !== "undefined" && event instanceof KeyboardEvent) return true
+  return typeof MouseEvent !== "undefined" && event instanceof MouseEvent && event.type === "click" && event.detail === 0
 }
 
 function currentViewer(chatKey: string) {
@@ -135,6 +195,21 @@ export const useViewerStore = create<ViewerState>()((set, get) => ({
   chatPreviewHosts: 0,
   chatJump: null,
   liveChatId: null,
+  changedByKey: false,
+  floor: null,
+  setFloor: (floor, options) => {
+    const { chatKey } = get()
+    if (get().floor?.chatId !== floor?.chatId) set({ floor })
+    const current = currentViewer(chatKey)
+    if (floor) {
+      if (!current && options?.openByDefault) useRightSidebarStore.getState().setChatViewer(chatKey, { item: floor, expanded: false })
+      return
+    }
+    // A list left in the pane with no floor under it: the window went to a
+    // phone's width, where the list is opened on request, or the page loaded
+    // there. It was only ever there as the floor.
+    if (current?.item.kind === "delegated" && !current.returnTo) useRightSidebarStore.getState().setChatViewer(chatKey, null)
+  },
   setChat: (chatId) => {
     const chatKey = chatKeyOf(chatId)
     const leaving = get().chatKey
@@ -148,9 +223,7 @@ export const useViewerStore = create<ViewerState>()((set, get) => ({
     const current = currentViewer(chatKey)
     // The pane's own setting, under an item that opened expanded.
     const expanded = current ? current.expandedBefore ?? current.expanded : false
-    // A dragged width holds while you look at things of one kind: a review,
-    // a preview and a chat each open at their own width.
-    const sameKind = current !== null && viewerWidthClass(current.item) === viewerWidthClass(item)
+    // An open pane keeps the width it was dragged to, whatever opens in it.
     // Something else opened over a chat preview keeps the way back to it,
     // through any number of files and images after it. Another chat doesn't:
     // that is the previewer moving on.
@@ -163,13 +236,18 @@ export const useViewerStore = create<ViewerState>()((set, get) => ({
       item,
       expanded: options?.expanded || expanded,
       ...(options?.expanded && !expanded ? { expandedBefore: false } : {}),
-      ...(sameKind && current.widthPx !== undefined ? { widthPx: current.widthPx } : {}),
+      ...(current?.widthPx !== undefined ? { widthPx: current.widthPx } : {}),
       ...(returnTo ? { returnTo } : {}),
     })
-    set((state) => ({ openCount: state.openCount + 1 }))
+    set((state) => ({ openCount: state.openCount + 1, changedByKey: isKeyboardInitiated() }))
   },
   close: () => {
-    const { chatKey } = get()
+    const { chatKey, floor } = get()
+    if (floor) {
+      get().stepBack()
+      return
+    }
+    set({ changedByKey: isKeyboardInitiated() })
     const current = currentViewer(chatKey)
     if (!current?.returnTo) {
       useRightSidebarStore.getState().setChatViewer(chatKey, null)
@@ -182,8 +260,35 @@ export const useViewerStore = create<ViewerState>()((set, get) => ({
       ...(widthPx !== undefined ? { widthPx } : {}),
     })
   },
-  /** Shuts the pane whatever it would go back to: dragged shut, or the chat it previewed is gone. */
-  closeAll: () => useRightSidebarStore.getState().setChatViewer(get().chatKey, null),
+  closeAll: () => {
+    const { chatKey, floor } = get()
+    const current = currentViewer(chatKey)
+    useRightSidebarStore.getState().setChatViewer(chatKey, floor
+      ? { item: floor, expanded: current ? current.expandedBefore ?? current.expanded : false }
+      : null)
+  },
+  shut: () => {
+    set({ changedByKey: isKeyboardInitiated() })
+    useRightSidebarStore.getState().setChatViewer(get().chatKey, null)
+  },
+  stepBack: () => {
+    const { chatKey, floor } = get()
+    const current = currentViewer(chatKey)
+    if (!current) return
+    const below = viewerLevelBelow(current, floor)
+    if (below === "closed") {
+      set({ changedByKey: isKeyboardInitiated() })
+      useRightSidebarStore.getState().setChatViewer(chatKey, null)
+      return
+    }
+    useRightSidebarStore.getState().setChatViewer(chatKey, {
+      item: below.item,
+      expanded: current.expandedBefore ?? current.expanded,
+      ...(below.widthPx !== undefined ? { widthPx: below.widthPx } : {}),
+    })
+    // A chat gone back to is opened again, as far as anything keyed on opens can tell.
+    set((state) => ({ openCount: state.openCount + 1, changedByKey: isKeyboardInitiated() }))
+  },
   setScrolledDiffPath: (path) => updateViewer(get().chatKey, (viewer) => (
     viewer.item.kind !== "diff" || (viewer.reviewPath ?? null) === path
       ? viewer

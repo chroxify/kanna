@@ -1,6 +1,6 @@
 import { KANNA_CHAT_LINK_INSTRUCTIONS } from "../shared/chat-links"
 import { buildKannaAttributionInstructions } from "./attribution"
-import { KANNA_VISUALIZATION_SKILL_INSTRUCTIONS } from "./visualization-instructions"
+import { KANNA_VISUALIZATION_CONTRACT, KANNA_VISUALIZATION_ROUTING, KANNA_VISUALIZATION_SKILL_INSTRUCTIONS } from "./visualization-instructions"
 
 /**
  * How to use the chat tools in `kanna-orchestration-tools.ts`. The tool
@@ -23,18 +23,31 @@ export const KANNA_ORCHESTRATION_INSTRUCTIONS = [
   "- Stopping this chat stops the sub-chats it started, not ones it adopted. Stop one yourself with `cancel_chat` when it is no longer needed.",
 ].join("\n")
 
+/**
+ * What a delegator's agent is told, on top of the chat tools. See
+ * `ChatRecord.delegator`. Only a delegator's session carries it, and every
+ * one of its turns pays for it, so it stays short.
+ *
+ * The parent rule is stated though the orchestrator enforces it: an agent
+ * that knows its chats report back plans around the reports.
+ */
+export const KANNA_DELEGATOR_INSTRUCTIONS = [
+  "# This chat is a delegator",
+  "",
+  "This chat coordinates work. It is not where the work is done. When a message comes in, almost always hand it to another chat. Answer directly only a quick question you can settle from what you already know.",
+  "",
+  "- For each task, look at the chats under this one (`list_chats` with `parentChatId` set to this chat's id, which `get_context` gives). If one already covers that area, send the task there with `send_message`, steering or queueing as fits. If none does, start a sub-chat with `create_chat`. Tell the user which you did.",
+  "- Every chat you hand work to has this chat as its parent: `create_chat` as a sub-chat, and `adopt: true` on `send_message` to a chat you did not start. Kanna applies both here whatever you pass.",
+  "- Several unrelated tasks in one message go to several chats.",
+  "- When a chat reports, tell the user briefly what came back. Do not redo or re-check its work yourself.",
+].join("\n")
+
 export const KANNA_VISUALIZATION_INSTRUCTIONS = [
   "# Kanna visualizations",
   "",
-  "Prefer Kanna's `show_visualization` tool for visual explanations and interactive content: UI prototypes and design variants, charts, diagrams, timelines, calculators, simulations, comparisons, and tools. It renders directly alongside your Markdown on web and iOS, without a card. Use it proactively when a visual or interaction makes the answer easier to understand; simple answers can stay text.",
-  "Use Kanna's visualization tools over your provider's own visualization or artifact tools. Provider-specific markers (including Codex visualize markers), artifact blocks, and HTML code fences do not render as interactive content here. The old show_chart tool is retired; use show_visualization for new work.",
+  KANNA_VISUALIZATION_ROUTING,
   KANNA_VISUALIZATION_SKILL_INSTRUCTIONS,
-  "Generally do not generate charts or diagrams as PNGs/screenshots and send them with send_attachments. Prefer a live visualization. Use images for photographs and illustrations, or when the user explicitly asks for an image/static export; use file attachments for requested downloadable deliverables.",
-  "Author self-contained HTML with inline CSS, JavaScript, and data. Supply html or a local path to show_visualization. External scripts, fonts, fetches, local file access, storage APIs, and nested frames are unavailable. Plain SVG and JavaScript work well; bundle any library you need inline. The tool stores a snapshot, so publish again after changing a source file.",
-  "The host already supplies typography (16px body text) and light/dark colors. Use CSS variables directly as colors: --foreground, --background, --muted-foreground, --border, --surface, and --viz-red, --viz-green, --viz-blue, --viz-yellow, --viz-orange, --viz-purple, --viz-pink, --viz-teal (also --chart-1 through --chart-8). Do not wrap these in hsl(). Use neutral labels and colored marks; avoid hardcoded light/dark backgrounds. Canvas can redraw on the kanna:themechange event.",
-  "Make the content feel like part of the reply: no outer card, border, shadow, page padding, or oversized headline. Open it with a compact title and subtitle at the top left and keep its top-right corner clear, as the tool description says: the host puts an expand button there. Use the available width, natural document height, and a responsive layout down to 320px. Avoid 100vh and percentage page heights because the host sizes the frame to its contents. Size charts explicitly within the flow and recompute their layout on ResizeObserver; do not merely shrink an SVG full of text.",
-  "Use touch-friendly controls, readable labels, keyboard navigation, and reduced-motion support. Put a chart's own settings (range, metric, series, chart type) in the kanna-segmented control or kanna-tabs the tool description gives, not in a row of custom buttons or a <select>. For charts, include units, useful hover/tap details, source/denominator caveats, and optionally CSV export using window.kanna.download({filename: 'data.csv', content: csvText, mimeType: 'text/csv'}) in a click handler. The same API supports text/plain and application/json, up to 2 MB, and opens the native share sheet on iOS. Do not use blob download links. Separate panels with a shared time axis are often clearer than unrelated dual y-axes. Keep explanations outside the visualization when ordinary Markdown communicates them better.",
-  "After the tool succeeds, the visualization is already visible. Do not also emit a provider marker, screenshot, raw HTML, or file link unless requested.",
+  KANNA_VISUALIZATION_CONTRACT,
 ].join("\n")
 
 /**
@@ -46,16 +59,27 @@ export const KANNA_VISUALIZATION_INSTRUCTIONS = [
  *
  * `tools: false` is for a harness that is not handed the Kanna tools, which
  * must not be told to call them.
+ *
+ * `delegator` adds what a delegator chat is told. It hands work off with the
+ * chat tools, so a harness without them is told nothing of it.
  */
-export function buildKannaSystemInstructions(agentId: string, options?: { tools?: boolean }): string {
+export function buildKannaSystemInstructions(agentId: string, options?: KannaInstructionOptions): string {
+  const tools = options?.tools !== false
   return [
     buildKannaAttributionInstructions(agentId),
     KANNA_CHAT_LINK_INSTRUCTIONS,
-    ...(options?.tools === false ? [] : [KANNA_ORCHESTRATION_INSTRUCTIONS, KANNA_VISUALIZATION_INSTRUCTIONS]),
+    ...(tools ? [KANNA_ORCHESTRATION_INSTRUCTIONS] : []),
+    ...(tools && options?.delegator ? [KANNA_DELEGATOR_INSTRUCTIONS] : []),
+    ...(tools ? [KANNA_VISUALIZATION_INSTRUCTIONS] : []),
   ].join("\n\n")
 }
 
+export interface KannaInstructionOptions {
+  tools?: boolean
+  delegator?: boolean
+}
+
 /** Wrapped for the providers that have no system-prompt append hook (cursor, grok). */
-export function buildKannaSystemMessage(agentId: string, options?: { tools?: boolean }): string {
+export function buildKannaSystemMessage(agentId: string, options?: KannaInstructionOptions): string {
   return `<system-message>${buildKannaSystemInstructions(agentId, options)}</system-message>`
 }

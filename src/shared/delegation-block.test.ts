@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { attachDelegationBlock, DELEGATION_BLOCK, DELEGATION_INSTRUCTIONS } from "./delegation-block"
+import { attachDelegationBlock, DELEGATION_BLOCK, DELEGATION_INSTRUCTIONS, stripDelegationBlock } from "./delegation-block"
 import { stripSystemMessages, toMessagePreview } from "./message-preview"
 import { buildTranscriptOutline } from "./transcript-window"
 
@@ -47,5 +47,16 @@ describe("attachDelegationBlock", () => {
     expect(lines[existingThread + 1]).toContain("adopt: true on send_message")
     expect(lines[existingThread + 1]).toContain("reports back to you")
     expect(lines[existingThread + 2]).toBe("- decide if the message you send should steer or enqueue")
+  })
+})
+
+describe("stripDelegationBlock", () => {
+  test("takes the block back off, and leaves a message without one as it is", () => {
+    expect(stripDelegationBlock(attachDelegationBlock("Fix the flaky login test"))).toBe("Fix the flaky login test")
+    expect(stripDelegationBlock(attachDelegationBlock(""))).toBe("")
+    expect(stripDelegationBlock("Fix the flaky login test")).toBe("Fix the flaky login test")
+    // Only the block at the end is the one the graph page added.
+    const quoted = `${DELEGATION_BLOCK}\n\nwhat does this block do?`
+    expect(stripDelegationBlock(quoted)).toBe(quoted)
   })
 })

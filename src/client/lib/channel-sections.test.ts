@@ -105,6 +105,23 @@ describe("computeChannelSections", () => {
     expect(sectionsOf([project("new", [chat("a", NOW)])])).toEqual([["Recent", ["new"]]])
   })
 
+  test("has no section for delegators: one counts toward its project by status and age, like any chat", () => {
+    expect(sectionsOf([
+      project("delegator-running", [chat("a", NOW - 30 * DAY, { delegator: true, status: "running" })]),
+      project("delegator-recent", [chat("b", NOW - DAY, { delegator: true })]),
+      project("delegator-old", [chat("c", NOW - 30 * DAY, { delegator: true })]),
+      project("delegator-unread", [chat("d", NOW - 30 * DAY, { delegator: true, unread: true })]),
+      // Nothing has been said in it yet, so the project has no chat to show.
+      project("delegator-empty", [chat("e", NOW, { delegator: true, lastMessageAt: undefined })]),
+    ])).toEqual([
+      ["In Progress", ["delegator-running"]],
+      ["Relevant", ["delegator-unread"]],
+      ["Recent", ["delegator-recent"]],
+      ["Older", ["delegator-old"]],
+      ["No Recent Chats", ["delegator-empty"]],
+    ])
+  })
+
   test("pins a project only when the channel itself is pinned", () => {
     expect(sectionsOf([
       project("has-pinned-chat", [chat("a", NOW, { pinnedAt: 5 })]),
@@ -130,9 +147,13 @@ describe("computeChannelSections", () => {
 })
 
 describe("getChannelPeekGroups", () => {
-  function peek(chats: SidebarChatRow[]) {
-    return getChannelPeekGroups(project("p", chats), NOW)
-      .map((group) => [group.label, group.threads.map((thread) => thread.chatId)])
+  function peek(chats: SidebarChatRow[], archivedIds: string[] = []) {
+    const group = {
+      ...project("p", chats.filter((row) => !archivedIds.includes(row.chatId))),
+      archivedChats: chats.filter((row) => archivedIds.includes(row.chatId)),
+    }
+    return getChannelPeekGroups(group, NOW)
+      .map((peekGroup) => [peekGroup.label, peekGroup.threads.map((thread) => thread.chatId)])
   }
 
   test("offers everything down to Relevant, then the latest date bucket only", () => {
@@ -143,11 +164,40 @@ describe("getChannelPeekGroups", () => {
       chat("today", NOW),
       chat("yesterday", NOW - DAY),
     ])).toEqual([
+      // The Chats view's own order.
+      ["Pinned", ["pinned"]],
       ["In Progress", ["running"]],
       ["Relevant", ["unread"]],
-      ["Pinned", ["pinned"]],
       ["Today", ["today"]],
     ])
+  })
+
+  test("lists the project's delegators under Pinned, and a pinned one under Pinned alone", () => {
+    expect(peek([
+      chat("pinned", NOW - 9 * DAY, { pinnedAt: 1 }),
+      chat("running", NOW, { status: "running" }),
+      chat("today", NOW),
+      // Each would be in a group below, were it not a delegator.
+      chat("delegator-idle-old", NOW - 9 * DAY, { delegator: true }),
+      chat("delegator-running", NOW - DAY, { delegator: true, status: "running" }),
+      chat("delegator-unread", NOW - 2 * DAY, { delegator: true, unread: true }),
+      chat("delegator-empty", NOW - 3 * DAY, { delegator: true, lastMessageAt: undefined }),
+      // Pinned wins: these two are Pinned's, in the order they were pinned.
+      chat("delegator-pinned-second", NOW - 5 * DAY, { delegator: true, pinnedAt: 7 }),
+      chat("delegator-pinned-first", NOW - 30 * DAY, { delegator: true, pinnedAt: 3 }),
+      chat("delegator-archived", NOW, { delegator: true }),
+    ], ["delegator-archived"])).toEqual([
+      ["Pinned", ["pinned", "delegator-pinned-first", "delegator-pinned-second"]],
+      // The rest, newest first, one with no message yet among them.
+      ["Delegators", ["delegator-running", "delegator-unread", "delegator-empty", "delegator-idle-old"]],
+      ["In Progress", ["running"]],
+      ["Today", ["today"]],
+    ])
+  })
+
+  test("delegators are all there before the card is asked for more, and a project of only delegators has one group", () => {
+    expect(peek([chat("d1", NOW - 40 * DAY, { delegator: true }), chat("d2", NOW - 50 * DAY, { delegator: true })]))
+      .toEqual([["Delegators", ["d1", "d2"]]])
   })
 
   test("is the latest day alone for a project with nothing pressing", () => {

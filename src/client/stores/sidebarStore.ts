@@ -121,6 +121,24 @@ export function parentChatIdOf(data: SidebarData, chatId: string | null): string
   return null
 }
 
+/**
+ * Whether the chat is a delegator, as the sidebar has it now. Known from app
+ * start, before the chat's own snapshot, which is what lets a delegator's
+ * page open with its list already in the pane. A boolean, so a subscriber
+ * hears about the chat becoming or ceasing to be one and nothing else.
+ */
+export function useChatIsDelegator(chatId: string | null): boolean {
+  return useSidebarStore((state) => {
+    if (!chatId) return false
+    for (const group of state.data.projectGroups) {
+      const chat = group.chats.find((candidate) => candidate.chatId === chatId)
+        ?? group.archivedChats?.find((candidate) => candidate.chatId === chatId)
+      if (chat) return Boolean(chat.delegator)
+    }
+    return false
+  })
+}
+
 export function useProjectRepoUrl(projectId: string | null): string | undefined {
   return useSidebarStore((state) => (
     projectId

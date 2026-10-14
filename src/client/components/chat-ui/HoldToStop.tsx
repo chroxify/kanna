@@ -5,7 +5,8 @@ import { createHoldToConfirm, type HoldClock } from "../../lib/hold-to-confirm"
  * Stopping a turn with Escape takes a hold, not a press: Escape is under the
  * finger for a dozen other things (closing a menu, the viewer's pane, leaving
  * focus mode), and one of those landing on a running turn threw its work
- * away. Held for a second and a half it is unmistakably meant.
+ * away. Held for half a second it is meant: longer than any tap or any
+ * press that was for something else, and short enough not to be a wait.
  *
  * While the key is down a ring draws round the composer's Stop button, and
  * the turn stops when it closes. The ring is the hold made visible: without
@@ -15,19 +16,25 @@ import { createHoldToConfirm, type HoldClock } from "../../lib/hold-to-confirm"
  * is where a key gets to move something.
  *
  * The timing is the hold-to-confirm pattern. The fill is linear over the
- * whole hold, because it is progress and progress does not ease. Letting go
- * runs it back in 200ms on the app's strong ease-out: slow where the user is
- * deciding, fast where the interface is answering.
+ * whole hold, because it is progress and progress does not ease, and it
+ * starts on the frame of the keydown: half a second has none to spare for a
+ * delay. Letting go runs it back in 120ms on the app's strong ease-out:
+ * slow where the user is deciding, fast where the interface is answering,
+ * and a release that took a large part of the hold's own length would read
+ * as a second thing happening.
  *
  * Clicking Stop is unchanged, and immediate. A click on that button is
  * already as deliberate as a hold.
  */
 
-export const HOLD_TO_STOP_MS = 1500
+export const HOLD_TO_STOP_MS = 500
 /** The ring's way back when the key is let go. Matches the transition on the ring below. */
-const RELEASE_MS = 200
-/** How long the hint outlasts a tap, to be read. */
-const HINT_LINGER_MS = 1600
+const RELEASE_MS = 120
+/**
+ * How long the hint stays after a tap. Set by how long four words take to
+ * read, not by the hold: any shorter and it is a flicker above the button.
+ */
+const HINT_LINGER_MS = 1000
 /**
  * How long a closed ring waits for the turn to be seen to stop before giving
  * up on it. The interrupt is a round trip; one that failed, or a turn the
@@ -193,7 +200,10 @@ export function useHoldToStop({ enabled, onConfirm }: {
   return {
     arcRef,
     ringShown,
-    hintShown: phase === "holding" || phase === "released",
+    // Only once a press has been let go short of the hold. While the key is
+    // down the ring is saying it, and a hold this short is over before a
+    // hint could be read: shown then, it flashed on every stop.
+    hintShown: phase === "released",
     engaged: phase === "holding" || phase === "confirmed",
     press,
   }
@@ -238,7 +248,7 @@ export function HoldToStopRing({ arcRef, shown }: {
         strokeDasharray="1"
         // The release. Reduced motion keeps the ring (it is the only sign a
         // hold is running) and drops the eased run back for an instant one.
-        className="transition-[stroke-dashoffset] duration-200 ease-snappy motion-reduce:transition-none"
+        className="transition-[stroke-dashoffset] duration-[120ms] ease-snappy motion-reduce:transition-none"
         style={{ strokeDashoffset: 1 }}
       />
     </svg>
@@ -246,10 +256,9 @@ export function HoldToStopRing({ arcRef, shown }: {
 }
 
 /**
- * Says the key has to be held, from the first moment it is down and for a
- * moment after a tap. Without it a tap that used to stop the turn now seems
- * to do nothing. It appears and goes at once: Escape gets one moving thing,
- * and that is the ring.
+ * Says the key has to be held, for a moment after a tap. Without it a tap
+ * that used to stop the turn now seems to do nothing. It appears and goes
+ * at once: Escape gets one moving thing, and that is the ring.
  *
  * Placed above its positioned parent, at its right edge. The spoken copy is
  * always in the tree, so that filling it in is announced.

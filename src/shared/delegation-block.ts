@@ -38,3 +38,15 @@ export function attachDelegationBlock(content: string): string {
   if (trimmed.endsWith(DELEGATION_BLOCK)) return trimmed
   return trimmed.length > 0 ? `${trimmed}\n\n${DELEGATION_BLOCK}` : DELEGATION_BLOCK
 }
+
+/**
+ * The message without the block, for a chat that is told to delegate another
+ * way: a delegator has it in its session instructions (`ChatRecord.delegator`
+ * on the server), and a turn should not be told twice. Applied by the server
+ * when the message arrives, so it holds whichever client sent it.
+ */
+export function stripDelegationBlock(content: string): string {
+  const trimmed = content.trim()
+  if (!trimmed.endsWith(DELEGATION_BLOCK)) return content
+  return trimmed.slice(0, -DELEGATION_BLOCK.length).trimEnd()
+}

@@ -14,13 +14,15 @@ import { renderChatStatusDot } from "../../components/chat-ui/ThreadRowContent"
 import { scheduleEditPrompt } from "../../components/chat-ui/widgets/SchedulesWidget"
 import { TranscriptRenderOptionsProvider } from "../../components/messages/render-context"
 import { ToolPayloadProvider } from "../../components/messages/tool-payload-context"
-import { ViewerIconButton, ViewerSurface } from "../../components/viewer/ViewerSurface"
+import { useViewerMotion, ViewerIconButton, ViewerSurface } from "../../components/viewer/ViewerSurface"
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow"
+import { cn } from "../../lib/utils"
+import { viewerLevelBelow } from "../../lib/viewer-levels"
 import { snapshotDroppedFiles } from "../../lib/snapshotDroppedFiles"
 import { useAppSettingsStore } from "../../stores/appSettingsStore"
 import { useChatExists, useNavbarRepoLabel, useSidebarReady } from "../../stores/sidebarStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
-import { getChatViewer, openViewer, useViewerStore, type ViewerItem } from "../../stores/viewerStore"
+import { getChatViewer, useViewerStore, type ViewerItem } from "../../stores/viewerStore"
 import type { KannaState } from "../useKannaState"
 import { useChatSession } from "../useChatSession"
 import { useOpenChat } from "../useOpenChat"
@@ -122,22 +124,19 @@ export const ChatPreview = memo(function ChatPreview({ item, context, onClose }:
     onOpenChat: (id) => openChat(id, { from: "preview" }),
   } : null), [openChat, pageActions])
 
-  // A chat picked from the graph goes back to the graph: it is the first
-  // thing on the trail, before any chat.
-  const backGraphChatId = item.graph ?? null
-  const handleBack = useCallback(() => {
-    if (!backChatId) {
-      if (backGraphChatId) openViewer({ kind: "graph", chatId: backGraphChatId })
-      return
-    }
-    const back = item.back?.slice(0, -1) ?? []
-    openViewer({
-      kind: "chat",
-      chatId: backChatId,
-      ...(back.length > 0 ? { back } : {}),
-      ...(backGraphChatId ? { graph: backGraphChatId } : {}),
-    })
-  }, [backChatId, backGraphChatId, item.back])
+  // What Back goes to, which the pane's levels say (`viewerLevelBelow`): the
+  // chat this one was stepped to from, the graph or the delegator's list it
+  // was picked from, or the list under everything in a delegator's pane.
+  // Nothing, for a chat opened from an ordinary chat's transcript, which has
+  // only a Close.
+  const floor = useViewerStore((store) => store.floor)
+  const below = viewerLevelBelow({ item }, floor)
+  const backLabel = below === "closed"
+    ? null
+    : below.item.kind === "chat"
+      ? (backThread ? `Back to ${backThread.title}` : "Back")
+      : below.item.kind === "graph" ? "Back to graph" : "Back to delegated chats"
+  const handleBack = useViewerStore((store) => store.stepBack)
   const handleOpenInTab = useCallback(() => openChat(chatId, { target: "tab" }), [chatId, openChat])
 
   const title = thread?.title ?? "Chat"
@@ -161,11 +160,8 @@ export const ChatPreview = memo(function ChatPreview({ item, context, onClose }:
       icon={statusDot ?? <MessageCircle />}
       title={title}
       subtitle={thread?.archived ? "Archived" : parentThread ? `Sub-chat of ${parentThread.title}` : undefined}
-      leading={backChatId || backGraphChatId ? (
-        <ViewerIconButton
-          label={backChatId ? (backThread ? `Back to ${backThread.title}` : "Back") : "Back to graph"}
-          onClick={handleBack}
-        >
+      leading={backLabel ? (
+        <ViewerIconButton label={backLabel} onClick={handleBack}>
           <ArrowLeft />
         </ViewerIconButton>
       ) : undefined}
@@ -200,6 +196,13 @@ function ChatPreviewSession({ chatId, title, projectId: sidebarProjectId, projec
   const projectRepoLabel = useNavbarRepoLabel(projectId, projectPath ?? undefined)
   const editorPreset = useTerminalPreferencesStore((store) => store.editorPreset)
   const editorCommandTemplate = useTerminalPreferencesStore((store) => store.editorCommandTemplate)
+
+  // Whether the transcript has something to show: rows, or the server's word
+  // that there are none. And whether its arrival fades (`ViewerMotion`): as
+  // it was when this chat was opened, and not for one opened from the keyboard.
+  const transcriptReady = session.messages.length > 0 || session.chatSnapshot !== null
+  const motion = useViewerMotion()
+  const [fadesIn] = useState(motion.bodyEnters || motion.cardEnters)
 
   // Tells the background follower this chat has a full-rate subscription.
   useEffect(() => useViewerStore.getState().holdLiveChat(chatId), [chatId])
@@ -308,7 +311,18 @@ function ChatPreviewSession({ chatId, title, projectId: sidebarProjectId, projec
   return (
     <ChatSchedulesProvider value={chatSchedules}>
       <div ref={cardRef} className="relative flex h-full min-h-0 flex-col overflow-hidden" onDragOver={handleDragOver} onDrop={handleDrop}>
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
+          // The transcript is drawn once there is one to draw. Until then the
+          // card holds the composer and an empty column, which is the chat's
+          // skeleton; what must not happen is rows landing on it with a snap.
+          // A chat whose window was already held (most are) is ready on its
+          // first render and has nothing to fade from.
+          data-ready={transcriptReady || undefined}
+          className={cn(
+            "relative flex min-h-0 flex-1 flex-col overflow-hidden opacity-0 data-[ready]:opacity-100",
+            fadesIn && "transition-opacity duration-150 ease-snappy motion-reduce:transition-none",
+          )}
+        >
           <TranscriptRenderOptionsProvider value={transcriptRenderOptions}>
           <ToolPayloadProvider store={toolPayloadStore}>
           <ChatTranscriptViewport

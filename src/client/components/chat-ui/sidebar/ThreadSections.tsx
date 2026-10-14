@@ -9,6 +9,7 @@ import {
 import { useDraftStartTimes } from "../../../stores/chatInputStore"
 import { usePendingSendTimes } from "../../../stores/pendingSendStore"
 import { useSectionOverrides } from "../../../stores/sidebarSectionStore"
+import type { ThreadDetailScope } from "../../../lib/thread-detail-label"
 import { cn, normalizeChatId } from "../../../lib/utils"
 import { Button } from "../../ui/button"
 import {
@@ -132,6 +133,13 @@ interface Props {
    * projects; a channel's own chats are all one project and leave it off.
    */
   showProjectIcons?: boolean
+  /**
+   * What a row's trailing slot says (`getThreadDetailLabel`). The project by
+   * default, for lists that span projects or sit under a channel. A
+   * delegator's list passes "project-scoped", for the chat's age: its chats
+   * are nearly all in the delegator's own project.
+   */
+  detailScope?: ThreadDetailScope
 }
 
 /**
@@ -157,6 +165,7 @@ function ThreadSectionsImpl({
   onOpenExternalPath,
   expandScope = "chats",
   showProjectIcons = false,
+  detailScope = "cross-project",
 }: Props) {
   // Drafts are browser-local, so they reach the sections as an argument rather
   // than as a field on the rows the server sent.
@@ -186,9 +195,12 @@ function ThreadSectionsImpl({
     setSectionExpanded(key, !(expandOverrides[key] ?? defaultExpanded))
   }
 
+  // The sections that hold their chats whatever state those are in, then In
+  // Progress. The first two fold, and the fold is kept (`sidebarSectionStore`).
   const pinnedGroups = [
-    { key: "pinned", heading: "Pinned", threads: sections.pinned },
-    { key: "in-progress", heading: "In Progress", threads: sections.inProgress },
+    { key: "pinned", heading: "Pinned", threads: sections.pinned, collapsible: true },
+    { key: "delegators", heading: "Delegators", threads: sections.delegators, collapsible: true },
+    { key: "in-progress", heading: "In Progress", threads: sections.inProgress, collapsible: false },
   ].filter((group) => group.threads.length > 0)
 
   // Relevant counts here too: it drains chats out of the buckets, so a tab whose
@@ -206,7 +218,7 @@ function ThreadSectionsImpl({
       thread={thread}
       isActive={normalizeChatId(thread.chatId) === normalizedActiveChatId}
       editorLabel={editorLabel}
-      detailScope="cross-project"
+      detailScope={detailScope}
       nowMs={nowMs}
       dimIdleTitles={false}
       showProjectIcon={showProjectIcons}
@@ -227,7 +239,7 @@ function ThreadSectionsImpl({
   return (
     <div>
       {pinnedGroups.map((group) => {
-        const collapsible = group.key === "pinned"
+        const { collapsible } = group
         const isExpanded = !collapsible || (expandOverrides[group.key] ?? true)
         return (
           <div key={group.key}>
@@ -306,7 +318,7 @@ function ThreadSectionsImpl({
                     archived
                     isActive={normalizeChatId(thread.chatId) === normalizedActiveChatId}
                     editorLabel={editorLabel}
-                    detailScope="cross-project"
+                    detailScope={detailScope}
                     nowMs={nowMs}
                     dimIdleTitles={false}
                     showProjectIcon={showProjectIcons}

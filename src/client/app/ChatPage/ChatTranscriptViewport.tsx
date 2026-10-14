@@ -40,6 +40,7 @@ import {
   isOptimisticMessageId,
   resolveJumpTarget,
   resolveRestoreTarget,
+  sameScrollTarget,
   shouldPinForNewPrompt,
   type LatestUserPrompt,
   type TranscriptJumpRequest,
@@ -55,7 +56,7 @@ import {
   EMPTY_STATE_TEXT,
 } from "./utils"
 import type { EditorOpenSettings, EditorPreset, OpenExternalAction, TerminalPreset } from "../../../shared/protocol"
-import type { TranscriptOutlineEntry } from "../../../shared/types"
+import type { TranscriptOutlineEntry, WaitingOn } from "../../../shared/types"
 /**
  * How close to the bottom counts as "at the end", as a fraction of viewport
  * height.
@@ -241,7 +242,7 @@ function measureReadAnchorLayout(
 }
 
 /** No stored anchor — pin the latest user prompt. Used by the export viewer too. */
-const DEFAULT_READ_ANCHOR_STATE: ChatReadAnchorState = { resolved: true, anchor: null }
+const DEFAULT_READ_ANCHOR_STATE: ChatReadAnchorState = { resolved: true, anchor: null, confirmed: true }
 
 /** What ChatPage drives the transcript with, in place of a list ref. */
 export interface TranscriptScrollHandle {
@@ -258,6 +259,8 @@ interface ChatTranscriptViewportProps {
   latestToolIds: KannaState["latestToolIds"]
   isProcessing: boolean
   runtimeStatus: string | null
+  /** What the chat is waiting on, while that is its status. */
+  waitingOn?: WaitingOn
   isDraining: boolean
   commandError: string | null
   onStopDraining: () => void
@@ -468,6 +471,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   latestToolIds,
   isProcessing,
   runtimeStatus,
+  waitingOn,
   isDraining,
   commandError,
   onStopDraining,
@@ -612,10 +616,16 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
    */
   const hasUserScrolledRef = useRef(false)
   const pendingPinRef = useRef<{ rowId: string; offsetFromMessage: number; until: number } | null>(null)
-
-  useEffect(() => {
-    pendingPinRef.current = null
-  }, [activeChatId])
+  /**
+   * Until when a landing at the end is held there, as a pin is held on its
+   * row. The scroller follows the end by itself, but a frame behind: it
+   * hears of a change in height and scrolls on the next frame. Rows that
+   * settle right after they mount (a folded prompt gaining its Show more)
+   * left a chat opened at its end a few pixels short of it for that frame.
+   */
+  const pendingEndUntilRef = useRef<number | null>(null)
+  /** The row last reported as the read position, to measure once more on the way out. */
+  const lastReportedRowRef = useRef<{ messageId: string; rowId: string } | null>(null)
 
   /**
    * Put a row at the top of the viewport, re-issuing until it stays there.
@@ -637,13 +647,21 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
   }, [headerOffsetPx, scrollToEnd, scrollToMessage])
 
   /**
-   * Nudge an in-flight pin back onto its row after the layout moves under it.
+   * Nudge an in-flight pin back onto its row after the layout moves under it,
+   * or a landing at the end back to the end.
    *
    * Gives up on a deadline, once the row is where it should be, or the moment
    * the reader scrolls — a correction that fought a deliberate scroll would be
    * far worse than one that lands a little short.
    */
   const correctPendingPin = useCallback(() => {
+    const endUntil = pendingEndUntilRef.current
+    if (endUntil !== null) {
+      const viewport = viewportRef.current
+      if (hasUserScrolledRef.current || Date.now() > endUntil) pendingEndUntilRef.current = null
+      else if (viewport && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop > PIN_TOLERANCE_PX) scrollToEnd()
+      return
+    }
     const pending = pendingPinRef.current
     if (!pending) return
     if (hasUserScrolledRef.current || Date.now() > pending.until) {
@@ -670,15 +688,20 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
       return
     }
     scrollToMessage(pending.rowId, { align: "start", scrollMargin: intended })
-  }, [headerOffsetPx, scrollToMessage])
+  }, [headerOffsetPx, scrollToEnd, scrollToMessage])
 
   const applyScrollTarget = useCallback((target: TranscriptScrollTarget) => {
     if (target.kind === "end") {
+      // A pin still settling would pull the reader back to its row at the
+      // next change in height.
+      pendingPinRef.current = null
+      pendingEndUntilRef.current = Date.now() + PIN_SETTLE_MS
       onIsAtEndChange(true)
       scrollToEnd()
       return
     }
 
+    pendingEndUntilRef.current = null
     // Written synchronously (it sets a ref in ChatPage) so the parent's
     // auto-follow effect bails on this same commit instead of yanking us to
     // the bottom — child effects flush before parent effects.
@@ -762,10 +785,27 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     return target?.kind === "pin" ? prepareJumpToRow(target.rowId) : target
   }, [jumpRequest, onJumpRequestHandled, prepareJumpToRow, resolvedRows])
 
+  /**
+   * Where the open landed, the jump that sent it there if one did, and
+   * whether the server had confirmed the chat by then (see
+   * `ChatReadAnchorState.confirmed`).
+   */
+  const restoredFromRef = useRef<{
+    target: TranscriptScrollTarget
+    jump: TranscriptJumpRequest["target"] | null
+    confirmed: boolean
+  } | null>(null)
+
   // Restore once per chat open: wait until rows exist *and* the stored anchor
   // has resolved, otherwise we'd land on the fallback and visibly jump when the
   // anchor arrives a moment later.
-  useEffect(() => {
+  //
+  // A layout effect, so the position is set in the commit that mounts the
+  // rows and the browser's first paint of the chat is already there. As a
+  // passive effect it ran after that paint. The scroller had put the list at
+  // its end by then (its default for a list that gains its first rows), so
+  // every open with a stored position drew the end and then jumped.
+  useLayoutEffect(() => {
     if (!activeChatId) {
       // Leaving the chat surface arms the next open to restore again. Without
       // this the ref still names the chat just left, so returning to that same
@@ -773,13 +813,56 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
       // up the map. Navigating to a *different* chat happened to work, which
       // is why this only showed up on away-and-back.
       restoredChatIdRef.current = null
+      pendingPinRef.current = null
+      pendingEndUntilRef.current = null
+      onIsAtEndChange(true)
       return
     }
-    if (restoredChatIdRef.current === activeChatId) return
-    if (resolvedRows.length === 0 || !readAnchorState.resolved) return
+    if (resolvedRows.length === 0 || !readAnchorState.resolved) {
+      // Nothing to scroll yet. The page's scroll-to-bottom button still
+      // stands as the last chat left it, and this is what clears it.
+      if (restoredChatIdRef.current !== activeChatId) onIsAtEndChange(true)
+      return
+    }
+    const restoreTarget = () => resolveRestoreTarget(
+      resolvedRows,
+      readAnchorState.anchor,
+      rowIndexByMessageId,
+      measureTranscriptColumnWidth(viewportRef.current),
+    )
+
+    if (restoredChatIdRef.current === activeChatId) {
+      // The chat opened from what this browser had: its copy of the position
+      // and a cached transcript. The server has now answered. Nearly always
+      // it agrees and nothing moves. It does not when another device moved
+      // the position, or when the chat went on while this browser was not
+      // following it, so "the last reply" is now a later one. Land again
+      // then, unless the reader has scrolled since.
+      const restoredFrom = restoredFromRef.current
+      if (!restoredFrom || restoredFrom.confirmed || !readAnchorState.confirmed) return
+      restoredFrom.confirmed = true
+      // Prompts the server's answer brought were sent before this open. The
+      // effect that follows a new prompt to the end must not take them for
+      // one the reader just sent.
+      latestPromptRef.current = getLatestUserPrompt(resolvedRows)
+      if (hasUserScrolledRef.current) return
+      if (restoredFrom.jump) {
+        // By row alone: the lead-in above it is measured afresh each time.
+        const next = resolveJumpTarget(resolvedRows, restoredFrom.jump)
+        const landedRowId = restoredFrom.target.kind === "pin" ? restoredFrom.target.rowId : null
+        if (next?.kind !== "pin" || next.rowId === landedRowId) return
+        applyScrollTarget(prepareJumpToRow(next.rowId))
+        return
+      }
+      const next = restoreTarget()
+      if (!sameScrollTarget(next, restoredFrom.target)) applyScrollTarget(next)
+      return
+    }
 
     restoredChatIdRef.current = activeChatId
     hasUserScrolledRef.current = false
+    pendingPinRef.current = null
+    pendingEndUntilRef.current = null
     latestPromptRef.current = getLatestUserPrompt(resolvedRows)
     // A jump outranks the stored position — you asked for this message by
     // name. Resolved here rather than in a second effect so the open scrolls
@@ -787,13 +870,12 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     // visibly slide off it. `hasUserScrolledRef` stays false so the pin's
     // settle loop still corrects as rows measure in; the read anchor catches
     // up from wherever the jump leaves us.
-    applyScrollTarget(consumeJumpTarget() ?? resolveRestoreTarget(
-      resolvedRows,
-      readAnchorState.anchor,
-      rowIndexByMessageId,
-      measureTranscriptColumnWidth(viewportRef.current),
-    ))
-  }, [activeChatId, applyScrollTarget, consumeJumpTarget, readAnchorState, resolvedRows, rowIndexByMessageId])
+    const jump = jumpRequest?.target ?? null
+    const jumpTarget = consumeJumpTarget()
+    const target = jumpTarget ?? restoreTarget()
+    restoredFromRef.current = { target, jump: jumpTarget ? jump : null, confirmed: readAnchorState.confirmed }
+    applyScrollTarget(target)
+  }, [activeChatId, applyScrollTarget, consumeJumpTarget, jumpRequest, onIsAtEndChange, prepareJumpToRow, readAnchorState, resolvedRows, rowIndexByMessageId])
 
   // A jump into the chat that is *already* open — the restore effect above has
   // already run for it, so nothing else would move the viewport. Deliberate in
@@ -861,10 +943,37 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     // Optimistic ids are client-local and will not resolve on another device.
     if (!messageId || isOptimisticMessageId(messageId)) return
 
+    lastReportedRowRef.current = { messageId, rowId: row.id }
     // Deferred: the hook writes at most once per interval, and the measure is
     // a forced layout the scroll path does not need to pay on every event.
     onReportReadAnchor(messageId, isAtEnd, () => measureReadAnchorLayout(viewportRef.current, row.id, headerOffsetPx))
   }, [headerOffsetPx, onReportReadAnchor])
+
+  // Read by the cleanup below, which runs once and must see the last of each.
+  const onReportReadAnchorRef = useRef(onReportReadAnchor)
+  onReportReadAnchorRef.current = onReportReadAnchor
+  const headerOffsetPxRef = useRef(headerOffsetPx)
+  headerOffsetPxRef.current = headerOffsetPx
+
+  // The reader's position, measured one last time while the transcript is
+  // still in the document.
+  //
+  // The deferred measure above runs when the throttled write goes out. The
+  // write still pending as a chat is left goes out from an effect cleanup,
+  // after the transcript is gone: there was nothing to measure, so it kept
+  // the message and dropped how far into it the reader was. A chat left
+  // within a second and a half of scrolling came back at the top of that
+  // message, which in a long answer is screens away. A layout effect's
+  // cleanup runs before React removes the rows.
+  useLayoutEffect(() => () => {
+    const reported = lastReportedRowRef.current
+    const viewport = viewportRef.current
+    if (!reported || !viewport || !hasUserScrolledRef.current) return
+    const layout = measureReadAnchorLayout(viewport, reported.rowId, headerOffsetPxRef.current)
+    if (!layout) return
+    const distanceFromEnd = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+    onReportReadAnchorRef.current?.(reported.messageId, distanceFromEnd <= AT_END_THRESHOLD_PX, layout)
+  }, [])
 
   /**
    * The first loaded row and where it sat when older rows were asked for.
@@ -957,14 +1066,10 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
     sizeObserver.observe(scrollNode)
     syncSize()
 
-    // The content grows as offscreen rows render for the first time, which is
-    // what pulls a fresh pin off its target. Watching it is how the correction
-    // knows to re-aim.
+    // A change in the content's height changes how far the reader is from
+    // the end, and whether there is anything to scroll, without a scroll.
     const content = scrollNode.querySelector('[data-slot="message-scroller-content"]')
-    const contentObserver = new ResizeObserver(() => {
-      handleScroll()
-      correctPendingPin()
-    })
+    const contentObserver = new ResizeObserver(handleScroll)
     if (content) contentObserver.observe(content)
 
     scrollNode.addEventListener("scroll", handleScroll, { passive: true })
@@ -980,7 +1085,29 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
         scrollNode.removeEventListener(eventName, markUserScrolled)
       }
     }
-  }, [activeChatId, correctPendingPin, handleScroll])
+  }, [activeChatId, handleScroll])
+
+  // Keeps a pin on its row while the content settles under it.
+  //
+  // Rows above the target change height after they are laid out: a folded
+  // prompt gains its Show more, an image decodes, a visualization frame
+  // reports its height. Each one moves the target, and a ResizeObserver hears
+  // of it after layout and before paint, so re-aiming here is never seen.
+  //
+  // Observed from a layout effect so it is in place before the first paint.
+  // From a passive effect it began a frame late, and whatever had settled in
+  // between showed as a jump on the second frame. It also covers the
+  // scroller's own move: when rows land in a list that mounted empty (a chat
+  // with nothing cached, drawn when the server answers), the scroller sends
+  // the list to its end from a mutation observer, which runs after the
+  // restore above and would otherwise be what the first paint shows.
+  useLayoutEffect(() => {
+    const content = viewportRef.current?.querySelector('[data-slot="message-scroller-content"]')
+    if (!content) return
+    const observer = new ResizeObserver(correctPendingPin)
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [correctPendingPin])
 
   // The button lives outside the scroll node, so it never trips the input
   // listeners — but jumping to the bottom is an explicit read-position choice.
@@ -1130,7 +1257,7 @@ const TranscriptScrollerBody = memo(function TranscriptScrollerBody({
           it is not processing. It is not finished either, and this line is
           what says so here. A draining stream says it with its own, below. */}
       {isProcessing || (runtimeStatus === "waiting_on_subagent" && !isDraining)
-        ? <ProcessingMessage status={runtimeStatus ?? undefined} />
+        ? <ProcessingMessage status={runtimeStatus ?? undefined} waitingOn={waitingOn} />
         : null}
       {queuedMessages.map((message) => (
         <QueuedUserMessage
