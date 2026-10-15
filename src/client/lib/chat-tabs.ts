@@ -70,6 +70,49 @@ export function reorderChatTabs(tabs: readonly ChatTab[], orderedChatIds: readon
   return ordered.length === tabs.length ? ordered : (tabs as ChatTab[])
 }
 
+/** These tabs, whichever are in the bar. Same array back when none are. */
+export function closeChatTabs(tabs: readonly ChatTab[], chatIds: readonly string[]): ChatTab[] {
+  const closing = new Set(chatIds)
+  const kept = tabs.filter((tab) => !closing.has(tab.chatId))
+  return kept.length === tabs.length ? (tabs as ChatTab[]) : kept
+}
+
+/**
+ * A run of tabs in the bar: a project's tabs, gathered together, or a lone
+ * tab whose project isn't known yet (`projectId` null: a chat just created,
+ * before the sidebar reports it).
+ */
+export interface ChatTabGroup {
+  projectId: string | null
+  tabs: ChatTab[]
+}
+
+/**
+ * The bar's tabs grouped by project. A group sits where its project's first
+ * tab does, and holds every tab of that project in their order, so a tab
+ * opened beside one of another project still lands in its own group.
+ */
+export function groupChatTabs(tabs: readonly ChatTab[], projectOf: (chatId: string) => string | undefined): ChatTabGroup[] {
+  const groups: ChatTabGroup[] = []
+  const byProject = new Map<string, ChatTabGroup>()
+  for (const tab of tabs) {
+    const projectId = projectOf(tab.chatId)
+    if (projectId === undefined) {
+      groups.push({ projectId: null, tabs: [tab] })
+      continue
+    }
+    const existing = byProject.get(projectId)
+    if (existing) {
+      existing.tabs.push(tab)
+      continue
+    }
+    const group: ChatTabGroup = { projectId, tabs: [tab] }
+    byProject.set(projectId, group)
+    groups.push(group)
+  }
+  return groups
+}
+
 /** Drops tabs for chats that are gone. Same array back when none are. */
 export function pruneChatTabs(tabs: readonly ChatTab[], keep: (chatId: string) => boolean): ChatTab[] {
   const kept = tabs.filter((tab) => keep(tab.chatId))

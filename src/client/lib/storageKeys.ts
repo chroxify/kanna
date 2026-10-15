@@ -40,6 +40,7 @@ export const CHANNEL_PINS_STORAGE_KEY = "kanna:channel-pins"
 
 /** localStorage: JSON list of the chat tabs (`ChatTab[]`), in order. */
 export const CHAT_TABS_STORAGE_KEY = "kanna:chat-tabs"
+export const CHAT_TAB_GROUPS_COLLAPSED_STORAGE_KEY = "kanna:chat-tab-groups-collapsed"
 
 /** localStorage: JSON map of sidebar list to whether its Pinned section is expanded, once you have toggled it. */
 export const SIDEBAR_PINNED_EXPANDED_STORAGE_KEY = "kanna:sidebar-pinned-expanded"

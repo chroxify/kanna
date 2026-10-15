@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import {
   closeChatTab,
+  closeChatTabs,
   closeChatTabsToRight,
   closeOtherChatTabs,
   getAdjacentChatTab,
   getChatTabAfterClose,
+  groupChatTabs,
   openChatTab,
   pruneChatTabs,
   reorderChatTabs,
@@ -73,5 +75,33 @@ describe("pruneChatTabs", () => {
     const tabs = [tab("a"), tab("b")]
     expect(ids(pruneChatTabs(tabs, (chatId) => chatId === "a"))).toEqual(["a"])
     expect(pruneChatTabs(tabs, () => true)).toBe(tabs)
+  })
+})
+
+describe("groupChatTabs", () => {
+  const projects: Record<string, string> = { a: "p1", b: "p2", c: "p1", d: "p2" }
+
+  test("gathers a project's tabs where its first tab is, in their order", () => {
+    const groups = groupChatTabs([tab("a"), tab("b"), tab("c"), tab("d")], (chatId) => projects[chatId])
+    expect(groups.map((group) => [group.projectId, ids(group.tabs)])).toEqual([
+      ["p1", ["a", "c"]],
+      ["p2", ["b", "d"]],
+    ])
+  })
+
+  test("leaves a tab with no known project on its own, where it is", () => {
+    const groups = groupChatTabs([tab("a"), tab("new"), tab("c")], (chatId) => projects[chatId])
+    expect(groups.map((group) => [group.projectId, ids(group.tabs)])).toEqual([
+      ["p1", ["a", "c"]],
+      [null, ["new"]],
+    ])
+  })
+})
+
+describe("closeChatTabs", () => {
+  test("closes the named tabs, and hands back the same array when none are open", () => {
+    const tabs = [tab("a"), tab("b"), tab("c")]
+    expect(ids(closeChatTabs(tabs, ["a", "c"]))).toEqual(["b"])
+    expect(closeChatTabs(tabs, ["x"])).toBe(tabs)
   })
 })
