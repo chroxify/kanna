@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../../shared/general-project"
 import type { SidebarProjectGroup } from "../../shared/types"
 
 /**
@@ -42,7 +43,7 @@ export function getActiveProjectMention(value: string, caretPosition: number): A
 export function projectMentionCandidates(groups: SidebarProjectGroup[], currentPath: string | null): ProjectMentionItem[] {
   const items: ProjectMentionItem[] = []
   for (const group of groups) {
-    if (!group.localPath || group.localPath === currentPath) continue
+    if (!group.localPath || group.localPath === currentPath || isGeneralProjectId(group.groupKey)) continue
     let lastActivityAt = 0
     for (const chat of group.chats) {
       lastActivityAt = Math.max(lastActivityAt, chat.lastMessageAt ?? chat._creationTime)

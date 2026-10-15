@@ -1187,8 +1187,8 @@ function KannaSidebarImpl({
                     <div className="relative">
                       <button
                         type="button"
-                        // On a project's page, a chat in that project.
-                        onClick={routeProjectId ? () => onCreateChat(routeProjectId) : onCompose}
+                        // Asks where it goes: a project, or none at all.
+                        onClick={() => openCommandPalette("new-thread")}
                         // Hover only lifts the text, as the icon buttons' does.
                         // No box, so it never frames the filter button.
                         className="flex w-full items-center gap-2 rounded-lg border border-border/0 px-2 py-1.5 max-md:py-2 text-sm max-md:text-base text-muted-foreground transition-colors hover:text-accent-foreground"

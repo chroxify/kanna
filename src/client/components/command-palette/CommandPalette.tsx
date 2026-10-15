@@ -1,7 +1,9 @@
+import { GENERAL_PROJECT_ID, isGeneralProjectId } from "../../../shared/general-project"
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   Archive,
+  MessageSquareDashed,
   Box,
   Brain,
   Check,
@@ -526,6 +528,19 @@ export function CommandPalette({ state }: { state: KannaState }) {
         run: () => {
           close()
           setFocusMode(!focusModeEnabled)
+        },
+      })
+    }
+
+    if (!isGeneralProjectId(projectId)) {
+      list.push({
+        id: "new-thread-general",
+        title: "New Chat without Project",
+        keywords: ["create chat", "compose", "start", "general", "no project", "projectless", "home", "scratch"],
+        icon: <MessageSquareDashed className={ICON_CLASS} />,
+        run: () => {
+          close()
+          void state.handleCreateChat(GENERAL_PROJECT_ID)
         },
       })
     }
@@ -1769,6 +1784,22 @@ export function CommandPalette({ state }: { state: KannaState }) {
 
           {page === "new-thread" || page === "hide-project" ? (
             <>
+              {/* First, so a plain chat is one Enter away. */}
+              {page === "new-thread" && (!trimmedQuery || scorePaletteItem(trimmedQuery, "No Project", ["general", "home", "none", "projectless", "plain", "normal"]) > 0) ? (
+                <CommandGroup>
+                  <CommandItem
+                    value="project-general"
+                    onSelect={() => {
+                      close()
+                      void state.handleCreateChat(GENERAL_PROJECT_ID)
+                    }}
+                  >
+                    <MessageSquareDashed className={ICON_CLASS} />
+                    <span>No Project</span>
+                    <span className="ml-auto max-w-[220px] shrink-0 truncate pl-3 text-xs text-muted-foreground">~</span>
+                  </CommandItem>
+                </CommandGroup>
+              ) : null}
               {localProjectGroups.map((group) => (
                 <CommandGroup key={group.key} heading={group.title}>
                   {group.projects.map((project) => {
@@ -1790,7 +1821,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
                           // already in the sidebar skips `project.open`.
                           close()
                           const knownProjectId = sidebarData.projectGroups
-                            .find((group) => group.localPath === project.localPath)?.groupKey
+                            .find((group) => group.localPath === project.localPath && !isGeneralProjectId(group.groupKey))?.groupKey
                           void (knownProjectId
                             ? state.handleCreateChat(knownProjectId)
                             : state.handleOpenLocalProject(project.localPath))

@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../../shared/general-project"
 import type { LocalProjectSummary, SidebarProjectGroup } from "../../shared/types"
 import { getPathBasename } from "./formatters"
 
@@ -116,7 +117,11 @@ export function groupProjectsForNewChat({
   pendingSendTimes?: Readonly<Record<string, number>>
   nowMs?: number
 }) {
-  const currentGroup = projectGroups.find((group) => group.groupKey === currentProjectId)
+  // General has its own "No Project" row, and its home-directory path would
+  // collide with a real project opened at ~.
+  const currentGroup = isGeneralProjectId(currentProjectId)
+    ? undefined
+    : projectGroups.find((group) => group.groupKey === currentProjectId)
   let candidates = projects
   // The sidebar can receive a new project before the local project list does.
   if (currentGroup && !projects.some((project) => project.localPath === currentGroup.localPath)) {
@@ -131,6 +136,7 @@ export function groupProjectsForNewChat({
 
   const lastSentByPath = new Map<string, number>()
   for (const group of projectGroups) {
+    if (isGeneralProjectId(group.groupKey)) continue
     for (const chat of [...group.chats, ...(group.archivedChats ?? [])]) {
       // Agent replies, folder edits, and empty chats must not change this order.
       const lastSentAt = Math.max(chat.lastMessageAt ?? 0, pendingSendTimes[chat.chatId] ?? 0)

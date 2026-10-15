@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../../shared/general-project"
 import { recordClientPerformance, startClientPerformance } from "./clientPerformance"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
@@ -706,7 +707,8 @@ export function useKannaState(activeChatId: string | null): KannaState {
   }, [activeProjectId, projectDiffSnapshots])
 
   useEffect(() => {
-    if (!activeProjectId) {
+    // General runs in the home directory, which is no repository to diff.
+    if (!activeProjectId || isGeneralProjectId(activeProjectId)) {
       return
     }
 

@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../shared/general-project"
 import { statSync } from "node:fs"
 import process from "node:process"
 import type {
@@ -392,7 +393,7 @@ export function deriveLocalProjectsSnapshot(
   const projects = new Map<string, LocalProjectsSnapshot["projects"][number]>()
   const hiddenPaths = new Set(
     [...state.projectsById.values()]
-      .filter((project) => project.deletedAt)
+      .filter((project) => project.deletedAt && !isGeneralProjectId(project.id))
       .map((project) => resolveLocalPath(project.localPath))
   )
 
@@ -412,7 +413,8 @@ export function deriveLocalProjectsSnapshot(
     })
   }
 
-  for (const project of [...state.projectsById.values()].filter((entry) => !entry.deletedAt)) {
+  // General is not a folder you open; the palette offers it as "No Project".
+  for (const project of [...state.projectsById.values()].filter((entry) => !entry.deletedAt && !isGeneralProjectId(entry.id))) {
     const chats = [...state.chatsById.values()].filter((chat) => chat.projectId === project.id && !chat.deletedAt && !chat.archivedAt)
     const lastOpenedAt = chats.reduce(
       (latest, chat) => Math.max(latest, getSidebarChatSortTimestamp(chat)),

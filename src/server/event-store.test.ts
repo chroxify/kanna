@@ -2,7 +2,8 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
+import { GENERAL_PROJECT_ID } from "../shared/general-project"
 import type { TranscriptEntry } from "../shared/types"
 import type { SnapshotFile } from "./events"
 import { EventStore } from "./event-store"
@@ -146,6 +147,30 @@ describe("EventStore", () => {
     const snapshot = JSON.parse(await readFile(join(dataDir, "snapshot.json"), "utf8")) as SnapshotFile
     expect(snapshot.messages).toBeUndefined()
     expect(existsSync(join(dataDir, "transcripts", `${chat.id}.jsonl`))).toBe(true)
+  })
+
+  test("a chat with no project creates General at home, apart from a project opened at ~", async () => {
+    const dataDir = await createTempDataDir()
+    const store = new EventStore(dataDir)
+    await store.initialize()
+
+    const chat = await store.createChat(GENERAL_PROJECT_ID)
+    const general = store.getProject(GENERAL_PROJECT_ID)
+    expect(chat.projectId).toBe(GENERAL_PROJECT_ID)
+    expect(general?.localPath).toBe(homedir())
+
+    // Opening the home directory is still its own project.
+    const home = await store.openProject(homedir())
+    expect(home.id).not.toBe(GENERAL_PROJECT_ID)
+
+    // Removed General comes back on the next project-less chat, chats intact.
+    await store.removeProject(GENERAL_PROJECT_ID)
+    await store.createChat(GENERAL_PROJECT_ID)
+    const reloaded = new EventStore(dataDir)
+    await reloaded.initialize()
+    expect(reloaded.getProject(GENERAL_PROJECT_ID)).toBeTruthy()
+    expect(reloaded.listChatsByProject(GENERAL_PROJECT_ID).map((entry) => entry.id)).toContain(chat.id)
+    expect(reloaded.state.projectIdsByPath.get(homedir())).toBe(home.id)
   })
 
   test("getTranscriptPath points at the per-chat transcript file", async () => {

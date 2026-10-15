@@ -4,6 +4,7 @@ import { existsSync, readFileSync as readFileSyncImmediate } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { getDataDir, LOG_PREFIX } from "../shared/branding"
+import { GENERAL_PROJECT_ID, GENERAL_PROJECT_TITLE, isGeneralProjectId } from "../shared/general-project"
 import { toMessagePreview } from "../shared/message-preview"
 import { buildTranscriptOutline, findTranscriptWindowStart } from "../shared/transcript-window"
 import type { TranscriptOutlineEntry } from "../shared/types"
@@ -487,7 +488,9 @@ export class EventStore {
       }
       for (const project of parsed.projects) {
         this.state.projectsById.set(project.id, { ...project })
-        this.state.projectIdsByPath.set(project.localPath, project.id)
+        if (!isGeneralProjectId(project.id)) {
+          this.state.projectIdsByPath.set(project.localPath, project.id)
+        }
       }
       for (const chat of parsed.chats) {
         const { touchedPaths, ...rest } = chat
@@ -724,7 +727,10 @@ export class EventStore {
           updatedAt: event.timestamp,
         }
         this.state.projectsById.set(project.id, project)
-        this.state.projectIdsByPath.set(localPath, project.id)
+        // General is never looked up by path: see general-project.ts.
+        if (!isGeneralProjectId(project.id)) {
+          this.state.projectIdsByPath.set(localPath, project.id)
+        }
         break
       }
       case "project_removed": {
@@ -732,7 +738,10 @@ export class EventStore {
         if (!project) break
         project.deletedAt = event.timestamp
         project.updatedAt = event.timestamp
-        this.state.projectIdsByPath.delete(project.localPath)
+        // Only its own entry: General shares ~ with a project opened there.
+        if (this.state.projectIdsByPath.get(project.localPath) === project.id) {
+          this.state.projectIdsByPath.delete(project.localPath)
+        }
         break
       }
       case "project_sidebar_renamed": {
@@ -1352,6 +1361,25 @@ export class EventStore {
     return this.state.projectsById.get(projectId)!
   }
 
+  /**
+   * The project that holds chats with no project of their own, created (or
+   * brought back after a remove) on first use. Rooted at the home directory.
+   */
+  async ensureGeneralProject() {
+    const existing = this.state.projectsById.get(GENERAL_PROJECT_ID)
+    if (existing && !existing.deletedAt) return existing
+    const event: ProjectEvent = {
+      v: STORE_VERSION,
+      type: "project_opened",
+      timestamp: Date.now(),
+      projectId: GENERAL_PROJECT_ID,
+      localPath: homedir(),
+      title: GENERAL_PROJECT_TITLE,
+    }
+    await this.append(this.projectsLogPath, event)
+    return this.state.projectsById.get(GENERAL_PROJECT_ID)!
+  }
+
   async removeProject(projectId: string) {
     const project = this.getProject(projectId)
     if (!project) {
@@ -1436,6 +1464,7 @@ export class EventStore {
     lineage?: { parentChatId?: string; createdByChatId?: string },
     options?: { delegator?: boolean; chatId?: string },
   ) {
+    if (isGeneralProjectId(projectId)) await this.ensureGeneralProject()
     const project = this.state.projectsById.get(projectId)
     if (!project || project.deletedAt) {
       throw new Error("Project not found")

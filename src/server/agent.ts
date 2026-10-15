@@ -11,6 +11,7 @@ import {
   type SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk"
 import { homedir } from "node:os"
+import { buildGeneralChatNotice, isGeneralProjectId } from "../shared/general-project"
 import type {
   AgentProvider,
   AskUserQuestionItem,
@@ -1813,6 +1814,8 @@ export class AgentCoordinator {
       if (activeChatId === chatId) continue
       const chat = this.store.getChat(activeChatId)
       if (!chat) continue
+      // General chats share the home directory without sharing any work.
+      if (isGeneralProjectId(chat.projectId)) continue
       const project = this.store.getProject(chat.projectId)
       if (!project || project.localPath !== localPath) continue
       chats.push({ title: chat.title, transcriptPath: this.store.getTranscriptPath(activeChatId) })
@@ -2104,11 +2107,18 @@ export class AgentCoordinator {
     if (args.provider !== "codex" && skills.length > 0) {
       wireContent = appendSystemMessageBlock(wireContent, buildSkillSystemMessage(skills))
     }
-    const concurrentAgentsNotice = buildConcurrentAgentsNotice(
+    const isGeneralChat = isGeneralProjectId(project.id)
+    const concurrentAgentsNotice = isGeneralChat ? null : buildConcurrentAgentsNotice(
       this.collectConcurrentProjectChats(args.chatId, project.localPath)
     )
     if (concurrentAgentsNotice) {
       wireContent = appendSystemMessageBlock(wireContent, concurrentAgentsNotice)
+    }
+    // No project: the agent should ask where work goes instead of writing
+    // into the home directory. Every turn, since resumed sessions and
+    // harness switches both need it.
+    if (isGeneralChat) {
+      wireContent = appendSystemMessageBlock(wireContent, buildGeneralChatNotice(project.localPath))
     }
     // Orchestration: who sent this prompt when it was not the user, and which
     // sub-chats of this one are still running. The second matters most after a

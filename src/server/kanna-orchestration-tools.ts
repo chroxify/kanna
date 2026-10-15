@@ -1,3 +1,4 @@
+import { GENERAL_PROJECT_ID } from "../shared/general-project"
 import { z } from "zod"
 import type { AgentProvider } from "../shared/types"
 import type { KannaToolDefinition, KannaToolResult } from "./kanna-tools"
@@ -60,7 +61,7 @@ const createChat = z.strictObject({
   message: z.string().min(1).describe("The chat's first message. It sees nothing else of this conversation, so say everything it needs."),
   title: z.string().optional(),
   subchat: z.boolean().optional().describe("Default true: its result is sent back to this chat when it finishes, and stopping this chat stops it. false makes an independent chat for the user."),
-  projectId: z.string().optional().describe("Defaults to this chat's project."),
+  projectId: z.string().optional().describe(`Defaults to this chat's project. "${GENERAL_PROJECT_ID}" makes a chat with no project, run in the home directory.`),
   ...runOptions,
 })
 

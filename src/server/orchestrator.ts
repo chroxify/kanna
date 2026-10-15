@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../shared/general-project"
 import type {
   AgentProvider,
   ChatSchedule,
@@ -720,7 +721,7 @@ export class ChatOrchestrator {
     // A delegator's chats are always under it. See the note at the top.
     const subchat = caller.delegator ? true : input.subchat ?? true
     const projectId = input.projectId ?? caller.projectId
-    if (!this.store.getProject(projectId)) {
+    if (!isGeneralProjectId(projectId) && !this.store.getProject(projectId)) {
       throw new Error(`Project ${projectId} not found. get_context lists the projects.`)
     }
     this.checkBudget(actorChatId)
@@ -1110,7 +1111,7 @@ export class ChatOrchestrator {
     let target = existing?.target
     if (input.newChat) {
       const projectId = input.projectId ?? caller.projectId
-      if (!this.store.getProject(projectId)) throw new Error(`Project ${projectId} not found. get_context lists the projects.`)
+      if (!isGeneralProjectId(projectId) && !this.store.getProject(projectId)) throw new Error(`Project ${projectId} not found. get_context lists the projects.`)
       target = { kind: "new_chat", projectId }
     } else if (input.chatId || !target) {
       target = { kind: "chat", chatId: this.requireChat(input.chatId ?? actorChatId).id }
@@ -1291,7 +1292,7 @@ export class ChatOrchestrator {
       return { outcome: "sent", chatId: chat.id }
     }
 
-    if (!this.store.getProject(schedule.target.projectId)) return { outcome: "gone" }
+    if (!isGeneralProjectId(schedule.target.projectId) && !this.store.getProject(schedule.target.projectId)) return { outcome: "gone" }
     if (schedule.lastRunChatId && this.isLive(schedule.lastRunChatId)) return { outcome: "skipped" }
     const chatId = (await this.commands.create(schedule.target.projectId)).result.chatId
     await this.commands.rename(chatId, schedule.name)

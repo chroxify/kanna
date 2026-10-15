@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../shared/general-project"
 import { readFile, stat } from "node:fs/promises"
 import path from "node:path"
 import { buildRepoBrowseUrl } from "../shared/git-url"
@@ -286,7 +287,7 @@ export class WorktreeProbe {
 
   async refreshForChat(chatId: string) {
     const chat = this.getState().chatsById.get(chatId)
-    if (!chat) return
+    if (!chat || isGeneralProjectId(chat.projectId)) return
     await this.refreshForProject(chat.projectId)
   }
 
@@ -345,7 +346,7 @@ export class WorktreeProbe {
     const labelled = new Set<string>()
     const dirtyCandidates = new Set<string>()
     for (const chat of state.chatsById.values()) {
-      if (chat.deletedAt) continue
+      if (chat.deletedAt || isGeneralProjectId(chat.projectId)) continue
       const project = state.projectsById.get(chat.projectId)
       if (!project || project.deletedAt) continue
       labelled.add(chat.projectId)

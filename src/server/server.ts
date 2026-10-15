@@ -1,3 +1,4 @@
+import { isGeneralProjectId } from "../shared/general-project"
 import { homedir } from "node:os"
 import { PerformanceLog } from "./performance-log"
 import path from "node:path"
@@ -212,8 +213,10 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   const turnFiles = new TurnFileTracker({
     resolveChatPath: (chatId) => {
       const chat = store.state.chatsById.get(chatId)
-      const project = chat ? store.state.projectsById.get(chat.projectId) : undefined
-      return project?.localPath ?? null
+      // General runs in the home directory: snapshotting it is no use and,
+      // when ~ is a dotfiles repo, expensive.
+      if (!chat || isGeneralProjectId(chat.projectId)) return null
+      return store.state.projectsById.get(chat.projectId)?.localPath ?? null
     },
     recordFiles: (chatId, files) => store.recordFilesTouched(chatId, files),
   })

@@ -1,3 +1,4 @@
+import { GENERAL_PROJECT_ID } from "../../shared/general-project"
 import { useCallback, useLayoutEffect, useRef, type Dispatch, type SetStateAction } from "react"
 import type { NavigateFunction } from "react-router-dom"
 import type { AgentProvider, ChatAttachment, ModelOptions, TranscriptEntry } from "../../shared/types"
@@ -131,8 +132,9 @@ export function useSendMessage(params: {
         setSelectedProjectId(projectId)
       }
 
+      // Nothing to attach it to: a chat with no project, in the home directory.
       if (!activeChatId && !projectId) {
-        throw new Error("Open a project first")
+        projectId = GENERAL_PROJECT_ID
       }
 
       const result = await socket.command<{ chatId?: string }>({
