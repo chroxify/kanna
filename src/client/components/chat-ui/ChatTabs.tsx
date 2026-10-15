@@ -257,7 +257,9 @@ function TabGroup({ projectId, title, iconUrl, collapsed, tabCount, onToggle, on
         className="flex h-full shrink-0 items-center gap-1.5 rounded-[9px] px-2 text-sm font-semibold text-foreground outline-none transition-colors duration-150 hover:bg-muted focus-visible:bg-muted active:scale-[0.97] motion-reduce:transition-none"
       >
         <span className="flex size-4 shrink-0 items-center justify-center">
-          <ProjectIcon name={title} iconUrl={iconUrl} />
+          {isGeneralProjectId(projectId)
+            ? <MessageSquareDashed className="size-4 text-muted-foreground" />
+            : <ProjectIcon name={title} iconUrl={iconUrl} />}
         </span>
         <span className="max-w-[140px] truncate">{title}</span>
       </button>
