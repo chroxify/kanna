@@ -487,7 +487,7 @@ export class EventStore {
       }
       for (const project of parsed.projects) {
         this.state.projectsById.set(project.id, { ...project })
-        this.state.projectIdsByPath.set(project.localPath, project.id)
+        if (!project.deletedAt) this.state.projectIdsByPath.set(project.localPath, project.id)
       }
       for (const chat of parsed.chats) {
         const { touchedPaths, ...rest } = chat
@@ -2513,7 +2513,9 @@ export class EventStore {
     return {
       v: STORE_VERSION,
       generatedAt: Date.now(),
-      projects: this.listProjects().map((project) => ({ ...project })),
+      // Hidden projects too: their chats still point at them, and reopening
+      // the folder brings the same project back with those chats.
+      projects: [...this.state.projectsById.values()].map((project) => ({ ...project })),
       chats: [...this.state.chatsById.values()]
         .filter((chat) => !chat.deletedAt)
         .map((chat) => ({ ...chat })),

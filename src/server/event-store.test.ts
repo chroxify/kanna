@@ -1135,6 +1135,9 @@ describe("EventStore", () => {
     await store.removeProject(project.id)
     expect(store.getProject(project.id)).toBeNull()
     expect(deriveLocalProjectsSnapshot(store.state, discovered, "Machine").projects).toEqual([])
+    // The hidden project has to survive a compaction too, or its chats are
+    // left pointing at a project that no longer exists.
+    await store.compact()
 
     const reloaded = new EventStore(dataDir)
     await reloaded.initialize()
