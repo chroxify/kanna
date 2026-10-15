@@ -23,6 +23,7 @@ import { Button } from "../../ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip"
 import type { SidebarChatRow, SidebarProjectGroup } from "../../../../shared/types"
 import { APP_NAME } from "../../../../shared/branding"
+import { isGeneralProjectId } from "../../../../shared/general-project"
 import { getPathBasename } from "../../../lib/formatters"
 import { getProjectSidebarLabel, type ProjectSidebarLabel } from "../../../lib/project-label"
 import { cn } from "../../../lib/utils"
@@ -228,9 +229,11 @@ const SortableProjectGroup = memo(function SortableProjectGroup({
   newSidebar = false,
 }: SortableProjectGroupProps) {
   const { groupKey, localPath, title } = group
+  // General is no folder: no repo label, no path, none of the project menu.
+  const general = isGeneralProjectId(groupKey)
   // The New Sidebar names a project by its repo, flagging an off-main branch
   // with a glyph; the old sidebar keeps the plain project title.
-  const projectLabel: ProjectSidebarLabel = newSidebar
+  const projectLabel: ProjectSidebarLabel = newSidebar && !general
     ? getProjectSidebarLabel(group)
     : { name: title, text: title }
   // A project whose repo hasn't been probed yet can still have an empty name.
@@ -240,7 +243,7 @@ const SortableProjectGroup = memo(function SortableProjectGroup({
   const isExpanded = newSidebar || expandedGroups.has(groupKey)
   const isEmptyProject = group.chats.length === 0
   const hasMore = group.olderChats.length > 0
-  const hasProjectMenu = Boolean(onHideProject && onCopyPath && onOpenExternalPath)
+  const hasProjectMenu = !general && Boolean(onHideProject && onCopyPath && onOpenExternalPath)
 
   const {
     attributes,
@@ -272,17 +275,24 @@ const SortableProjectGroup = memo(function SortableProjectGroup({
           min-w-0 + the right padding let a long `repo/branch` truncate at the
           hover actions instead of running under them. */}
       <div className="flex min-w-0 flex-1 items-center gap-1.5 pr-14">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <ProjectLabel
-              label={headerLabel}
-              className="whitespace-nowrap text-sm max-md:text-base"
-            />
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={4}>
-            {localPath}
-          </TooltipContent>
-        </Tooltip>
+        {general ? (
+          <ProjectLabel
+            label={headerLabel}
+            className="whitespace-nowrap text-sm max-md:text-base"
+          />
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <ProjectLabel
+                label={headerLabel}
+                className="whitespace-nowrap text-sm max-md:text-base"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={4}>
+              {localPath}
+            </TooltipContent>
+          </Tooltip>
+        )}
         <span className="relative size-3.5 shrink-0 cursor-pointer">
           <ChevronRight className={`translate-y-[1px] size-3.5 shrink-0 text-slate-400 transition-all duration-200 ${!collapsedSections.has(groupKey) && 'rotate-90'}`} />
 
@@ -441,9 +451,15 @@ const LocalProjectsSectionImpl = function LocalProjectsSection({
 
   // In New Sidebar mode the caller passes groups pre-sorted by activity
   // (with sticky positions for just-emptied projects); render as given.
-  const groupIds = useMemo(
-    () => projectGroups.map((g) => g.groupKey),
+  // General is its own section on top, never sorted or dragged among projects.
+  const generalGroup = projectGroups.find((g) => isGeneralProjectId(g.groupKey)) ?? null
+  const sortableGroups = useMemo(
+    () => projectGroups.filter((g) => !isGeneralProjectId(g.groupKey)),
     [projectGroups]
+  )
+  const groupIds = useMemo(
+    () => sortableGroups.map((g) => g.groupKey),
+    [sortableGroups]
   )
 
   const collisionDetection = useMemo<CollisionDetection>(() => (args) => {
@@ -498,8 +514,25 @@ const LocalProjectsSectionImpl = function LocalProjectsSection({
       collisionDetection={collisionDetection}
       onDragEnd={handleDragEnd}
     >
+      {generalGroup ? (
+        <SortableProjectGroup
+          group={generalGroup}
+          isReorderEnabled={false}
+          editorLabel={editorLabel}
+          collapsedSections={collapsedSections}
+          expandedGroups={expandedGroups}
+          onToggleSection={onToggleSection}
+          onToggleExpandedGroup={onToggleExpandedGroup}
+          renderChatRow={renderChatRow}
+          onShowArchivedProject={onShowArchivedProject}
+          onNewLocalChat={onNewLocalChat}
+          isConnected={isConnected}
+          startingLocalPath={startingLocalPath}
+          newSidebar={newSidebar}
+        />
+      ) : null}
       <SortableContext items={groupIds} strategy={verticalListSortingStrategy}>
-        {projectGroups.map((group) => (
+        {sortableGroups.map((group) => (
         <SortableProjectGroup
           key={group.groupKey}
           group={group}

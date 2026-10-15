@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { Loader2, MessageCircle, PencilLine } from "lucide-react"
 import { DelegatorIcon } from "./delegator-icon"
+import { isGeneralProjectId } from "../../../shared/general-project"
 import type { SidebarChatRow } from "../../../shared/types"
 import type { SidebarThread } from "../../lib/thread-sections"
 import { cn } from "../../lib/utils"
@@ -187,7 +188,7 @@ export function ThreadRowContent({
   const dimTitle = dimIdleTitles && !isActive && !hasUncommittedWork && !needsAttention
   return (
     <>
-      {statusDot ?? (showProjectIcon && !showsDraft && !isDelegator
+      {statusDot ?? (showProjectIcon && !showsDraft && !isDelegator && !isGeneralProjectId(thread.projectId)
         ? <ProjectIcon name={thread.projectTitle} iconUrl={thread.projectIconUrl} className={thread.archived ? "opacity-50" : undefined} />
         : HarnessIcon
           ? <HarnessIcon className={iconClass} />

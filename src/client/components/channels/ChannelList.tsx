@@ -1,5 +1,6 @@
 import { Fragment, memo, useCallback, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react"
-import { ChevronDown, SquarePen } from "lucide-react"
+import { ChevronDown, MessageSquareDashed, SquarePen } from "lucide-react"
+import { isGeneralProjectId } from "../../../shared/general-project"
 import type { SidebarProjectGroup } from "../../../shared/types"
 import { computeChannelSections, getChannelPeekGroups, type ChannelPeekGroup } from "../../lib/channel-sections"
 import { getThreadDetailLabel } from "../../lib/thread-detail-label"
@@ -237,22 +238,10 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
     ?? group.chats.find((chat) => chat.status === "waiting_on_subagent" && !isSubChat(chat))
     ?? group.chats.find(isUnreadForUser)
   const statusMark = leadChat ? renderChatStatusDot(leadChat) : null
+  // General is no folder: no project icon, and none of the project menu.
+  const general = isGeneralProjectId(group.groupKey)
 
-  return (
-    // The Projects view's own project menu (`ProjectSectionMenu`), plus Pin.
-    <ProjectSectionMenu
-      editorLabel={actions.editorLabel}
-      repoUrl={group.repoUrl}
-      pinned={pinned}
-      onTogglePin={() => actions.onSetProjectPinned(group.groupKey, !pinned)}
-      onNewChat={() => actions.onCreateChat(group.groupKey)}
-      onRename={() => actions.onRenameProject(group.groupKey, group.sidebarTitle, group.realTitle || getPathBasename(group.localPath))}
-      onCopyPath={() => actions.onCopyPath(group.localPath)}
-      onShowArchived={() => actions.onShowArchivedProject(group.groupKey)}
-      onOpenInFinder={() => actions.onOpenExternalPath("open_finder", group.localPath)}
-      onOpenInEditor={() => actions.onOpenExternalPath("open_editor", group.localPath)}
-      onHide={() => actions.onHideProject(group.groupKey)}
-    >
+  const button = (
         <button
           type="button"
           {...{ [CHANNEL_ROW_ATTRIBUTE]: group.groupKey }}
@@ -279,7 +268,9 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
             )}
           >
             <span className="flex size-4 shrink-0 items-center justify-center">
-              {statusMark ?? <ProjectIcon name={group.title} iconUrl={group.iconUrl} />}
+              {statusMark ?? (general
+                ? <MessageSquareDashed className="size-4" />
+                : <ProjectIcon name={group.title} iconUrl={group.iconUrl} />)}
             </span>
             <span className="min-w-0 flex-1 truncate">{group.title}</span>
             {/* Neutral: the mark on the left carries the colour. A tint of the
@@ -292,9 +283,30 @@ const ChannelRow = memo(function ChannelRow({ group, active, menuPinned, pinned,
             ) : null}
           </span>
         </button>
+  )
+  if (general) return button
+
+  return (
+    // The Projects view's own project menu (`ProjectSectionMenu`), plus Pin.
+    <ProjectSectionMenu
+      editorLabel={actions.editorLabel}
+      repoUrl={group.repoUrl}
+      pinned={pinned}
+      onTogglePin={() => actions.onSetProjectPinned(group.groupKey, !pinned)}
+      onNewChat={() => actions.onCreateChat(group.groupKey)}
+      onRename={() => actions.onRenameProject(group.groupKey, group.sidebarTitle, group.realTitle || getPathBasename(group.localPath))}
+      onCopyPath={() => actions.onCopyPath(group.localPath)}
+      onShowArchived={() => actions.onShowArchivedProject(group.groupKey)}
+      onOpenInFinder={() => actions.onOpenExternalPath("open_finder", group.localPath)}
+      onOpenInEditor={() => actions.onOpenExternalPath("open_editor", group.localPath)}
+      onHide={() => actions.onHideProject(group.groupKey)}
+    >
+      {button}
     </ProjectSectionMenu>
   )
 })
+
+const GENERAL_SECTION_KEY = "general"
 
 /**
  * The sidebar's Channels view: every project, and nothing under it (a
@@ -354,10 +366,14 @@ export function ChannelList({
   // Browser-local inputs to the sections; see `ThreadSections`.
   const draftStartTimes = useDraftStartTimes()
   const pendingSends = usePendingSendTimes()
-  const sections = useMemo(
-    () => computeChannelSections(projectGroups, nowMs, draftStartTimes, pendingSends),
-    [draftStartTimes, nowMs, pendingSends, projectGroups]
-  )
+  // General is its own section, above the projects, never sorted among them.
+  const generalGroup = projectGroups.find((group) => isGeneralProjectId(group.groupKey)) ?? null
+  const sections = useMemo(() => {
+    const computed = computeChannelSections(projectGroups.filter((group) => !isGeneralProjectId(group.groupKey)), nowMs, draftStartTimes, pendingSends)
+    return generalGroup
+      ? [{ key: GENERAL_SECTION_KEY, label: "", collapsible: false, defaultExpanded: true, groups: [generalGroup] }, ...computed]
+      : computed
+  }, [draftStartTimes, generalGroup, nowMs, pendingSends, projectGroups])
   // In a store, so the sections are as you left them when you come back from
   // a channel (which unmounts this list).
   const [expandOverrides, setSectionExpanded] = useSectionOverrides("channels")
@@ -368,11 +384,14 @@ export function ChannelList({
         const isExpanded = !section.collapsible || (expandOverrides[section.key] ?? section.defaultExpanded)
         return (
           <div key={section.key}>
-            <SectionHeader
-              label={section.label}
-              isExpanded={isExpanded}
-              onToggle={section.collapsible ? () => setSectionExpanded(section.key, !isExpanded) : undefined}
-            />
+            {/* General needs no header: its one row says what it is. */}
+            {section.key === GENERAL_SECTION_KEY ? null : (
+              <SectionHeader
+                label={section.label}
+                isExpanded={isExpanded}
+                onToggle={section.collapsible ? () => setSectionExpanded(section.key, !isExpanded) : undefined}
+              />
+            )}
             {isExpanded ? (
               // No gap: the rows carry the Chats view's 2px spacing inside
               // themselves (see `ChannelRow`).

@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, type ReactNode, type Ref
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent, type Modifier } from "@dnd-kit/core"
 import { SortableContext, arrayMove, horizontalListSortingStrategy, useSortable } from "@dnd-kit/sortable"
 import { CSS as DndCSS } from "@dnd-kit/utilities"
-import { PencilLine, X } from "lucide-react"
+import { MessageSquareDashed, PencilLine, X } from "lucide-react"
 import { DelegatorIcon } from "./delegator-icon"
 import { getAdjacentChatTab, getChatTabAfterClose, type ChatTab } from "../../lib/chat-tabs"
 import { isMacApp } from "../../lib/macApp"
@@ -14,6 +14,7 @@ import { useSidebarData, useSidebarReady } from "../../stores/sidebarStore"
 import { openContextMenuFromButton } from "../open-external-menu"
 import { ContextMenuItem } from "../ui/context-menu"
 import { ProjectIcon } from "../ui/project-icon"
+import { isGeneralProjectId } from "../../../shared/general-project"
 import { EditableTitle } from "./ChatNavbarTitle"
 import { ThreadRowMenu, type ThreadRowMenuActions } from "./sidebar/ThreadRow"
 import { renderChatStatusDot } from "./ThreadRowContent"
@@ -76,7 +77,9 @@ const Tab = memo(function Tab({ tab, thread, active, isNew, editorLabel, actions
         // A delegator's own mark, as on its sidebar row, where the navbar's
         // "Delegator" tag is when tabs are off.
         : thread?.row.delegator ? <DelegatorIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-        : thread ? <ProjectIcon name={thread.projectTitle} iconUrl={thread.projectIconUrl} /> : null)}
+        : thread ? (isGeneralProjectId(thread.projectId)
+          ? <MessageSquareDashed className="h-4 w-4 shrink-0 text-muted-foreground" />
+          : <ProjectIcon name={thread.projectTitle} iconUrl={thread.projectIconUrl} />) : null)}
     </span>
   )
 

@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import { GitBranch } from "lucide-react"
+import { GitBranch, MessageSquareDashed } from "lucide-react"
 import { DelegatorIcon } from "./delegator-icon"
 import { getRepoUrlLabel } from "../../../shared/git-url"
 import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
@@ -8,6 +8,7 @@ import { flattenSidebarThreads } from "../../lib/thread-sections"
 import { useSidebarStore } from "../../stores/sidebarStore"
 import { openContextMenuFromButton } from "../open-external-menu"
 import { ProjectIcon } from "../ui/project-icon"
+import { isGeneralProjectId } from "../../../shared/general-project"
 import { ThreadRowMenu, type ThreadRowMenuActions } from "./sidebar/ThreadRow"
 
 /** A clickable part of the title: only its text colour answers the pointer. */
@@ -181,7 +182,9 @@ export const ChatNavbarTitle = memo(function ChatNavbarTitle({
             onClick={openContextMenuFromButton}
             className="relative flex shrink-0 rounded-[4px] outline-none transition-transform duration-150 ease-snappy before:absolute before:-inset-1 before:rounded-md before:bg-foreground/10 before:opacity-0 before:transition-opacity before:duration-150 hover:before:opacity-100 focus-visible:before:opacity-100 active:scale-[0.94] motion-reduce:transition-none"
           >
-            <ProjectIcon name={group.title} iconUrl={group.iconUrl} className="relative" />
+            {isGeneralProjectId(group.groupKey)
+              ? <MessageSquareDashed className="relative size-4 text-muted-foreground" />
+              : <ProjectIcon name={group.title} iconUrl={group.iconUrl} className="relative" />}
           </button>
         ) : null}
         <EditableTitle title={title} onRename={onRename} />
