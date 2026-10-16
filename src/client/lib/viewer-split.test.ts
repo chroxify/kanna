@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { resolveViewerSplitMove, viewerCardEnters, viewerPaneState, type ViewerPaneState } from "./viewer-split"
+import { dockedViewerPaneWidthPx, resolveViewerSplitMove, viewerCardEnters, viewerPaneState, type ViewerPaneState } from "./viewer-split"
 
 const SAME = { samePane: true, reducedMotion: false }
 const OTHER = { samePane: false, reducedMotion: false }
@@ -75,5 +75,24 @@ describe("the viewer card's entrance", () => {
         expect(viewerCardEnters(previous, next)).toBe(false)
       }
     }
+  })
+})
+
+describe("a docked viewer's width", () => {
+  const at = (splitWidthPx: number, draggedWidthPx: number | null, widthClass: "review" | "chat" | "preview" = "preview") =>
+    dockedViewerPaneWidthPx({ splitWidthPx, chatMinPx: splitWidthPx * 0.2, draggedWidthPx, widthClass })
+
+  test("is the dragged width whatever is open, else the width for what is open", () => {
+    expect(at(2000, 640, "review")).toBe(640)
+    expect(at(2000, 640, "chat")).toBe(640)
+    expect(at(2000, null, "preview")).toBe(800)
+    expect(at(1200, null, "chat")).toBe(600)
+    expect(at(2000, null, "review")).toBe(1600)
+  })
+
+  test("narrows on a window too narrow for it, and is the dragged width again on a wider one", () => {
+    const dragged = 900
+    expect(at(1000, dragged)).toBe(800)
+    expect(at(2000, dragged)).toBe(900)
   })
 })

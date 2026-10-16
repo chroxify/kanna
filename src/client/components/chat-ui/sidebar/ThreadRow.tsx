@@ -36,6 +36,8 @@ interface ThreadRowProps {
   dimIdleTitles?: boolean
   /** See `ThreadRowContent`. */
   showProjectIcon?: boolean
+  /** See `ThreadRowContent`. */
+  delegatorMark?: boolean
   onSelect: (chatId: string) => void
   onCreateChat: (projectId: string) => void
   onRenameChat: (chat: SidebarThread["row"]) => void
@@ -52,7 +54,7 @@ interface ThreadRowProps {
 type ThreadRowBodyProps = Pick<
   ThreadRowProps,
   | "thread" | "isActive" | "archived" | "detailScope" | "nowMs" | "detailLabelOverride"
-  | "dimIdleTitles" | "showProjectIcon" | "onSelect" | "onForkChat" | "onArchiveChat" | "onRestoreChat"
+  | "dimIdleTitles" | "showProjectIcon" | "delegatorMark" | "onSelect" | "onForkChat" | "onArchiveChat" | "onRestoreChat"
 > & Omit<HTMLAttributes<HTMLDivElement>, "onSelect"> & { ref?: Ref<HTMLDivElement> }
 
 /**
@@ -60,8 +62,8 @@ type ThreadRowBodyProps = Pick<
  * glyph / harness icon, title, and hover-revealed Fork/Archive.
  *
  * Apart from `ThreadRow` for a surface that draws the row as part of
- * something larger and puts the menu on the whole of it (a node in the graph
- * view, where the row heads a card). Two menus, one inside the other, would
+ * something larger and puts the menu on the whole of it (a chat's card in a
+ * transcript, where the row heads the card). Two menus, one inside the other, would
  * both open on a right-click.
  *
  * Whatever else it is given goes on its element, which is how the menu's
@@ -76,6 +78,7 @@ export function ThreadRowBody({
   detailLabelOverride,
   dimIdleTitles = true,
   showProjectIcon = false,
+  delegatorMark,
   onSelect,
   onForkChat,
   onArchiveChat,
@@ -164,6 +167,7 @@ export function ThreadRowBody({
         dimIdleTitles={dimIdleTitles}
         hasDraft={hasDraft}
         showProjectIcon={showProjectIcon}
+        delegatorMark={delegatorMark}
         detailLabel={detailLabel}
         hoverActions={hoverActions}
       />
@@ -198,6 +202,7 @@ function ThreadRowImpl({
   detailLabelOverride,
   dimIdleTitles = true,
   showProjectIcon = false,
+  delegatorMark,
   onSelect,
   onCreateChat,
   onRenameChat,
@@ -235,6 +240,7 @@ function ThreadRowImpl({
         detailLabelOverride={detailLabelOverride}
         dimIdleTitles={dimIdleTitles}
         showProjectIcon={showProjectIcon}
+        delegatorMark={delegatorMark}
         onSelect={onSelect}
         onForkChat={onForkChat}
         onArchiveChat={onArchiveChat}

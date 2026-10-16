@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { stripSystemMessages } from "./message-preview"
-import { isInterimReportStatus, splitReportSections } from "./report-sections"
+import { isInterimReportStatus, reportOutcome, splitReportSections } from "./report-sections"
 
 const header = (status: string, title: string, id: string) =>
   `<system-message>\nSub-chat ${status}: [${title}](/chat/${id}) (chat id ${id})\n</system-message>`
@@ -77,6 +77,16 @@ describe("splitReportSections", () => {
   test("only a report written while work was still going is interim", () => {
     for (const status of ["running", "waiting_on_subagent", "waiting_on_subchats"]) expect(isInterimReportStatus(status)).toBe(true)
     for (const status of ["completed", "failed", "cancelled", "idle", "needs_input", "adopted", null]) expect(isInterimReportStatus(status)).toBe(false)
+  })
+
+  test("a report's line says what happened, by the header's status word", () => {
+    expect(reportOutcome("completed")).toBe("replied")
+    expect(reportOutcome("idle")).toBe("replied")
+    expect(reportOutcome(null)).toBe("replied")
+    expect(reportOutcome("failed")).toBe("failed")
+    expect(reportOutcome("needs_input")).toBe("needs input")
+    expect(reportOutcome("cancelled")).toBe("was stopped")
+    for (const status of ["running", "waiting_on_subagent", "waiting_on_subchats"]) expect(reportOutcome(status)).toBe("replied · still working")
   })
 
   test("a header's extra lines stay in the header: a schedule the sub-chat set itself", () => {

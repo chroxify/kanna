@@ -208,4 +208,17 @@ describe("getSettingsPaletteEntries", () => {
     const results = searchSettingsEntries(entries, "dark mode")
     expect(results.map((entry) => entry.id)).toContain("settings-row-theme")
   })
+
+  test("a setting is found by a word it's known by, within the root's few rows", () => {
+    const entries = getSettingsPaletteEntries()
+    expect(searchSettingsEntries(entries, "tabs", 5).map((entry) => entry.id)).toContain("settings-row-chatTabs")
+    expect(searchSettingsEntries(entries, "peek", 5)[0]?.id).toBe("settings-row-widgetsPeek")
+  })
+
+  test("This Mac's rows exist only in Kanna for Mac", () => {
+    // No Mac app bridge under test: the section and its rows are left out.
+    const ids = getSettingsPaletteEntries().map((entry) => entry.id)
+    expect(ids).not.toContain("settings-row-keepAwake")
+    expect(ids).not.toContain("settings-section-mac")
+  })
 })

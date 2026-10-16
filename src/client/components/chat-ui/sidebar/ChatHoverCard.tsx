@@ -219,8 +219,8 @@ function useChatTouchedFiles(
     // reused as the pointer runs down the list, and one row's list under
     // another row's title is worse than no list at all. Kept when it is the
     // same chat with newer work in it: the list it had stands until the new
-    // one lands, so a card that stays up on one chat (a node in the graph
-    // view) does not empty and refill each time its chat moves.
+    // one lands, so a card that stays up on one chat does not empty and
+    // refill each time its chat moves.
     if (heldForChatIdRef.current !== row.chatId) setResult(null)
     heldForChatIdRef.current = row.chatId
     let cancelled = false

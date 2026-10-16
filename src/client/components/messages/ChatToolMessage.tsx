@@ -4,6 +4,7 @@ import { toMessagePreview } from "../../../shared/message-preview"
 import { isWorkingStatus } from "../../../shared/types"
 import { CHAT_TOOL_NAMES } from "../../../shared/tools"
 import { getThreadDetailLabel } from "../../lib/thread-detail-label"
+import { handoffTicketOf } from "../../lib/tickets"
 import type { SidebarThread } from "../../lib/thread-sections"
 import { cn, normalizeChatId } from "../../lib/utils"
 import { useChatReferenceActions, useSidebarThread } from "../chat-ui/chat-reference"
@@ -12,6 +13,9 @@ import { SidebarChatHoverCard } from "../chat-ui/sidebar/ChatHoverCard"
 import { ThreadRowMenu } from "../chat-ui/sidebar/ThreadRow"
 import { ThreadRowContent } from "../chat-ui/ThreadRowContent"
 import { useNow } from "../chat-ui/widgets/TasksWidget"
+import { TicketAlsoSentLine, TicketHandoffCard } from "../tickets/TicketHandoff"
+import { useTicketTranscript } from "../tickets/ticket-transcript"
+import { useTicketSummary } from "../../stores/ticketBoardStore"
 import { resultRecord, text, TOOL_CARD_CAPTION_CLASS, TOOL_CARD_MARK_SLOT_CLASS, toolCardClasses, toolCardErrorText, useToolCardPayload } from "./tool-card"
 import type { ProcessedToolCall } from "./types"
 
@@ -71,9 +75,31 @@ export function inlineChatToolTarget(message: ChatToolCall): string | null {
 export function ChatToolMessage({ message }: { message: ChatToolCall }) {
   const { input, rawResult, result } = useToolCardPayload(message)
   const chatId = chatToolTarget(message, input, result)
+  // A delegator's hand-off names its ticket, and draws as it (TicketHandoff).
+  // Read from the payload as fetched, so a call kept in the sidecar finds it too.
+  const ticketRef = handoffTicketOf({ ...message, input: { payload: input }, rawResult })
+  const transcript = useTicketTranscript()
+  const ticket = useTicketSummary(transcript.chatId, ticketRef?.ticketId)
 
   if (message.isError) {
     return <p role="alert" className="text-sm text-destructive">{toolCardErrorText(rawResult, "The chat could not be reached.")}</p>
+  }
+
+  if (ticketRef && transcript.chatId) {
+    if (transcript.repeats.has(message.id)) {
+      return (
+        <TicketAlsoSentLine
+          delegatorChatId={transcript.chatId}
+          ticketId={ticketRef.ticketId}
+          number={ticket?.number ?? ticketRef.number}
+          chatId={chatId}
+          fallbackTitle={text(result?.title) ?? text(input.title) ?? "a chat"}
+          reopened={ticketRef.reopened === true}
+        />
+      )
+    }
+    // Until the board has it (a snapshot behind the call) the chat's card stands in.
+    if (ticket) return <TicketHandoffCard ticket={ticket} chatId={chatId} verb={message.toolName === "fork_chat" ? "Forked to" : "Sent to"} reopened={ticketRef.reopened === true} />
   }
 
   const sent = text(input.message)
@@ -100,11 +126,10 @@ export function inlineChatToolExcerpt(message: ChatToolCall): string | null {
  * A chat's row as the quote over a message: the link between two
  * chats, drawn one way from both ends.
  *
- * A parent sends a sub-chat its task, and the sub-chat's report comes back.
- * Each of those messages quotes the chat at the other end with the same row,
- * so a reader who has met the link in one chat knows it in the other. In the
- * sub-chat it is also the way back to the parent, which no list of chats
- * offers (ParentChatLink).
+ * A parent sends a sub-chat its task, and the sub-chat's message quotes the
+ * parent with this row. It is also the way back to the parent, which no list
+ * of chats offers (ParentChatLink). The report that comes back is not quoted
+ * in the parent: it is a line of its own (`ReportMarker`).
  *
  * The row has no label of its own. Where it sits, over a message and joined
  * to it, is what says the message is tied to that chat, and a line of words
@@ -257,6 +282,11 @@ export function ChatCard({ chatId, title, caption, pending = false, quote = fals
               // A card is one chat someone pointed at, not a list to scan, so
               // its title never recedes.
               dimIdleTitles={false}
+              // A card or a quote is about which chat a message went to or
+              // came from. What kind of chat that is belongs to its row in a
+              // list; here it put a compass on every reply a delegator's
+              // sub-chat quoted.
+              delegatorMark={false}
               detailLabel={getThreadDetailLabel(thread, "project-scoped", now)}
             />
           </div>

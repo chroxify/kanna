@@ -12,6 +12,9 @@ import { getEditorPresetLabel, useTerminalPreferencesStore } from "../stores/ter
 import { useEffectiveEditorPreset } from "../components/open-external-menu"
 import { useChatInputStore } from "../stores/chatInputStore"
 import { generateUUID } from "../lib/utils"
+import { resolveProjectNewChat } from "../lib/new-chat-resume"
+import { flattenSidebarThreads } from "../lib/thread-sections"
+import { useDelegateStore } from "../stores/delegateStore"
 import {
   findSidebarChat,
   getSidebarProjectGroups,
@@ -35,6 +38,7 @@ import {
   getMostRecentlyActiveProjectId,
   getNewestRemainingChatId,
   getPreviousPrompt,
+  getProjectIdForChat,
   NEW_CHAT_OPTIMISTIC_SCOPE,
   reconcileOptimisticUserPrompts,
   resolveComposeIntent,
@@ -227,6 +231,13 @@ export interface KannaState {
    */
   activeChatStarted: boolean
   handleCreateChat: (projectId: string) => Promise<void>
+  /**
+   * A click on a project, as against on something that says New Chat: its
+   * delegator if it has one, and otherwise its new chat page, which is the
+   * one already being written if there is one (`resolveProjectNewChat`), and
+   * a fresh chat if not.
+   */
+  handleOpenProjectNewChat: (projectId: string) => void
   handleForkChat: (chat: SidebarChatRow) => Promise<void>
   handleOpenLocalProject: (localPath: string) => Promise<void>
   handleCreateProject: (project: ProjectRequest) => Promise<void>
@@ -888,12 +899,27 @@ export function useKannaState(activeChatId: string | null): KannaState {
   // (`chat.create` takes it), and `startedChat` is what the page is drawn from
   // until the chat's snapshot arrives. Nothing else is assumed: the sidebar
   // row comes with the server's push, as it always did.
-  const createChatForProject = useCallback((projectId: string) => {
+  //
+  // `carryDraftFrom` names a new chat that is gone and left a draft behind
+  // (`resolveProjectNewChat`). The draft, and the model it was being written
+  // for, come over to this chat before its page is up, so the composer mounts
+  // holding them. With `background` the chat is made for the draft alone and
+  // not gone to: a click on a project with a delegator opens the delegator.
+  const createChatForProject = useCallback((projectId: string, options?: { carryDraftFrom?: string; background?: boolean }) => {
     const chatPreferences = useChatPreferencesStore.getState()
-    const sourceComposerState = activeChatId
-      ? chatPreferences.getComposerState(activeChatId)
-      : chatPreferences.getComposerState(NEW_CHAT_COMPOSER_ID)
+    const chatInput = useChatInputStore.getState()
+    const carriedFrom = options?.carryDraftFrom
+    const sourceComposerState = carriedFrom && chatPreferences.chatStates[carriedFrom]
+      ? chatPreferences.getComposerState(carriedFrom)
+      : activeChatId
+        ? chatPreferences.getComposerState(activeChatId)
+        : chatPreferences.getComposerState(NEW_CHAT_COMPOSER_ID)
     const chatId = generateUUID()
+    if (carriedFrom) {
+      chatInput.moveDraft(carriedFrom, chatId)
+      chatInput.forgetStartedChat(carriedFrom)
+    }
+    chatInput.rememberStartedChat(chatId, projectId)
     const cameFrom = `${window.location.pathname}${window.location.search}`
     const sentAt = performance.now()
     // Sent before the navigation, so it is on the wire ahead of everything the
@@ -904,7 +930,11 @@ export function useKannaState(activeChatId: string | null): KannaState {
     const created = socket.command<{ chatId: string }>({ type: "chat.create", projectId, chatId }).then((result) => {
       recordClientPerformance("chat_create_ack_ms", performance.now() - sentAt)
       if (result.chatId === chatId) return
-      // A server from before it took an id made its own. Follow it there.
+      // A server from before it took an id made its own. Follow it there,
+      // with whatever has been typed by now.
+      chatInput.moveDraft(chatId, result.chatId)
+      chatInput.forgetStartedChat(chatId)
+      chatInput.rememberStartedChat(result.chatId, projectId)
       chatPreferences.initializeComposerForChat(result.chatId, { sourceState: sourceComposerState })
       setStartedChat((current) => (current?.chatId === chatId ? { chatId: result.chatId, projectId } : current))
       setPendingChatId((current) => (current === chatId ? result.chatId : current))
@@ -912,11 +942,13 @@ export function useKannaState(activeChatId: string | null): KannaState {
     })
     startingChatIdsRef.current.add(chatId)
     chatPreferences.initializeComposerForChat(chatId, { sourceState: sourceComposerState })
-    setSelectedProjectId(projectId)
-    setPendingChatId(chatId)
-    setStartedChat({ chatId, projectId })
-    navigate(`/chat/${chatId}`)
-    setCommandError(null)
+    if (!options?.background) {
+      setSelectedProjectId(projectId)
+      setPendingChatId(chatId)
+      setStartedChat({ chatId, projectId })
+      navigate(`/chat/${chatId}`)
+      setCommandError(null)
+    }
     created.then(() => {
       startingChatIdsRef.current.delete(chatId)
     }, (error) => {
@@ -988,6 +1020,56 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const handleCreateChat = useCallback(async (projectId: string) => {
     await startChatFromIntent({ kind: "project_id", projectId })
   }, [startChatFromIntent])
+
+  // A click on a project opens its delegator if it has one. Otherwise,
+  // clicking away from a new chat and clicking its project again comes back
+  // to what was being written. Nothing is made when the chat is still there,
+  // and the page is drawn from what the sidebar already says of it. See
+  // `resolveProjectNewChat` for which chat, and for what makes one instead.
+  const handleOpenProjectNewChat = useCallback((projectId: string) => {
+    const sidebar = useSidebarStore.getState()
+    const chatInput = useChatInputStore.getState()
+    const group = sidebar.data.projectGroups.find((item) => item.groupKey === projectId)
+    const decision = resolveProjectNewChat({
+      entry: "project",
+      projectId,
+      projectThreads: group ? flattenSidebarThreads({ projectGroups: [group] }) : [],
+      delegatorViewedAt: useDelegateStore.getState().viewedAt,
+      isListed: sidebar.ready
+        ? (chatId) => getProjectIdForChat(sidebar.data.projectGroups, chatId) !== null
+        : null,
+      drafts: {
+        text: chatInput.drafts,
+        attachments: chatInput.attachmentDrafts,
+        touchedAt: chatInput.draftTouchedAt,
+        startedAt: chatInput.draftStartedAt,
+      },
+      startedChats: chatInput.startedChats,
+      startingChatIds: startingChatIdsRef.current,
+    })
+    if (decision.kind === "delegator") {
+      // An ordinary chat open: the tab bar picks up the chat as for any
+      // other, and the page opens where the delegator was left.
+      if (decision.restoreDraftFrom) createChatForProject(projectId, { carryDraftFrom: decision.restoreDraftFrom, background: true })
+      navigate(`/chat/${decision.chatId}`)
+      setCommandError(null)
+      return
+    }
+    if (decision.kind !== "open") {
+      createChatForProject(projectId, decision.kind === "carry" ? { carryDraftFrom: decision.fromChatId } : undefined)
+      return
+    }
+    // One whose `chat.create` has not been answered is not in the sidebar
+    // yet, so its page is still drawn from `startedChat`, which a chat
+    // started since may have taken over.
+    if (startingChatIdsRef.current.has(decision.chatId)) {
+      setPendingChatId(decision.chatId)
+      setStartedChat({ chatId: decision.chatId, projectId })
+    }
+    setSelectedProjectId(projectId)
+    navigate(`/chat/${decision.chatId}`)
+    setCommandError(null)
+  }, [createChatForProject, navigate])
 
   const handleForkChat = useCallback(async (chat: SidebarChatRow) => {
     try {
@@ -1063,6 +1145,9 @@ export function useKannaState(activeChatId: string | null): KannaState {
     if (!confirmed) return
     try {
       await socket.command({ type: "chat.delete", chatId: chat.chatId })
+      // Put away on purpose: a draft left in it is not to come back when its
+      // project is next clicked (`resolveProjectNewChat`).
+      useChatInputStore.getState().forgetStartedChat(chat.chatId)
       if (chat.chatId === activeChatId) {
         const nextChatId = getNewestRemainingChatId(getSidebarProjectGroups(), chat.chatId)
         navigate(nextChatId ? `/chat/${nextChatId}` : "/")
@@ -1084,6 +1169,8 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const handleArchiveChat = useCallback(async (chat: SidebarChatRow) => {
     try {
       await socket.command({ type: "chat.archive", chatId: chat.chatId })
+      // As for a delete: archiving a chat with no messages is one.
+      useChatInputStore.getState().forgetStartedChat(chat.chatId)
       if (chat.chatId === activeChatId) {
         const nextChatId = getNewestRemainingChatId(getSidebarProjectGroups(), chat.chatId)
         navigate(nextChatId ? `/chat/${nextChatId}` : "/")
@@ -1288,6 +1375,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     expandSidebar,
     activeChatStarted,
     handleCreateChat,
+    handleOpenProjectNewChat,
     handleForkChat,
     handleOpenLocalProject,
     handleCreateProject,

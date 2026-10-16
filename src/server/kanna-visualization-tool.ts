@@ -13,6 +13,9 @@ const schema = z.strictObject({
   html: z.string().min(1).max(VISUALIZATION_MAX_BYTES).optional().describe("Self-contained HTML fragment, including inline CSS and JavaScript. Supply html or path, not both."),
   path: z.string().min(1).optional().describe("HTML file, absolute or relative to the project. Copied into this chat; source edits will not change the saved visualization."),
   height: z.number().int().min(80).max(VISUALIZATION_MAX_HEIGHT).optional().describe("Initial height in CSS pixels, default 360. The frame then fits the content automatically."),
+  ticketId: z.string().optional().describe("Delegator chats only: also post it on this ticket, as a reply. Other chats cannot post on tickets."),
+  text: z.string().optional().describe("With ticketId: the reply's words (markdown), posted with the visualization as one reply, as reply_to_ticket's text."),
+  asksUser: z.boolean().optional().describe("With ticketId: as on reply_to_ticket, true only when the reply's question blocks the work or its Done."),
 })
 
 /**
@@ -38,6 +41,14 @@ export const SHOW_VISUALIZATION_TOOL: KannaToolDefinition = {
     const args = schema.parse(input)
     if (Boolean(args.html) === Boolean(args.path)) throw new Error("Provide exactly one of html or path.")
     if (!context.dataDir) throw new Error("Chat media storage is unavailable.")
+    if (!args.ticketId && (args.text !== undefined || args.asksUser !== undefined)) {
+      throw new Error("text and asksUser go with ticketId: they are the ticket reply's. Without a ticket, say it in your message.")
+    }
+    // Before anything is written, so a wrong ticket leaves no file behind.
+    if (args.ticketId) {
+      if (!context.orchestration) throw new Error("Tickets are not available in this session.")
+      context.orchestration.checkTicket(context.chatId, args.ticketId)
+    }
     context.signal.throwIfAborted()
     let html = args.html
     if (args.path) {
@@ -66,8 +77,14 @@ export const SHOW_VISUALIZATION_TOOL: KannaToolDefinition = {
       throw error
     }
     const artifact: VisualizationArtifact = { type: "visualization", version: 1, title: args.title, height, url: buildTranscriptMediaUrl(context.chatId, name) }
+    // The ticket's reply points at the same file. The HTML is never copied
+    // into the board. Its words go in the same reply: a mock posted alone and
+    // then explained in a second reply read as two messages.
+    const posted = args.ticketId
+      ? await context.orchestration!.replyToTicket(context.chatId, { ticketId: args.ticketId, text: args.text ?? "", asksUser: args.asksUser, artifacts: [artifact] })
+      : null
     return {
-      content: [{ type: "text", text: "Visualization displayed inline in Kanna. Do not repeat it as an image, file attachment, or visualization marker." }],
+      content: [{ type: "text", text: `Visualization displayed inline in Kanna${args.ticketId ? ` and posted on ticket ${args.ticketId}` : ""}. Do not repeat it as an image, file attachment, or visualization marker.${posted?.note ? ` ${posted.note}` : ""}` }],
       structuredContent: { displayed: true, visualization: artifact },
       transcriptContent: [artifact],
     }

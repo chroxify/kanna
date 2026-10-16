@@ -44,7 +44,12 @@ export type RenderChatHoverCard = (
  * the pencil for an unsent draft included. Its own component for that: the
  * draft is this browser's, read through a hook, one chat at a time.
  */
-function PeekChatContent({ thread, nowMs }: { thread: SidebarThread; nowMs: number }) {
+function PeekChatContent({ thread, nowMs, delegatorMark }: {
+  thread: SidebarThread
+  nowMs: number
+  /** See `ThreadRowContent`. */
+  delegatorMark: boolean
+}) {
   const hasDraft = useChatHasDraft(thread.chatId)
   return (
     <ThreadRowContent
@@ -52,6 +57,7 @@ function PeekChatContent({ thread, nowMs }: { thread: SidebarThread; nowMs: numb
       showStatus
       dimIdleTitles={false}
       hasDraft={hasDraft}
+      delegatorMark={delegatorMark}
       detailLabel={getThreadDetailLabel(thread, "project-scoped", nowMs)}
     />
   )
@@ -162,7 +168,14 @@ function ChannelPeek({
                       : "border-border/0 group-hover/peek:border-border group-hover/peek:bg-muted group-data-[hover-card-open]/peek:border-border group-data-[hover-card-open]/peek:bg-muted"
                   )}
                 >
-                  <PeekChatContent thread={thread} nowMs={nowMs} />
+                  {/* No mark under a "Delegators" label. A card whose only
+                      group is its delegators draws no label, and there the
+                      mark is all that says it. */}
+                  <PeekChatContent
+                    thread={thread}
+                    nowMs={nowMs}
+                    delegatorMark={!(peekGroup.key === "delegators" && peekGroups.length > 1)}
+                  />
                 </span>
               </button>
               ), onClose)}</Fragment>
@@ -192,6 +205,13 @@ function ChannelPeek({
 export interface ChannelActions {
   editorLabel: string
   onCreateChat: (projectId: string) => void
+  /**
+   * What a click on the channel itself does: its delegator if it has one,
+   * and otherwise its new chat page, which is the one already being written
+   * if it has one (`resolveProjectNewChat`). `onCreateChat` is for what says
+   * New Chat, and makes one every time.
+   */
+  onOpenNewChat: (projectId: string) => void
   onRenameProject: (projectId: string, sidebarTitle: string | undefined, realTitle: string) => void
   onCopyPath: (localPath: string) => void
   onOpenExternalPath: (action: "open_finder" | "open_editor", localPath: string) => void
@@ -353,12 +373,16 @@ export function ChannelList({
   // clicking a channel lets it go. See `ListHoverCard` on pinning.
   const [pinnedChannelId, setPinnedChannelId] = useState<string | null>(null)
   const unpinChannel = useCallback(() => setPinnedChannelId(null), [])
-  // A click on a channel starts a chat in it: the page New Chat in its menu
-  // goes to, by the same route. The menu is for reaching a chat that is
-  // already there, and hovering is enough to get it.
+  // A click on a channel goes to its delegator, which is the project's way
+  // in, or to its new chat page when it has none. The menu is for reaching a
+  // chat that is already there, and hovering is enough to get it.
+  //
+  // Not by New Chat's route, which makes a chat every time: clicking away
+  // from a new chat and clicking the channel again comes back to what was
+  // being written there. New Chat in the menu still starts a fresh one.
   const startChat = useCallback((projectId: string) => {
     unpinChannel()
-    actions.onCreateChat(projectId)
+    actions.onOpenNewChat(projectId)
   }, [actions, unpinChannel])
   // Without hover there is no menu, so a tap opens the channel itself
   // (`onSelect`): the only way to its chats on touch. New Chat is on that page.
