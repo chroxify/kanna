@@ -20,7 +20,8 @@ function normalizeGeneratedTitle(value: unknown): string | null {
 /**
  * A title is made from what the user wrote. What Kanna put in the message for
  * the agent (`stripSystemMessages`) is no part of that: left in, a first
- * message sent from the graph view would be titled after its instructions.
+ * message carrying a block for the agent would be titled after its
+ * instructions.
  */
 export function fallbackTitleFromMessage(messageContent: string): string | null {
   const normalized = stripSystemMessages(messageContent).replace(/\s+/g, " ").trim()

@@ -47,8 +47,28 @@ describe("buildKannaSystemInstructions", () => {
     expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("Do not redo")
     const named = [...KANNA_DELEGATOR_INSTRUCTIONS.matchAll(/`([a-z_]+)`/g)].map((match) => match[1]!)
     for (const name of named) expect(KANNA_TOOL_NAMES as readonly string[]).toContain(name)
+    // The ticket board's rules: a delegator's only guide to it.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("Every hand-off names a ticket")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("never progress.")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("Only `reply_to_ticket` writes on a ticket.")
+    // A delegator once reopened a Done ticket for each small new ask in its
+    // area. A new ask gets its own ticket; the chat can still be the same one.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("A new ask is a new ticket")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("So is anything asked after a ticket is Done.")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("the same piece of work, or a new request?")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("The ticket separates the asks, not the chat")
+    // What it tells the user about is the ticket, which opens in the pane.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("link its ticket, not the chat: [#8 Title](link)")
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("Link a chat only when the user needs the chat itself.")
+    // A delegator once pinned each commit on whichever ticket was nearby, so
+    // the rest kept saying "uncommitted" after the push.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("A commit or push is a ticket of its own")
+    // It filled tickets with "nothing new" and with plans the hand-off rows already showed.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("post nothing when nothing is new")
+    // And let titles and bodies drift from the work they had grown into.
+    expect(KANNA_DELEGATOR_INSTRUCTIONS).toContain("rewrite the title and body")
     // Every delegator turn pays for it.
-    expect(KANNA_DELEGATOR_INSTRUCTIONS.length).toBeLessThan(1_200)
+    expect(KANNA_DELEGATOR_INSTRUCTIONS.length).toBeLessThan(2_200)
   })
 
   test("names only tools that exist", () => {
@@ -161,6 +181,23 @@ test("what holds for every kind is in the description and the session instructio
   expect(instructions).toContain("kanna:themechange")
   expect(instructions).toContain("touch-action: none")
   expect(instructions).not.toContain("<select aria-label")
+  // Two to four options are a segmented control, five to eight a tabs row,
+  // more a dropdown, and both say so.
+  for (const text of [instructions, description]) {
+    expect(text).toMatch(/2 to 4 short options|Two to four short options/)
+    expect(text).toMatch(/for 5 to 8 or for whole views|Five to eight short options, or views to switch between, are a kanna-tabs row/)
+    expect(text).toContain("kanna-select")
+  }
+  // The host centres the selection; the model writes no script for the row.
+  expect(instructions).toContain("scrolls the selected tab to the centre")
+  expect(instructions).toContain("so write no script or CSS of your own for them")
+  expect(instructions).toContain("More than eight, or labels longer than about twenty characters, are a kanna-select dropdown")
+  expect(instructions).toContain('<select class="kanna-select" aria-label="State">')
+  expect(instructions).not.toContain("more than about six options")
+  // Its examples hold three, as a model copying one should.
+  const examples = [...KANNA_VISUALIZATION_CONTRACT.matchAll(/<div class="kanna-segmented"[^>]*>(.*?)<\/div>/g)]
+  expect(examples.length).toBeGreaterThanOrEqual(2)
+  for (const [, options] of examples) expect(options!.match(/<button/g)!.length).toBe(3)
 })
 
 // Claude Code cuts an MCP tool's description at this length and ends it

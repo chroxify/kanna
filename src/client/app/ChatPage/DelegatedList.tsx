@@ -1,16 +1,16 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import { Network } from "lucide-react"
-import { DelegatorIcon } from "../../components/chat-ui/delegator-icon"
 import { useChatReferenceActions, useSidebarThread } from "../../components/chat-ui/chat-reference"
 import { SidebarChatHoverCard } from "../../components/chat-ui/sidebar/ChatHoverCard"
 import { ThreadSections } from "../../components/chat-ui/sidebar/ThreadSections"
-import { VIEWER_END_PAD_CLASS, ViewerIconButton, ViewerSurface } from "../../components/viewer/ViewerSurface"
-import { delegatedThreads } from "../../lib/delegators"
+import { VIEWER_END_PAD_CLASS, ViewerSurface } from "../../components/viewer/ViewerSurface"
+import { delegatedListTitle, delegatedThreads, isUnnamedDelegator } from "../../lib/delegators"
 import { cn } from "../../lib/utils"
 import { useSidebarStore } from "../../stores/sidebarStore"
-import { openViewer, useViewerStore, type ViewerItem } from "../../stores/viewerStore"
+import { useViewerStore, type ViewerItem } from "../../stores/viewerStore"
 import { useOpenChat } from "../useOpenChat"
 import { useStableSidebarThreads } from "../useStableSidebarThreads"
+import { useTicketBoard } from "../../stores/ticketBoardStore"
+import { TicketBoardPane } from "./TicketBoardPane"
 
 type DelegatedItem = Extract<ViewerItem, { kind: "delegated" }>
 
@@ -32,7 +32,11 @@ const AGE_TICK_MS = 60_000
  * the chat opens in this pane, over the list, and Back returns here.
  *
  * Which chats it holds is `delegatedThreads`: the ones directly under the
- * delegator. The header keeps a way to the graph, which shows the whole tree.
+ * delegator.
+ *
+ * A delegator whose snapshot brings a ticket board shows the board here
+ * instead (`TicketBoardPane`). This list is for one that has none: a server
+ * from before tickets.
  */
 export const DelegatedList = memo(function DelegatedList({ item, onClose }: {
   item: DelegatedItem
@@ -46,6 +50,7 @@ export const DelegatedList = memo(function DelegatedList({ item, onClose }: {
   const data = useSidebarStore((store) => store.data)
   const allThreads = useStableSidebarThreads(data)
   const threads = useMemo(() => delegatedThreads(allThreads, item.chatId), [allThreads, item.chatId])
+  const board = useTicketBoard(item.chatId)
 
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
@@ -71,17 +76,31 @@ export const DelegatedList = memo(function DelegatedList({ item, onClose }: {
     onOpenArchivedChat: (chatId: string) => openChat(chatId, { from: "preview" }),
   } : null), [actions, openChat])
 
+  // The header is the delegator's name and nothing else. The pane was
+  // opened by the compass in the navbar and sits beside that chat's title,
+  // so a compass and the word "Delegated" here said it a third time. What
+  // the pane is stays in its accessible name, which has no navbar to lean on.
+  const title = delegatedListTitle(delegator?.title)
+  const named = delegator !== null && delegator !== undefined && !isUnnamedDelegator(delegator.title)
+  // A delegator with a board shows it in this list's place. One without
+  // (a server from before tickets) keeps the list of its chats.
+  if (board) {
+    return (
+      <TicketBoardPane
+        delegatorChatId={item.chatId}
+        delegatorTitle={named ? title : null}
+        board={board}
+        threads={allThreads}
+        nowMs={nowMs}
+        onSelectChat={card?.onSelectChat ?? null}
+        onClose={onClose}
+      />
+    )
+  }
   return (
     <ViewerSurface
-      label={delegator ? `Chats under ${delegator.title}` : "Delegated chats"}
-      icon={<DelegatorIcon />}
-      title="Delegated"
-      subtitle={delegator?.title}
-      toolbar={(
-        <ViewerIconButton label="Show graph" onClick={() => openViewer({ kind: "graph", chatId: item.chatId })}>
-          <Network />
-        </ViewerIconButton>
-      )}
+      label={named ? `Delegated chats, ${title}` : "Delegated chats"}
+      title={title}
       onClose={onClose}
       // Back from a chat is a new card: it opens where the list was left.
       scrollMemoryKey={`delegated:${item.chatId}`}

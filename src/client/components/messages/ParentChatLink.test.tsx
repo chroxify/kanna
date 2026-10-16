@@ -40,13 +40,14 @@ describe("messageNamingParent", () => {
 describe("the link between two chats", () => {
   const quoteOf = (html: string) => html.slice(html.indexOf("not-prose"), html.indexOf("my-[3px] h-[14px]"))
 
-  test("is one quote from both ends: on the message a sub-chat opens with, and on the report that comes back", () => {
+  test("is a quote on the message a sub-chat opens with, and a line on the report that comes back", () => {
     const inChild = renderToStaticMarkup(<SourcedMessage content="audit the parser" source={{ kind: "agent", chatId: "parent" }} />)
     const inParent = renderToStaticMarkup(<SourcedMessage content="all clear" source={{ kind: "report", chatIds: ["child"] }} />)
-    // The same box with the same row in it. Only the name the sidebar could
-    // not supply differs here.
     expect(quoteOf(inChild)).toContain(">Another agent<")
-    expect(quoteOf(inChild).replace("Another agent", "Sub-chat")).toBe(quoteOf(inParent))
+    // The parent's agent relays the reply, so the parent draws only that it came.
+    expect(inParent).toContain(">A sub-chat replied<")
+    expect(inParent).not.toContain("all clear")
+    expect(inParent).not.toContain("my-[3px] h-[14px]")
     // Neither says in words what its place over the message already does.
     for (const html of [inChild, inParent]) {
       expect(html).not.toContain("Replied to")

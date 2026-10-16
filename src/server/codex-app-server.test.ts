@@ -1426,6 +1426,59 @@ describe("CodexAppServerManager", () => {
     expect(toolCalls[1].input.plan).toContain("## Plan")
   })
 
+  test("a plan turn another agent's message started ends with the plan as its reply, and asks nobody to approve it", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-1" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { turn: { id: "turn-1", status: "inProgress", error: null } },
+        })
+        child.writeServerMessage({
+          method: "item/started",
+          params: { threadId: "thread-1", turnId: "turn-1", item: { type: "plan", id: "plan-1", text: "" } },
+        })
+        child.writeServerMessage({
+          method: "item/plan/delta",
+          params: { threadId: "thread-1", turnId: "turn-1", itemId: "plan-1", delta: "## Plan\n\n- [ ] Implement changes" },
+        })
+        child.writeServerMessage({
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null } },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    await manager.startSession({ chatId: "chat-1", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+
+    let asked = 0
+    const turn = await manager.startTurn({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      content: "make a plan",
+      planMode: true,
+      skipPlanApproval: true,
+      onToolRequest: async () => {
+        asked += 1
+        return { confirmed: true }
+      },
+    })
+    const entries = (await collectStream(turn.stream)).flatMap((event) => event.type === "transcript" ? [event.entry] : [])
+
+    expect(asked).toBe(0)
+    expect(entries.some((entry) => entry.kind === "tool_call" && entry.tool.toolKind === "exit_plan_mode")).toBe(false)
+    // The plan, then the end of the turn: what the sender's report is read from.
+    const last = entries.slice(-2)
+    expect(last[0]).toMatchObject({ kind: "assistant_text", text: "## Plan\n\n- [ ] Implement changes" })
+    expect(last[1]).toMatchObject({ kind: "result", subtype: "success", isError: false })
+  })
+
   test("maps collab agent tool calls into subagent_task", async () => {
     const process = new FakeCodexProcess((message, child) => {
       if (message.method === "initialize") {

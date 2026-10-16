@@ -1,13 +1,18 @@
 /**
  * The delegator's mark: a compass, for the chat that sets the direction and
  * leaves the travelling to the chats under it. Defined here and nowhere
- * else, so every place a delegator is marked (its row, its tab, the navbar's
- * tag and button, the delegate control, the menu items, the pane's header,
- * the command palette) changes together. The iOS app draws the same symbol.
+ * else, so every place a delegator is marked (its row, its tab, the delegate
+ * control, the menu items, the command palette) changes together. The
+ * navbar's button is not one: it opens the delegator's tickets, and wears
+ * their list icon (`DelegatedListButton`). The iOS app draws the same symbol.
  *
- * Lucide's own, unaltered: drawn at 12px beside a row's age, 14px in the
- * delegate control and 16px in a row and the navbar, at the stroke those
- * places give their other icons.
+ * Each place says it once. A row under a "Delegators" heading is not marked,
+ * nor is the pane the navbar's button opens, nor the title beside that
+ * button: on a delegator's page the compass was drawn four times.
+ *
+ * Lucide's own, unaltered: drawn at 14px in the delegate control and the
+ * menus and 16px in a row and the navbar, at the stroke those places give
+ * their other icons.
  *
  * Not the Workflow tool's icon, which is Lucide's `Workflow` and stays so.
  */

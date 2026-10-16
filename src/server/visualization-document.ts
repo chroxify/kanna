@@ -1,4 +1,5 @@
 import { VISUALIZATION_EXPAND_BUTTON, VISUALIZATION_MAX_HEIGHT } from "../shared/visualization"
+import { VISUALIZATION_CONTROLS_CSS, VISUALIZATION_CONTROLS_SCRIPT } from "../shared/visualization-controls"
 import { VISUALIZATION_HIDDEN_SCROLLBAR_CSS } from "../shared/visualization-host"
 
 // These fallbacks let the saved document work on its own. Hosts override the surface
@@ -28,7 +29,7 @@ const tooltip = `.kanna-tooltip{position:absolute;z-index:10;pointer-events:none
 // and inset on both sides by the corner the expand button keeps, so it stays
 // in the middle of the frame and out from under the button at any width.
 const pickerRow = `.kanna-picker{display:flex;justify-content:center;padding:0 ${VISUALIZATION_EXPAND_BUTTON.clear}px;margin-bottom:12px}.kanna-picker>.kanna-tabs{flex:1;justify-content:center}`
-const controls = `.kanna-segmented{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border:1px solid var(--border);border-radius:999px}.kanna-segmented>button{height:30px;padding:0 14px;border:0;border-radius:999px;background:transparent;color:var(--muted-foreground);font-size:14px;line-height:1;white-space:nowrap}.kanna-tabs{display:flex;gap:20px;overflow-x:auto;border-bottom:1px solid var(--border)}.kanna-tabs>button{padding:8px 0;margin-bottom:-1px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted-foreground);white-space:nowrap}.kanna-segmented>button:hover,.kanna-tabs>button:hover{color:var(--foreground)}.kanna-segmented>:is([aria-checked=true],[aria-selected=true],[aria-pressed=true]){background:var(--muted);color:var(--foreground)}.kanna-tabs>:is([aria-selected=true],[aria-checked=true],[aria-pressed=true]){color:var(--foreground);border-bottom-color:var(--foreground)}${pickerRow}${tooltip}`
+const controls = `${VISUALIZATION_CONTROLS_CSS}${pickerRow}${tooltip}`
 const css = `:root{color-scheme:light;${declarations(light)};--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;--chart-1:var(--viz-blue);--chart-2:var(--viz-green);--chart-3:var(--viz-orange);--chart-4:var(--viz-purple);--chart-5:var(--viz-red);--chart-6:var(--viz-yellow);--chart-7:var(--viz-pink);--chart-8:var(--viz-teal)}
 @media(prefers-color-scheme:dark){:root{color-scheme:dark;${declarations(dark)}}}
 *{box-sizing:border-box}html,body{margin:0;padding:0;background:transparent;color:var(--foreground);font-family:var(--font-sans);font-size:16px;line-height:1.5;-webkit-text-size-adjust:100%;overflow-wrap:break-word}${VISUALIZATION_HIDDEN_SCROLLBAR_CSS}#kanna-visualization-root{display:flow-root;min-width:0}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--viz-blue);outline-offset:3px}button,select,input,textarea{accent-color:var(--viz-blue)}svg,img,canvas{max-width:100%}code,pre{font-family:var(--font-mono)}h1,h2,h3{font-size:18px;font-weight:600;line-height:1.4;margin:0 0 8px}p{margin:0 0 12px}a{color:var(--viz-blue)}.text-muted{color:var(--muted-foreground)}.text-small{font-size:13px}${controls}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}`
@@ -87,7 +88,7 @@ export function buildVisualizationDocument(html: string, title: string, height: 
     new MutationObserver(schedule).observe(root, {subtree:true, childList:true, attributes:true, characterData:true});
     addEventListener('load', schedule); document.fonts.ready.then(schedule); schedule();
   });
-})();</script></head><body><div id="kanna-visualization-root">${html}</div></body></html>`
+})();</script><script>${VISUALIZATION_CONTROLS_SCRIPT}</script></head><body><div id="kanna-visualization-root">${html}</div></body></html>`
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${VISUALIZATION_SHELL_CSP}"><title>${escapeAttribute(title)}</title><style>html,body{margin:0;padding:0;background:transparent;overflow:hidden}iframe{display:block;width:100%;border:0;background:transparent}</style></head><body><iframe id="visualization" title="${escapeAttribute(title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" style="height:${height}px" srcdoc="${escapeAttribute(inner)}"></iframe><script>
 (() => {
   const frame = document.getElementById('visualization');

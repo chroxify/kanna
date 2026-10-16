@@ -20,14 +20,6 @@ import type { GitWidgets as GitWidgetsComponent } from "../../components/chat-ui
 const GitWidgets = lazy(() =>
   import("../../components/chat-ui/widgets/GitWidgets").then((m) => ({ default: m.GitWidgets }))
 )
-// Code-split: the graph view is its own route, and React Flow is all its.
-const ChatGraphCanvas = lazy(() =>
-  import("../ChatGraph/ChatGraphCanvas").then((m) => ({ default: m.ChatGraphCanvas }))
-)
-import { buildChatGraphLocationState, readChatGraphRequestedChatId, useOpenGraphChat } from "../ChatGraph/openGraphChat"
-import type { ChatGraphHost } from "../ChatGraph/ChatGraphNode"
-import { useChatGraphRootId } from "../ChatGraph/useChatGraph"
-import { attachDelegationBlock } from "../../../shared/delegation-block"
 import { Card, CardContent } from "../../components/ui/card"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../../components/ui/resizable"
 import { actionMatchesEvent, getResolvedKeybindings } from "../../lib/keybindings"
@@ -37,18 +29,20 @@ import { buildChatJumpLocationState } from "../../lib/chat-navigation"
 import { snapshotDroppedFiles } from "../../lib/snapshotDroppedFiles"
 import { useRightSidebarStore, useWidgetsOpen } from "../../stores/rightSidebarStore"
 import { ViewerLayer, usePresentedViewer, useViewerShown } from "../../components/viewer/ViewerLayer"
-import { resolveViewerSplitMove, viewerPaneState, type ViewerPaneState } from "../../lib/viewer-split"
+import { dockedViewerPaneWidthPx, resolveViewerSplitMove, viewerPaneState, type ViewerPaneState } from "../../lib/viewer-split"
 import { opensInViewer, projectRelativePath } from "../../components/viewer/localLinks"
 import type { OpenLocalLinkTarget } from "../../components/messages/shared"
 import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
-import { getChatViewer, openViewer, useChatViewer, useViewerStore, viewerWidthClass } from "../../stores/viewerStore"
+import { openViewer, useChatViewer, useViewerStore, viewerWidthClass } from "../../stores/viewerStore"
 import type { ChatPreviewContext } from "./ChatPreview"
 import { useOpenChat } from "../useOpenChat"
 import { useNewChatDelegate } from "./useNewChatDelegate"
+import { useTicketDeepLink } from "./useTicketDeepLink"
+import { usePublishTicketBoard } from "../../stores/ticketBoardStore"
 import { useDelegateStore } from "../../stores/delegateStore"
 import { useAppDialog } from "../../components/ui/app-dialog"
 import type { DiffViewerContext } from "../../components/chat-ui/git/DiffViewer"
-import { useChatIsDelegator, useProjectRepoUrl, useSidebarChatHasMessages } from "../../stores/sidebarStore"
+import { useChatExists, useChatIsDelegator, useProjectRepoUrl, useSidebarChatIsNew } from "../../stores/sidebarStore"
 import { useAppSettingsStore } from "../../stores/appSettingsStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, isTerminalVisible, useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { usePaneChatKey } from "../../lib/paneVisibility"
@@ -207,20 +201,6 @@ function useLayoutWidth(ref: RefObject<HTMLDivElement | null>) {
 const MOBILE_BREAKPOINT_PX = 768
 /** Dragging the viewer's pane narrower than this closes it, as the terminal's does. */
 const VIEWER_PANE_CLOSE_WIDTH_PX = 240
-/**
- * The viewer's pane for anything but a review of changes (a file, an
- * attachment, a chart): room for the markdown preview's 72ch measure with
- * air either side, or about 100 columns of code, and no wider, so the chat
- * keeps the rest of the room.
- */
-const VIEWER_PREVIEW_PANE_WIDTH_PX = 800
-/**
- * The viewer's pane for a sub-chat: half the room, so the chat it reports to
- * keeps the other half, between a width its composer still fits in and the
- * transcript column's own.
- */
-const VIEWER_CHAT_PANE_MIN_WIDTH_PX = 420
-const VIEWER_CHAT_PANE_MAX_WIDTH_PX = 800
 
 /** The chat pane never shrinks past this, so it also fixes the terminal's ceiling. */
 export const CHAT_MIN_SIZE_PERCENT = 25
@@ -478,16 +458,8 @@ function ChatWorkspace({
   )
 }
 
-/**
- * What fills the middle of the page. `graph` (`/graph/:chatId`) is the same
- * page, navbar, composer, widget column and all, with the chat's tree of
- * sub-chats where its transcript would be (`ChatGraphCanvas`).
- */
-export type ChatPageView = "transcript" | "graph"
-
-export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
+export function ChatPage() {
   const state = useOutletContext<KannaState>()
-  const graphView = view === "graph"
   const layoutRootRef = useRef<HTMLDivElement>(null)
   // Publishes the navbar's height as `--chat-navbar-h` on its parent, for
   // what starts below it (the widget column, the viewer) and the transcript's
@@ -515,23 +487,28 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, string>>({})
   const [defaultModelsDialogOpen, setDefaultModelsDialogOpen] = useState(false)
-  // While the next chat's snapshot loads there's no runtime to judge by, so the
-  // empty state holds whatever it last was. Dropping it for that gap is what
-  // made one new chat to another fade out and back in. Not for a chat the
-  // sidebar knows has messages, though: that one is headed for a transcript,
-  // and holding the empty state there left the new chat page's list over it
-  // until the snapshot came.
+  // While the next chat's snapshot loads there's no runtime to judge by. A
+  // chat the sidebar lists is judged by the sidebar instead, which puts it to
+  // the same test the snapshot will: a new chat (no message, its first name)
+  // is the new chat page from the first frame, and any other chat is not.
+  // That is what a click on a channel comes back to, a new chat with a draft
+  // waiting or a delegator, and it must not show the new chat page first. A
+  // chat started from this window a moment ago is not listed yet, and is
+  // known to be new all the same.
   //
-  // A chat started from this window a moment ago does not wait either. It is
-  // known to be empty, so its page is the new chat page from the click, until
-  // something is sent from it: that prompt shows before the snapshot can.
+  // A chat neither known nor listed (the sidebar still loading) holds the
+  // empty state as it last was: dropping it for that gap is what made one
+  // new chat to another fade out and back in.
+  //
+  // In every case a prompt sent before the snapshot comes ends the empty state.
   const settledShowEmptyStateRef = useRef(false)
   const isChatLoading = Boolean(state.activeChatId && !state.runtime)
-  const activeChatHasMessages = useSidebarChatHasMessages(state.activeChatId)
+  const sidebarListsChat = useChatExists(state.activeChatId)
+  const isKnownNewChat = useSidebarChatIsNew(state.activeChatId) || state.activeChatStarted
   const showEmptyState = isChatLoading
-    ? state.activeChatStarted
+    ? isKnownNewChat
       ? state.messages.length === 0
-      : settledShowEmptyStateRef.current && !activeChatHasMessages
+      : !sidebarListsChat && settledShowEmptyStateRef.current && state.messages.length === 0
     : state.messages.length === 0 && state.runtime?.title === "New Chat"
   settledShowEmptyStateRef.current = showEmptyState
   const projectId = state.activeProjectId
@@ -619,6 +596,11 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   // After `setViewerChat` above, in the same commit, so a delegator opened
   // for the first time is never painted with its pane shut.
   const isDelegator = useChatIsDelegator(state.activeChatId)
+  // Which of a project's delegators a click on the project opens, when it has
+  // several (`resolveProjectNewChat`).
+  useEffect(() => {
+    if (isDelegator && state.activeChatId) useDelegateStore.getState().markViewed(state.activeChatId)
+  }, [isDelegator, state.activeChatId])
   const viewerFloorChatId = isDelegator && !isMobileViewport ? state.activeChatId : null
   const setViewerFloor = useViewerStore((store) => store.setFloor)
   useLayoutEffect(() => {
@@ -635,27 +617,12 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     setViewerFloor({ kind: "delegated", chatId: viewerFloorChatId }, { openByDefault: firstTime })
     if (firstTime) delegateStore.markPaneShown(viewerFloorChatId)
   }, [setViewerFloor, state.sidebarReady, viewerFloorChatId])
+  // The board is drawn in the pane and in the transcript's ticket cards, and
+  // this snapshot is where it comes from (`ticketBoardStore`).
+  usePublishTicketBoard(state.chatSnapshot)
+  useTicketDeepLink(state.activeChatId, state.sidebarReady, isDelegator)
   const navigate = useNavigate()
-  // The graph of a sub-chat is the graph of its top-most ancestor, so the
-  // URL is rewritten to name that chat. One tree then has one address, and
-  // the page's own chat (the composer's, the widget column's, the navbar's)
-  // is the head of the graph with nothing told apart from the route. The
-  // chat that was asked for rides along in router state, to be marked.
   const location = useLocation()
-  const graphRootId = useChatGraphRootId(graphView ? state.activeChatId : null)
-  const graphRequestedChatId = graphView
-    ? readChatGraphRequestedChatId(location.state)
-      ?? (graphRootId && graphRootId !== state.activeChatId ? state.activeChatId : null)
-    : null
-  useEffect(() => {
-    if (!graphView || !state.activeChatId || !graphRootId || graphRootId === state.activeChatId) return
-    navigate(`/graph/${graphRootId}`, { replace: true, state: buildChatGraphLocationState(state.activeChatId) })
-  }, [graphRootId, graphView, navigate, state.activeChatId])
-  // On its own page a node opens as any chat shown inside another does: in
-  // the previewer beside the graph. Except the head, which is this page's
-  // own chat, the one the composer sends to: its node goes to its transcript.
-  const openGraphChat = useOpenGraphChat()
-  const graphPageHost = useMemo<ChatGraphHost>(() => ({ openChat: openGraphChat, currentChatId: null }), [openGraphChat])
   // The navbar's left end names the open chat (`ChatNavbarTitle`), or with
   // the Chat Tabs setting on holds every chat you have open, as tabs
   // (`ChatTabs`). Either way in every sidebar view.
@@ -1055,9 +1022,9 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   const { delegate: composerDelegate, sendToDelegator } = useNewChatDelegate({
     // Not on a delegator's own empty page: what is typed there is for it.
     // Nor on a page whose chat is still loading, where the empty state is
-    // only being held over from the last page. A chat started here is known
-    // to be empty, so the control is in the composer from its first frame.
-    enabled: showEmptyState && !graphView && (!isChatLoading || state.activeChatStarted) && !isDelegator,
+    // only being held over from the last page. A chat known to be new (see
+    // `showEmptyState`) has the control in its composer from its first frame.
+    enabled: showEmptyState && (!isChatLoading || isKnownNewChat) && !isDelegator,
     projectId,
     socket: state.socket,
     dialog: appDialog,
@@ -1071,19 +1038,14 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     // No scroll here: the transcript pins the new prompt to the top of the
     // viewport once it renders (see ChatTranscriptViewport's pin effect).
     //
-    // From the graph, a message asks for the work to be handed out, not done
-    // (see `attachDelegationBlock`). It is attached here, where the view is
-    // known, and from here on it is part of the message: sent, queued or
-    // steered the same.
-    //
     // From the new chat page with delegating on, the message is not for this
     // chat at all: it goes to the delegator, and the app goes with it.
     if (delegateTargetChatId) {
       await sendToDelegator(delegateTargetChatId, content, options)
       return
     }
-    await state.handleSend(graphView ? attachDelegationBlock(content) : content, options)
-  }, [delegateTargetChatId, graphView, sendToDelegator, state.handleSend])
+    await state.handleSend(content, options)
+  }, [delegateTargetChatId, sendToDelegator, state.handleSend])
 
   const handleListSkills = useCallback(
     (provider: AgentProvider) =>
@@ -1222,25 +1184,18 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   const viewerSplitElementRef = useRef<HTMLDivElement | null>(null)
   const viewerSplitAnimationRef = useRef<number | null>(null)
   const viewerSplitStateRef = useRef<{ group: GroupImperativeHandle | null; state: ViewerPaneState; chatKey: string }>({ group: null, state: "closed", chatKey: "" })
-  // The split a docked pane takes for what's open: the width you dragged it
-  // to, else the one for its kind.
+  // The split a docked pane takes for what's open (`dockedViewerPaneWidthPx`).
   const dockedViewerSplit = (): [number, number] => {
     const splitWidth = viewerSplitElementRef.current?.clientWidth ?? 0
     if (splitWidth <= 0) return [100, 0]
     const pageWidth = layoutRootRef.current?.clientWidth ?? 0
     const chatMinPx = pageWidth * (CHAT_MIN_WORKSPACE_SIZE_PERCENT / 100)
-    const draggedWidthPx = getChatViewer()?.widthPx
-    const paneWidthPx = Math.min(
-      splitWidth - chatMinPx,
-      draggedWidthPx ?? (
-        viewerWidth === "review"
-          ? Infinity
-          : viewerWidth === "chat"
-            ? Math.min(VIEWER_CHAT_PANE_MAX_WIDTH_PX, Math.max(VIEWER_CHAT_PANE_MIN_WIDTH_PX, splitWidth / 2))
-            : VIEWER_PREVIEW_PANE_WIDTH_PX
-      ),
-    )
-    const panePercent = Math.max(0, (paneWidthPx / splitWidth) * 100)
+    const panePercent = (dockedViewerPaneWidthPx({
+      splitWidthPx: splitWidth,
+      chatMinPx,
+      draggedWidthPx: useRightSidebarStore.getState().viewerWidthPx,
+      widthClass: viewerWidth,
+    }) / splitWidth) * 100
     return [100 - panePercent, panePercent]
   }
   // What's on screen, which outlives a close by its exit animation. The
@@ -1387,25 +1342,6 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     >
       <CardContent className="flex flex-1 min-h-0 flex-col overflow-hidden p-0 relative">
         <ChatNavbarWash resetKey={state.activeChatId} opaqueBar={chatTabsEnabled} />
-        {graphView ? (
-          state.activeChatId ? (
-            <Suspense fallback={null}>
-              <ChatGraphCanvas
-                // By root, so the rewrite from a sub-chat's URL to its root's
-                // keeps the canvas it started drawing.
-                key={graphRootId ?? state.activeChatId}
-                chatId={state.activeChatId}
-                markedChatId={graphRequestedChatId}
-                // A page is wide: a generation to a column.
-                direction="columns"
-                host={graphPageHost}
-                underNavbar
-                bottomInset={transcriptPaddingBottom}
-                fitButton
-              />
-            </Suspense>
-          ) : null
-        ) : (
         <TranscriptRenderOptionsProvider value={transcriptRenderOptions}>
         <ToolPayloadProvider store={toolPayloadStore}>
         <ChatTranscriptViewport
@@ -1459,7 +1395,6 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
         />
         </ToolPayloadProvider>
         </TranscriptRenderOptionsProvider>
-        )}
       </CardContent>
 
       <ChatInputDock

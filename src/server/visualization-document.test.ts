@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Script, runInNewContext } from "node:vm"
 import { buildVisualizationDocument, VISUALIZATION_CONTENT_CSP } from "./visualization-document"
 import { VISUALIZATION_EXPAND_BUTTON } from "../shared/visualization"
+import { VISUALIZATION_CONTROLS_CSS, VISUALIZATION_CONTROLS_SCRIPT } from "../shared/visualization-controls"
 import { prepareVisualizationDocument, VISUALIZATION_BASE_SIZE_CSS, VISUALIZATION_HIDDEN_SCROLLBAR_CSS, VISUALIZATION_SHELL_FIT_CSS } from "../shared/visualization-host"
 
 async function parse(html: string) {
@@ -150,10 +151,70 @@ describe("visualization document isolation", () => {
     expect(VISUALIZATION_HIDDEN_SCROLLBAR_CSS).not.toContain("overflow")
   })
 
+  test("a segmented control keeps fixed, concentric corners and one line, in new documents and old", async () => {
+    const rule = (css: string, selector: string) => new RegExp(`${selector.replace(/[.>]/g, "\\$&")}\\{([^}]*)\\}`).exec(css)?.[1] ?? ""
+    const container = rule(VISUALIZATION_CONTROLS_CSS, ".kanna-segmented")
+    const segment = rule(VISUALIZATION_CONTROLS_CSS, ".kanna-segmented>button")
+    const px = (block: string, property: string) => Number(new RegExp(`${property}:(\\d+)px`).exec(block)?.[1])
+    // A fixed radius, not a pill, so a taller control cannot become a stadium.
+    expect(container).not.toContain("999px")
+    expect(px(container, "border-radius")).toBe(10)
+    // The highlight's corners are the container's less the border and padding between them.
+    expect(px(segment, "border-radius")).toBe(px(container, "border-radius") - px(container, "border") - px(container, "padding"))
+    // One line, whatever a model puts in it; past the width it scrolls inside itself.
+    expect(container).toContain("flex-wrap:nowrap")
+    expect(container).toContain("overflow-x:auto")
+    expect(segment).toContain("white-space:nowrap")
+    // The dropdown matches it, so the two sit in one row as a pair.
+    const select = rule(VISUALIZATION_CONTROLS_CSS, ".kanna-select")
+    expect(px(select, "height")).toBe(px(container, "height"))
+    expect(px(select, "border-radius")).toBe(px(container, "border-radius"))
+    // Tabs do not wrap either.
+    const inner = decode((await parse(buildVisualizationDocument('<p>Example</p>', 'Example', 360))).frames[0]!.srcdoc!)
+    expect(inner).toContain(".kanna-tabs{display:flex;flex-wrap:nowrap")
+    // A document saved with the pill gets these after its own rules, before anything authored.
+    const older = buildVisualizationDocument('<div class="kanna-segmented"></div>', 'Example', 360).replace(VISUALIZATION_CONTROLS_CSS, ".kanna-segmented{border-radius:999px;flex-wrap:wrap}")
+    const loaded = decode((await parse(prepareVisualizationDocument(older, { appearance: 'light', variables: {} }, ''))).frames[0]!.srcdoc!)
+    expect(loaded.lastIndexOf(VISUALIZATION_CONTROLS_CSS)).toBeGreaterThan(loaded.indexOf("border-radius:999px"))
+    expect(loaded.lastIndexOf(VISUALIZATION_CONTROLS_CSS)).toBeLessThan(loaded.indexOf('<div class="kanna-segmented">'))
+  })
+
+  test("the iOS app adds the same controls rule at load as the web does", async () => {
+    // ios/ is its own repository, and not every checkout of this one has it beside.
+    const swift = Bun.file(new URL("../../ios/App/Chat/VisualizationView.swift", import.meta.url))
+    if (!(await swift.exists())) return
+    const escaped = VISUALIZATION_CONTROLS_CSS.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    expect(await swift.text()).toContain(`static let controlsRules = #"${escaped}"#`)
+    const script = VISUALIZATION_CONTROLS_SCRIPT.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    expect(await swift.text()).toContain(`static let controlsScript = #"""\n${script}\n"""#`)
+  })
+
+  test("the controls script runs in new documents, and first in old ones at load", async () => {
+    const saved = buildVisualizationDocument('<div class="kanna-tabs" role="tablist"></div>', 'Example', 360)
+    const inner = decode((await parse(saved)).frames[0]!.srcdoc!)
+    // Saved in the head, so the document works on its own.
+    expect(inner.indexOf(`<script>${VISUALIZATION_CONTROLS_SCRIPT}</script>`)).toBeGreaterThan(-1)
+    expect(inner.indexOf(VISUALIZATION_CONTROLS_SCRIPT)).toBeLessThan(inner.indexOf("</head>"))
+    // At load, the newest copy goes right after the content policy, ahead of
+    // the bootstrap and the saved copy, which stands down for it.
+    const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    const older = saved.replace(escape(VISUALIZATION_CONTROLS_SCRIPT), "/* an older copy */")
+    expect(older).toContain("/* an older copy */")
+    const loaded = decode((await parse(prepareVisualizationDocument(older, { appearance: 'light', variables: {} }, ''))).frames[0]!.srcdoc!)
+    const policy = /<meta http-equiv="Content-Security-Policy"[^>]*>/.exec(loaded)!
+    expect(loaded.slice(policy.index + policy[0].length).startsWith(`<script>${VISUALIZATION_CONTROLS_SCRIPT}</script>`)).toBe(true)
+    expect(loaded.indexOf(VISUALIZATION_CONTROLS_SCRIPT)).toBeLessThan(loaded.indexOf("window.kanna = "))
+    expect(loaded.indexOf(VISUALIZATION_CONTROLS_SCRIPT)).toBeLessThan(loaded.indexOf("/* an older copy */"))
+    // A frame without a policy still gets it, last in the head.
+    const bare = '<html><head></head><body><iframe srcdoc="&lt;head&gt;&lt;/head&gt;&lt;body&gt;&lt;/body&gt;"></iframe></body></html>'
+    const fallback = decode((await parse(prepareVisualizationDocument(bare, { appearance: 'light', variables: {} }, ''))).frames[0]!.srcdoc!)
+    expect(fallback).toContain(`<script>${VISUALIZATION_CONTROLS_SCRIPT}</script></head>`)
+  })
+
   test("the host's segmented control and tabs are styled from their aria state", async () => {
     const inner = decode((await parse(buildVisualizationDocument('<p>Example</p>', 'Example', 360))).frames[0]!.srcdoc!)
     expect(inner).toContain(".kanna-segmented>:is([aria-checked=true],[aria-selected=true],[aria-pressed=true])")
-    expect(inner).toContain(".kanna-tabs>:is([aria-selected=true],[aria-checked=true],[aria-pressed=true])")
+    expect(inner).toContain(".kanna-tabs>:is([aria-checked=true],[aria-selected=true],[aria-pressed=true])")
     // A prototype's version picker is centred, and stays out from under the expand button.
     expect(inner).toContain(`.kanna-picker{display:flex;justify-content:center;padding:0 ${VISUALIZATION_EXPAND_BUTTON.clear}px`)
     expect(inner).toContain(".kanna-picker>.kanna-tabs{flex:1;justify-content:center}")

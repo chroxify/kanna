@@ -11,8 +11,9 @@ import { ExitPlanModeMessage } from "../components/messages/ExitPlanModeMessage"
 import { TodoWriteMessage } from "../components/messages/TodoWriteMessage"
 import { ToolCallMessage } from "../components/messages/ToolCallMessage"
 import { formatPromptBoundary, promptOriginLabel, ResultMessage, TimeBoundary } from "../components/messages/ResultMessage"
-import { isChatToolCall, type ChatToolCall } from "../components/messages/ChatToolMessage"
-import { delegationsFor, noteDelegation, SourcedMessage, sourcedSections, type PromptDelegation } from "../components/messages/SourcedMessage"
+import { isChatToolCall } from "../components/messages/ChatToolMessage"
+import { SourcedMessage, sourcedSections } from "../components/messages/SourcedMessage"
+import { TicketReplyMessage, ticketPromptHasBody } from "../components/tickets/TicketReplyMessage"
 import { isScheduleToolCall } from "../components/messages/ScheduleToolMessage"
 import { stripSystemMessages } from "../../shared/message-preview"
 import { InterruptedMessage } from "../components/messages/InterruptedMessage"
@@ -20,6 +21,7 @@ import { CompactBoundaryMessage, ContextClearedMessage } from "../components/mes
 import { CompactSummaryMessage } from "../components/messages/CompactSummaryMessage"
 import { StatusMessage } from "../components/messages/StatusMessage"
 import { CollapsedToolGroup } from "../components/messages/CollapsedToolGroup"
+import { foldRuns } from "../lib/fold-runs"
 import { CHAT_SELECTION_ZONE_ATTRIBUTE } from "./chatFocusPolicy"
 import { SPECIAL_TOOL_NAMES } from "./derived"
 
@@ -53,8 +55,6 @@ export interface ResolvedSingleTranscriptRow {
   nextPromptOrigin?: string
   /** On a prompt nobody typed that no result's boundary introduces: it draws its own. */
   showsOwnBoundary?: boolean
-  /** On a sub-chat's report: the calls in this transcript it answers, for the quote over its bubble. */
-  delegations?: PromptDelegation[]
 }
 
 export interface ResolvedToolGroupTranscriptRow {
@@ -87,8 +87,6 @@ interface TranscriptMessageRenderState {
   nextPromptOrigin?: string
   /** On a prompt nobody typed that no result's boundary introduces: it draws its own. */
   showsOwnBoundary?: boolean
-  /** On a sub-chat's report: the calls in this transcript it answers, for the quote over its bubble. */
-  delegations?: PromptDelegation[]
   shouldRender: boolean
 }
 
@@ -100,25 +98,19 @@ interface TranscriptMessageRenderState {
  */
 function promptHasBody(message: Extract<HydratedTranscriptMessage, { kind: "user_prompt" }>) {
   if (stripSystemMessages(message.content).length > 0 || (message.attachments?.length ?? 0) > 0) return true
+  // A ticket reopened by the user is all header too, and still gets a line.
+  if (message.source?.kind === "ticket") return ticketPromptHasBody(message.content, message.source, message.attachments?.length ?? 0)
   return message.source?.kind === "report" && sourcedSections(message.content, message.source).length > 0
 }
 
 /**
  * What a prompt's time boundary says about who sent it. Nothing when it has a
- * bubble: the quote over the bubble names its sender (SourcedMessage), and
- * saying it on the line above as well would say it twice. A prompt with no bubble has only the
- * boundary to say it.
+ * bubble: the quote over the bubble names its sender (SourcedMessage), as a
+ * report's line names its sub-chat, and saying it on the line above as well
+ * would say it twice. A prompt with no bubble has only the boundary to say it.
  */
 function promptBoundaryOrigin(message: Extract<HydratedTranscriptMessage, { kind: "user_prompt" }>) {
   return promptHasBody(message) ? undefined : promptOriginLabel(message.source)
-}
-
-function sameDelegations(left: PromptDelegation[] | undefined, right: PromptDelegation[] | undefined) {
-  if (left === right) return true
-  if (!left || !right || left.length !== right.length) return false
-  return left.every((delegation, index) => (
-    delegation.chatId === right[index]!.chatId && sameMessage(delegation.call, right[index]!.call)
-  ))
 }
 
 function sameHandoff(left: SessionHandoff | undefined, right: SessionHandoff | undefined) {
@@ -153,7 +145,6 @@ function getTranscriptMessageRenderState(
     nextPromptTimestamp,
     nextPromptOrigin,
     showsOwnBoundary,
-    delegations,
   }: Omit<TranscriptMessageRenderState, "shouldRender">
 ): TranscriptMessageRenderState {
   let shouldRender = !message.hidden
@@ -206,7 +197,6 @@ function getTranscriptMessageRenderState(
     nextPromptTimestamp,
     nextPromptOrigin,
     showsOwnBoundary,
-    delegations,
     shouldRender,
   }
 }
@@ -233,20 +223,6 @@ function buildTranscriptMessageRenderStates(
     if (message.kind === "user_prompt" && !message.hidden) {
       upcomingPromptTimestamp = message.timestamp
       upcomingPromptOrigin = promptBoundaryOrigin(message)
-    }
-  }
-
-  // The call each report answers, so its quote can say what that call asked.
-  // Looked for only among the loaded messages: a call further back than the
-  // window has no card on screen to match, and the bubble names the sub-chat
-  // without one.
-  const delegations = new Array<PromptDelegation[] | undefined>(messages.length)
-  if (messages.some((message) => message.kind === "user_prompt" && message.source?.kind === "report")) {
-    const latest = new Map<string, ChatToolCall>()
-    for (let index = 0; index < messages.length; index++) {
-      const message = messages[index]!
-      if (message.kind === "user_prompt") delegations[index] = delegationsFor(latest, message.source)
-      else noteDelegation(latest, message)
     }
   }
 
@@ -284,7 +260,8 @@ function buildTranscriptMessageRenderStates(
       // A failed result draws an error, not a time.
       if (!hidden && message.success) boundaryAhead = true
     } else if (message.kind === "user_prompt" && !message.hidden) {
-      ownBoundaries[index] = message.source !== undefined && !boundaryAhead
+      // A ticket reply is the user's own words, and dates itself as theirs do.
+      ownBoundaries[index] = message.source !== undefined && message.source.kind !== "ticket" && !boundaryAhead
       boundaryAhead = false
     }
   }
@@ -345,7 +322,6 @@ function buildTranscriptMessageRenderStates(
       nextPromptTimestamp: message.kind === "result" ? nextPromptTimestamps[index] : undefined,
       nextPromptOrigin: message.kind === "result" ? nextPromptOrigins[index] : undefined,
       showsOwnBoundary: ownBoundaries[index] || undefined,
-      delegations: delegations[index],
     })
   })
 }
@@ -354,42 +330,11 @@ export function buildTranscriptRenderItems(
   messages: HydratedTranscriptMessage[],
   renderStates: TranscriptMessageRenderState[]
 ): TranscriptRenderItem[] {
-  const result: TranscriptRenderItem[] = []
-  let index = 0
-
-  while (index < messages.length) {
-    const message = messages[index]
-    const renderState = renderStates[index]
-    if (renderState?.shouldRender && isCollapsibleToolCall(message)) {
-      const group: HydratedTranscriptMessage[] = [message]
-      const startIndex = index
-      index += 1
-
-      while (index < messages.length) {
-        const nextMessage = messages[index]
-        const nextRenderState = renderStates[index]
-        if (!nextRenderState?.shouldRender) {
-          index += 1
-          continue
-        }
-        if (!isCollapsibleToolCall(nextMessage)) break
-        group.push(nextMessage)
-        index += 1
-      }
-
-      if (group.length >= 2) {
-        result.push({ type: "tool-group", messages: group, startIndex })
-      } else {
-        result.push({ type: "single", message, index: startIndex })
-      }
-      continue
-    }
-
-    result.push({ type: "single", message, index })
-    index += 1
-  }
-
-  return result
+  return foldRuns(messages, isCollapsibleToolCall, (index) => renderStates[index]?.shouldRender === true).map((run) => (
+    run.type === "group"
+      ? { type: "tool-group", messages: run.items, startIndex: run.startIndex }
+      : { type: "single", message: run.item, index: run.index }
+  ))
 }
 
 /**
@@ -537,7 +482,6 @@ function isResolvedTranscriptRowUnchanged(left: ResolvedTranscriptRow, right: Re
       && left.nextPromptTimestamp === right.nextPromptTimestamp
       && left.nextPromptOrigin === right.nextPromptOrigin
       && left.showsOwnBoundary === right.showsOwnBoundary
-      && sameDelegations(left.delegations, right.delegations)
       && sameMessage(left.message, right.message)
     )
   }
@@ -608,8 +552,6 @@ interface TranscriptSingleRowProps {
   nextPromptOrigin?: string
   /** On a prompt nobody typed that no result's boundary introduces: it draws its own. */
   showsOwnBoundary?: boolean
-  /** On a sub-chat's report: the calls in this transcript it answers, for the quote over its bubble. */
-  delegations?: PromptDelegation[]
   onAskUserQuestionSubmit: (
     toolUseId: string,
     questions: AskUserQuestionItem[],
@@ -637,7 +579,6 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   nextPromptTimestamp,
   nextPromptOrigin,
   showsOwnBoundary,
-  delegations,
   onAskUserQuestionSubmit,
   onExitPlanModeConfirm,
 }: TranscriptSingleRowProps) {
@@ -646,8 +587,10 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   if (message.kind === "user_prompt") {
     const bubble = !promptHasBody(message)
       ? null
+      : message.source?.kind === "ticket"
+        ? <TicketReplyMessage key={message.id} content={message.content} source={message.source} attachments={message.attachments} steered={message.steered} flash={flash} />
       : message.source
-        ? <SourcedMessage key={message.id} content={message.content} source={message.source} attachments={message.attachments} steered={message.steered} flash={flash} delegations={delegations} />
+        ? <SourcedMessage key={message.id} content={message.content} source={message.source} attachments={message.attachments} steered={message.steered} flash={flash} />
         : <UserMessage key={message.id} content={message.content} attachments={message.attachments} steered={message.steered} flash={flash} />
     rendered = showsOwnBoundary ? (
       // 20px apart, the gap two transcript rows sit at (see the row's padding
@@ -766,7 +709,6 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   && prev.nextPromptTimestamp === next.nextPromptTimestamp
   && prev.nextPromptOrigin === next.nextPromptOrigin
   && prev.showsOwnBoundary === next.showsOwnBoundary
-  && sameDelegations(prev.delegations, next.delegations)
   && prev.onAskUserQuestionSubmit === next.onAskUserQuestionSubmit
   && prev.onExitPlanModeConfirm === next.onExitPlanModeConfirm
   && sameMessage(prev.message, next.message)
@@ -867,7 +809,6 @@ export function buildResolvedTranscriptRows(
       nextPromptTimestamp: renderState.nextPromptTimestamp,
       nextPromptOrigin: renderState.nextPromptOrigin,
       showsOwnBoundary: renderState.showsOwnBoundary,
-      delegations: renderState.delegations,
     }
 
     if (renderState.shouldRender) {
@@ -940,7 +881,6 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
       nextPromptTimestamp={row.nextPromptTimestamp}
       nextPromptOrigin={row.nextPromptOrigin}
       showsOwnBoundary={row.showsOwnBoundary}
-      delegations={row.delegations}
       onAskUserQuestionSubmit={onAskUserQuestionSubmit}
       onExitPlanModeConfirm={onExitPlanModeConfirm}
     />
@@ -983,7 +923,6 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
       && prev.row.nextPromptTimestamp === next.row.nextPromptTimestamp
       && prev.row.nextPromptOrigin === next.row.nextPromptOrigin
       && prev.row.showsOwnBoundary === next.row.showsOwnBoundary
-      && sameDelegations(prev.row.delegations, next.row.delegations)
       && sameMessage(prev.row.message, next.row.message)
   }
 

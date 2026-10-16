@@ -8,9 +8,9 @@ import { InputPopover, PopoverMenuItem } from "./ChatPreferenceControls"
 import { DelegatorIcon } from "./delegator-icon"
 
 /**
- * What the new chat page's composer is told when the project can delegate:
- * the control to draw first in its options row, and the delegator the
- * message goes to, if it is going to one.
+ * What the new chat page's composer is told when the project has a
+ * delegator: the control to draw first in its options row, and the
+ * delegator the message goes to, if it is going to one.
  */
 export interface ComposerDelegate {
   control: ReactNode
@@ -33,7 +33,7 @@ export interface ComposerDelegate {
  * the way to make a new one.
  */
 export function DelegateControl({ delegators, target, projectName, onPick, onCreate }: {
-  /** The project's delegators, most recently active first. */
+  /** The project's delegators, most recently active first. Never empty: with none, the control is not drawn. */
   delegators: readonly SidebarThread[]
   target: SidebarThread | null
   projectName: string

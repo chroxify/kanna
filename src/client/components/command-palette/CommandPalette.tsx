@@ -1,5 +1,5 @@
 import { GENERAL_PROJECT_ID, isGeneralProjectId } from "../../../shared/general-project"
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   Archive,
@@ -10,9 +10,11 @@ import {
   Copy,
   CornerDownRight,
   ExternalLink,
+  CircleCheck,
+  CircleDashed,
+  Columns2,
   EyeOff,
   File,
-  FlaskConical,
   Folder,
   FolderOpen,
   Gauge,
@@ -25,18 +27,20 @@ import {
   Loader2,
   Lock,
   LockOpen,
-  Moon,
-  Network,
+  MessageCircle,
+  PanelLeft,
   PanelRight,
   Paperclip,
+  Pin,
+  PinOff,
   Plus,
+  Hash,
   Settings2,
   Share2,
   Sparkles,
   SquareMenu,
   SquarePen,
   SquareTerminal,
-  Sun,
   Terminal,
 } from "lucide-react"
 import type { ChatMode, ClaudeContextWindow, FsListResult, GitHubRecentReposResult, SidebarData } from "../../../shared/types"
@@ -71,7 +75,18 @@ import { useSidebarStore } from "../../stores/sidebarStore"
 import { useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
 import { useChatViewer, useViewerStore } from "../../stores/viewerStore"
+import { useSidebarViewStore } from "../../stores/sidebarViewStore"
+import { useDelegateStore } from "../../stores/delegateStore"
+import { delegatorDisplayTitle, projectDelegators, resolveDelegateTarget } from "../../lib/delegators"
+import { macSetup, macSetupAvailable, useMacSetupStore } from "../../lib/macApp"
+import { playChatNotificationSound } from "../../lib/chatSounds"
+import { useChatSoundPreferencesStore } from "../../stores/chatSoundPreferencesStore"
+import { requestChatBrowserNotificationPermission } from "../../lib/chatBrowserNotifications"
+import { resolveChatBrowserNotificationPreferenceAfterPermission } from "../../app/settings/shared"
+import type { SidebarView } from "../chat-ui/sidebar/SidebarViewSwitcher"
 import { toggleDelegatedPane } from "../chat-ui/DelegatedListButton"
+import { createDelegator } from "../chat-ui/create-delegator"
+import { useAppDialog } from "../ui/app-dialog"
 import { DelegatorIcon } from "../chat-ui/delegator-icon"
 import { PROVIDER_ICONS } from "../chat-ui/ChatPreferenceControls"
 import { UsageSection } from "../../app/settings/UsageSection"
@@ -100,6 +115,7 @@ import {
   type SidebarThread,
 } from "./actions"
 import { CloneProgressBlock, PaletteErrorRow, RepoResultContent } from "./add-project-rows"
+import { buildSettingsCommands, type SettingsCommandEffect } from "./settings-commands"
 import { ProjectChatSections, ThreadItem } from "./ProjectChatSections"
 import { useDirectoryBrowser } from "./useDirectoryBrowser"
 import { useRepoMetadata } from "./useRepoMetadata"
@@ -195,6 +211,36 @@ const ADD_PROJECT_STATIC_ACTIONS = [
 
 type AddProjectStaticActionId = (typeof ADD_PROJECT_STATIC_ACTIONS)[number]["id"]
 
+/**
+ * How a Settings row ranks against the root's other results when typing. A
+ * row only opens Settings, and its title is usually the bare setting name,
+ * which outscores the command that flips it ("Chat Tabs" over "Enable Chat
+ * Tabs"). Discounted, the command comes first and Enter does the thing.
+ */
+const ROOT_SETTINGS_RANK = 0.89
+
+/** The phone layout, where the sidebar is a page and not a column (KannaSidebar's `isPhoneLayout`). */
+const PHONE_LAYOUT_QUERY = "(max-width: 767px)"
+
+function useIsPhoneLayout() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const list = window.matchMedia(PHONE_LAYOUT_QUERY)
+      list.addEventListener("change", onChange)
+      return () => list.removeEventListener("change", onChange)
+    },
+    () => window.matchMedia(PHONE_LAYOUT_QUERY).matches,
+    () => false,
+  )
+}
+
+const SIDEBAR_VIEW_COMMANDS: { view: SidebarView; title: string; icon: typeof Folder; keywords: string[] }[] = [
+  { view: "recents", title: "Show Chats", icon: MessageCircle, keywords: ["recents", "chats view", "review", "in progress"] },
+  { view: "projects", title: "Show Projects", icon: Folder, keywords: ["projects view", "folders"] },
+  { view: "channels", title: "Show Channels", icon: Hash, keywords: ["channels view", "channel"] },
+  { view: "archived", title: "Show Archived", icon: Archive, keywords: ["archived chats", "archive", "old chats"] },
+]
+
 /** Truncates from the head so the most specific path segments stay visible. */
 export function truncatePathHead(path: string, maxLength = 40) {
   if (path.length <= maxLength) return path
@@ -248,6 +294,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const pendingSendTimes = usePendingSendStore((store) => (open ? store.sentAt : EMPTY_SEND_TIMES))
 
   const browser = useDirectoryBrowser(state.socket)
+  const dialog = useAppDialog()
 
   const editorPreset = useTerminalPreferencesStore((store) => store.editorPreset)
   // Editors this machine doesn't have are dropped from the palette rather than
@@ -256,10 +303,19 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const installedTerminals = useInstalledTerminals()
   const editorCommandTemplate = useTerminalPreferencesStore((store) => store.editorCommandTemplate)
 
-  // The palette only ever flips between the two concrete themes, so it keys off
-  // the *resolved* theme — on "system" it offers whichever one you aren't
-  // currently looking at, and picking it pins that choice.
-  const { resolvedTheme, setTheme } = useTheme()
+  // The saved preference, not the resolved one: "Theme: System" is offered
+  // whenever System isn't already the choice.
+  const { theme, setTheme } = useTheme()
+  const sidebarView = useSidebarViewStore((store) => store.view)
+  // This Mac's switches, in Kanna for Mac on its own server only. Asked for
+  // fresh on open (below), so a switch flipped in System Settings reads right.
+  const macAvailable = macSetupAvailable()
+  const macState = useMacSetupStore((store) => (macAvailable ? store.state : null))
+  // A phone has no sidebar to collapse: the sidebar is a page of its own there.
+  const isPhoneLayout = useIsPhoneLayout()
+  useEffect(() => {
+    if (open && macAvailable) macSetup.refresh()
+  }, [macAvailable, open])
 
   // Canonical composer semantics shared with ChatInput: provider is locked
   // once the chat's session has started, models come from the provider
@@ -279,12 +335,9 @@ export function CommandPalette({ state }: { state: KannaState }) {
   const isMac = (state.localProjects?.machine.platform ?? "darwin") === "darwin"
   // Reactive so the action's label flips between Focus and Exit Focus Mode.
   const focusModeEnabled = useFocusModeEnabled()
-  // The graph is shown in the previewer's pane, so only where a page has one
-  // (the same count a sub-chat's click reads: `chatPreviewHosts`).
-  const canShowGraph = useViewerStore((store) => store.chatPreviewHosts > 0)
-  // Reactive so the label says what choosing it will do. A chat picked from
-  // the graph has taken the graph's place, so the graph is not "shown" then.
-  const graphShown = useChatViewer()?.item.kind === "graph"
+  // The delegator's board is shown in the previewer's pane, so only where a
+  // page has one (the same count a sub-chat's click reads: `chatPreviewHosts`).
+  const canShowPane = useViewerStore((store) => store.chatPreviewHosts > 0)
   // The same open-ness the navbar's delegated button lights for.
   const viewerShown = useChatViewer() !== null
   // The active chat's row plus the project group that owns it (for the
@@ -306,6 +359,14 @@ export function CommandPalette({ state }: { state: KannaState }) {
     [sidebarData]
   )
   const settingsEntries = useMemo(() => getSettingsPaletteEntries(), [])
+  // The current project's delegators and which one the new chat page's
+  // delegate control sends to (useNewChatDelegate), for "Delegate to …".
+  const projectDelegatorThreads = useMemo(
+    () => projectDelegators(threads, state.activeProjectId),
+    [state.activeProjectId, threads]
+  )
+  const delegatePreference = useDelegateStore((store) => (state.activeProjectId ? store.projects[state.activeProjectId] : undefined))
+  const delegateTargetId = resolveDelegateTarget(projectDelegatorThreads, delegatePreference)?.chatId ?? null
 
   const close = useCallback(() => setOpen(false), [])
 
@@ -484,6 +545,50 @@ export function CommandPalette({ state }: { state: KannaState }) {
       .sort((left, right) => right.lastActivityAt - left.lastActivityAt)
   }, [projectChatsProjectId, threads])
 
+  // A failed write already shows as the app's command error
+  // (handleWriteAppSettings), so the rejection is only swallowed here.
+  const writeAppSettings = state.handleWriteAppSettings
+  const runSettingsEffect = useCallback((effect: SettingsCommandEffect) => {
+    switch (effect.type) {
+      case "theme":
+        setTheme(effect.theme)
+        void writeAppSettings({ theme: effect.theme }).catch(() => undefined)
+        return
+      case "patch":
+        void writeAppSettings(effect.patch).catch(() => undefined)
+        return
+      case "chatSounds":
+        void writeAppSettings({ chatSoundPreference: effect.preference }).catch(() => undefined)
+        if (effect.preference !== "never") {
+          void playChatNotificationSound(useChatSoundPreferencesStore.getState().chatSoundId, 1).catch(() => undefined)
+        }
+        return
+      case "notifications":
+        // As in Settings: the browser's prompt, on this choice; a denied or
+        // unsupported one saves Never rather than an option that never fires.
+        void (async () => {
+          const permission = effect.preference === "never" ? "granted" : await requestChatBrowserNotificationPermission()
+          const preference = resolveChatBrowserNotificationPreferenceAfterPermission(effect.preference, permission)
+          await writeAppSettings({ chatBrowserNotificationPreference: preference })
+        })().catch(() => undefined)
+        return
+      case "macLoginItem":
+        macSetup.setLoginItem(effect.enabled)
+        return
+      case "macOpenLoginItems":
+        macSetup.openLoginItems()
+        return
+      case "macKeepAwake":
+        macSetup.setKeepAwake(effect.change)
+        return
+    }
+  }, [setTheme, writeAppSettings])
+
+  const settingsCommands = useMemo(
+    () => buildSettingsCommands({ appSettings: state.appSettings, theme, mac: macState }),
+    [macState, state.appSettings, theme]
+  )
+
   const actions = useMemo<PaletteAction[]>(() => {
     const list: PaletteAction[] = []
     const chatShortcuts = (action: Parameters<typeof getBindingsForAction>[1]) =>
@@ -511,6 +616,55 @@ export function CommandPalette({ state }: { state: KannaState }) {
         // root already offers "New Chat in <current>").
         run: () => pushPage({ page: "project-chats" }),
       })
+      // How a project gets its first delegator: the new chat page's delegate
+      // control, which holds "New Delegator…", is there only once it has one.
+      // Found by typing, as on iOS, so the palette at rest does not offer it
+      // to every project.
+      list.push({
+        id: "new-delegator-current",
+        title: currentProjectTitle ? `New Delegator in ${currentProjectTitle}…` : "New Delegator…",
+        keywords: ["delegator", "delegate", "delegation", "delegated", "create delegator", "hand off", "orchestrate", "manager", "sub-chats", "subchats"],
+        icon: <DelegatorIcon className={ICON_CLASS} />,
+        searchOnly: true,
+        run: () => {
+          close()
+          void createDelegator({ projectId, socket: state.socket, dialog })
+        },
+      })
+      // The new chat page's delegate control: where a message typed there
+      // goes. Saved per project, as the control saves it, so it holds for the
+      // project's next new chat wherever it is picked from.
+      if (projectDelegatorThreads.length > 0) {
+        for (const delegator of projectDelegatorThreads) {
+          const title = delegatorDisplayTitle(delegator.title)
+          list.push({
+            id: `delegate-to-${delegator.chatId}`,
+            title: `Delegate to ${title}`,
+            keywords: ["delegate", "delegator", "delegation", "hand off", "send to", title],
+            icon: <DelegatorIcon className={ICON_CLASS} />,
+            hint: delegator.chatId === delegateTargetId ? "Current delegator" : "New chats",
+            searchOnly: true,
+            run: () => {
+              close()
+              useDelegateStore.getState().setPreference(projectId, { on: true, chatId: delegator.chatId })
+            },
+          })
+        }
+        list.push({
+          id: "dont-delegate",
+          title: "Don't Delegate",
+          keywords: ["delegate", "delegator", "stop delegating", "no delegator", "new chat", "off"],
+          icon: <SquarePen className={ICON_CLASS} />,
+          hint: delegateTargetId ? "New chats" : "Current",
+          searchOnly: true,
+          run: () => {
+            close()
+            // Keeps which one was last used, for turning it back on (useNewChatDelegate).
+            const store = useDelegateStore.getState()
+            store.setPreference(projectId, { on: false, chatId: store.projects[projectId]?.chatId })
+          },
+        })
+      }
     }
 
     // Focus mode narrows the sidebar to the current project. The exit variant
@@ -627,30 +781,57 @@ export function CommandPalette({ state }: { state: KannaState }) {
       run: () => pushPage({ page: "usage" }),
     })
 
-    const nextTheme = resolvedTheme === "dark" ? "light" : "dark"
-    list.push({
-      id: `set-theme-${nextTheme}`,
-      title: nextTheme === "dark" ? "Dark Mode" : "Light Mode",
-      keywords: ["theme", "appearance", "color scheme", "dark mode", "light mode", nextTheme],
-      icon: nextTheme === "dark" ? <Moon className={ICON_CLASS} /> : <Sun className={ICON_CLASS} />,
-      run: () => {
-        close()
-        setTheme(nextTheme)
-        void state.handleWriteAppSettings({ theme: nextTheme })
-      },
-    })
+    // Settings that change outright: theme, the app-wide switches, This Mac.
+    for (const command of settingsCommands) {
+      const Icon = command.icon
+      list.push({
+        id: command.id,
+        title: command.title,
+        keywords: command.keywords,
+        icon: <Icon className={ICON_CLASS} />,
+        searchOnly: command.searchOnly,
+        run: () => {
+          close()
+          runSettingsEffect(command.effect)
+        },
+      })
+    }
 
-    const recentChatsInSidebarOn = state.appSettings?.newSidebarEnabled !== false
-    list.push({
-      id: "toggle-recent-chats-sidebar",
-      title: recentChatsInSidebarOn ? "Disable New Sidebar" : "Enable New Sidebar",
-      keywords: ["labs", "new sidebar", "sidebar", "recents", "chats", "projects", "review", "in progress", "experimental", "toggle"],
-      icon: <FlaskConical className={ICON_CLASS} />,
-      run: () => {
-        close()
-        void state.handleWriteAppSettings({ newSidebarEnabled: !recentChatsInSidebarOn })
-      },
-    })
+    // The sidebar's view switcher, which the New Sidebar has and the old one
+    // doesn't. A collapsed sidebar opens, or the switch would show nothing.
+    if (state.appSettings?.newSidebarEnabled !== false) {
+      for (const command of SIDEBAR_VIEW_COMMANDS) {
+        if (command.view === sidebarView) continue
+        const Icon = command.icon
+        list.push({
+          id: `sidebar-view-${command.view}`,
+          title: command.title,
+          keywords: ["sidebar", "view", "switch view", "filter", ...command.keywords],
+          icon: <Icon className={ICON_CLASS} />,
+          searchOnly: true,
+          run: () => {
+            close()
+            useSidebarViewStore.getState().setView(command.view)
+            if (state.sidebarCollapsed && !isPhoneLayout) state.expandSidebar()
+          },
+        })
+      }
+    }
+
+    if (!isPhoneLayout) {
+      list.push({
+        id: "toggle-sidebar",
+        title: state.sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar",
+        keywords: ["sidebar", "left sidebar", "collapse", "expand", "panel", "toggle sidebar", "show", "hide"],
+        icon: <PanelLeft className={ICON_CLASS} />,
+        searchOnly: true,
+        run: () => {
+          close()
+          if (state.sidebarCollapsed) state.expandSidebar()
+          else state.collapseSidebar()
+        },
+      })
+    }
 
     if (onChatPage && projectId) {
       list.push({
@@ -685,6 +866,19 @@ export function CommandPalette({ state }: { state: KannaState }) {
             return
           }
           store.toggleVisibility(projectId, terminalChatKey)
+        },
+      })
+      list.push({
+        id: "split-terminal",
+        title: "Split Terminal",
+        keywords: ["add terminal", "new terminal", "split", "pane", "shell", "console"],
+        icon: <Columns2 className={ICON_CLASS} />,
+        shortcut: chatShortcuts("addSplitTerminal"),
+        searchOnly: true,
+        run: () => {
+          close()
+          // Opens the terminal too, as the shortcut does (ChatPage).
+          useTerminalLayoutStore.getState().addTerminal(projectId, undefined, getPaneChatKey("terminal", state.activeChatId))
         },
       })
       list.push({
@@ -745,31 +939,15 @@ export function CommandPalette({ state }: { state: KannaState }) {
       }
     }
 
-    if (state.activeChatId && canShowGraph) {
-      const graphChatId = state.activeChatId
-      list.push({
-        id: "show-graph",
-        title: graphShown ? "Hide Graph" : "Show Graph",
-        keywords: ["graph", "tree", "map", "overview", "sub-chats", "subchats", "sub chats", "delegation", "agents", "children", "show", "hide"],
-        icon: <Network className={ICON_CLASS} />,
-        run: () => {
-          close()
-          // The tree this chat is in, from its root down, beside the chat.
-          if (graphShown) useViewerStore.getState().close()
-          else useViewerStore.getState().open({ kind: "graph", chatId: graphChatId })
-        },
-      })
-    }
-
-    // The navbar's delegated button, for a delegator: the list of the chats
-    // under it, in the pane. No shortcut of its own, like Show Graph.
-    if (state.activeChatId && canShowGraph && currentChatRow?.delegator) {
+    // The navbar's tickets button, for a delegator: its tickets, in the
+    // pane, under the same icon. No shortcut of its own.
+    if (state.activeChatId && canShowPane && currentChatRow?.delegator) {
       const delegatorChatId = state.activeChatId
       list.push({
         id: "toggle-delegated",
-        title: viewerShown ? "Hide Delegated" : "Show Delegated",
-        keywords: ["delegated", "delegator", "delegate", "sub-chats", "subchats", "sub chats", "chats", "list", "pane", "show", "hide", "toggle"],
-        icon: <DelegatorIcon className={ICON_CLASS} />,
+        title: viewerShown ? "Hide Tickets" : "Show Tickets",
+        keywords: ["tickets", "ticket", "board", "delegated", "delegator", "delegate", "sub-chats", "subchats", "sub chats", "chats", "list", "pane", "show", "hide", "toggle"],
+        icon: <ListTodo className={ICON_CLASS} />,
         run: () => {
           close()
           toggleDelegatedPane(delegatorChatId)
@@ -801,6 +979,47 @@ export function CommandPalette({ state }: { state: KannaState }) {
         })
       }
       if (currentChatRow) {
+        const chatRow = currentChatRow
+        list.push({
+          id: "toggle-pin-chat",
+          title: chatRow.pinnedAt ? "Unpin Chat" : "Pin Chat",
+          keywords: ["pin", "unpin", "pinned", "keep", "favorite", "star", "top"],
+          icon: chatRow.pinnedAt ? <PinOff className={ICON_CLASS} /> : <Pin className={ICON_CLASS} />,
+          searchOnly: true,
+          run: () => {
+            close()
+            void state.handleToggleChatPin(chatRow)
+          },
+        })
+        list.push({
+          id: "toggle-chat-done",
+          title: chatRow.done ? "Mark Not Done" : "Mark Done",
+          keywords: ["done", "finished", "complete", "resolve", "board", "not done", "reopen", "undone"],
+          icon: chatRow.done ? <CircleDashed className={ICON_CLASS} /> : <CircleCheck className={ICON_CLASS} />,
+          searchOnly: true,
+          run: () => {
+            close()
+            void state.socket.command({ type: "chat.setDone", chatId: chatRow.chatId, done: !chatRow.done })
+              .catch((error) => console.warn("[kanna] could not mark the chat done:", error))
+          },
+        })
+        // As the chat menu's item (ThreadRow): Grok chats aren't given the
+        // chat tools, so one can't start delegating, only stop.
+        if (chatRow.delegator || chatRow.provider !== "grok") {
+          list.push({
+            id: "toggle-delegator",
+            title: chatRow.delegator ? "Stop Delegating" : "Make Delegator",
+            keywords: ["delegator", "delegate", "delegation", "hand off", "orchestrate", "manager", "sub-chats", "subchats", "ordinary chat"],
+            icon: <DelegatorIcon className={ICON_CLASS} />,
+            hint: "Next turn",
+            searchOnly: true,
+            run: () => {
+              close()
+              void state.socket.command({ type: "chat.setDelegator", chatId: chatRow.chatId, delegator: !chatRow.delegator })
+                .catch((error) => console.warn("[kanna] could not change whether the chat delegates:", error))
+            },
+          })
+        }
         list.push({
           id: "archive-chat",
           title: "Archive Chat",
@@ -976,14 +1195,14 @@ export function CommandPalette({ state }: { state: KannaState }) {
   }, [
     close,
     composer,
+    dialog,
     currentChatGroup,
     currentChatRow,
     currentProjectTitle,
     editorCommandTemplate,
     editorPreset,
     focusModeEnabled,
-    canShowGraph,
-    graphShown,
+    canShowPane,
     viewerShown,
     currentChatRow?.delegator,
     installedEditors,
@@ -993,11 +1212,19 @@ export function CommandPalette({ state }: { state: KannaState }) {
     onChatPage,
     projectId,
     pushPage,
-    resolvedTheme,
+    settingsCommands,
+    runSettingsEffect,
+    sidebarView,
+    isPhoneLayout,
+    projectDelegatorThreads,
+    delegateTargetId,
     widgetsChatKey,
     widgetsOpen,
-    setTheme,
     state.activeChatId,
+    state.sidebarCollapsed,
+    state.collapseSidebar,
+    state.expandSidebar,
+    state.handleToggleChatPin,
     state.appSettings?.newSidebarEnabled,
     state.availableProviders,
     state.handleArchiveChat,
@@ -1007,10 +1234,10 @@ export function CommandPalette({ state }: { state: KannaState }) {
     state.handleHideProject,
     state.handleOpenExternal,
     state.handleShareChat,
-    state.handleWriteAppSettings,
     state.keybindings,
     state.navbarLocalPath,
     state.localProjects?.projects.length,
+    state.socket,
   ])
 
   const trimmedQuery = query.trim()
@@ -1027,11 +1254,19 @@ export function CommandPalette({ state }: { state: KannaState }) {
       .sort((left, right) => right.score - left.score)
   }, [actions, trimmedQuery])
 
-  // Settings live only behind the "Settings…" sub-page, never in root results.
   const settingsResults = useMemo(() => {
     if (page !== "settings") return []
     if (!trimmedQuery) return settingsEntries
     return searchSettingsEntries(settingsEntries, trimmedQuery, settingsEntries.length)
+  }, [page, settingsEntries, trimmedQuery])
+
+  // Settings rows also answer a search from the root, as their own group.
+  // When they lived only behind "Settings…", typing "tabs" or "sleep" at the
+  // root found nothing, and a setting looked missing until you knew to step
+  // into the sub-page first.
+  const rootSettingsResults = useMemo(() => {
+    if (page !== "root" || !trimmedQuery) return []
+    return searchSettingsEntries(settingsEntries, trimmedQuery, 5)
   }, [page, settingsEntries, trimmedQuery])
 
   // Empty-query root sections — canonical logic shared with the sidebar's top
@@ -1360,6 +1595,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
         { value: projectSearchResults[0] ? `palette-project-${projectSearchResults[0].localPath}` : null, score: projectSearchResults[0]?.score ?? -Infinity },
         { value: threadResults[0] ? `thread-${threadResults[0].chatId}` : null, score: threadResults[0]?.score ?? -Infinity },
         { value: allProjectSearchResults[0] ? `all-project-${allProjectSearchResults[0].localPath}` : null, score: allProjectSearchResults[0]?.score ?? -Infinity },
+        { value: rootSettingsResults[0] ? `setting-${rootSettingsResults[0].id}` : null, score: rootSettingsResults[0] ? rootSettingsResults[0].score * ROOT_SETTINGS_RANK : -Infinity },
       ]
         .filter((candidate) => candidate.value !== null)
         .sort((left, right) => right.score - left.score)[0]?.value ?? ""
@@ -1391,6 +1627,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
     rankedActions,
     reviewResults,
     rootCloneRepo,
+    rootSettingsResults,
     settingsResults,
     threadResults,
     trimmedQuery,
@@ -1685,6 +1922,25 @@ export function CommandPalette({ state }: { state: KannaState }) {
               </CommandGroup>
             ) : null
 
+            const settingsGroup = rootSettingsResults.length > 0 ? (
+              <CommandGroup key="settings" heading="Settings">
+                {rootSettingsResults.map((entry) => (
+                  <CommandItem
+                    key={entry.id}
+                    value={`setting-${entry.id}`}
+                    onSelect={() => {
+                      close()
+                      navigate(entry.path)
+                    }}
+                  >
+                    <Settings2 className={ICON_CLASS} />
+                    <span className="min-w-0 truncate">{entry.title}</span>
+                    <span className="ml-auto shrink-0 pl-3 text-xs text-muted-foreground">{entry.sectionLabel}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ) : null
+
             // A pasted repo URL gets a pinned "Clone owner/repo" row.
             const cloneGroup = rootCloneRepo ? (
               <CommandGroup key="clone">
@@ -1714,6 +1970,7 @@ export function CommandPalette({ state }: { state: KannaState }) {
                 { node: projectsGroup, topScore: projectSearchResults[0]?.score ?? 0 },
                 { node: threadsGroup, topScore: threadResults[0]?.score ?? 0 },
                 { node: allProjectsGroup, topScore: allProjectSearchResults[0]?.score ?? 0 },
+                { node: settingsGroup, topScore: (rootSettingsResults[0]?.score ?? 0) * ROOT_SETTINGS_RANK },
               ]
                 .filter((group) => group.node !== null)
                 .sort((left, right) => right.topScore - left.topScore)

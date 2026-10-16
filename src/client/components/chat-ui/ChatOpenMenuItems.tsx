@@ -25,8 +25,7 @@ export function chatOpenMenuItems(thread: SidebarThread, actions: ChatReferenceA
 
 function ChatOpenMenuItems({ chatId, actions }: { chatId: string; actions: ChatReferenceActions }) {
   const chatTabsEnabled = useAppSettingsStore((store) => store.settings?.chatTabsEnabled === true)
-  // The page's own chat has no preview to offer (on the graph's page, where
-  // it is not also what the main view shows): only the way to its transcript.
+  // The page's own chat has no preview to offer: only the way to its transcript.
   const isPageChat = useViewerStore((store) => store.chatKey === chatId)
   return (
     <>

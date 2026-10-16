@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, Loader2, MessageSquare, Network, Radar, Square, X, type LucideIcon } from "lucide-react"
+import { Loader2, MessageSquare, Network, Radar, Square } from "lucide-react"
 import { PROVIDERS, type SubagentActivity, type TranscriptEntry } from "../../../../shared/types"
 import { cn } from "../../../lib/utils"
 import { useChatReferenceActions, useSidebarThread } from "../chat-reference"
@@ -16,6 +16,7 @@ import { WIDGET_ROW_REVEAL_CLASS, WidgetError, WidgetList, WidgetMoreRow, Widget
 import type { StopTaskControl } from "./useStopTask"
 import { SwapIn, WidgetCard } from "./WidgetCard"
 import { WidgetHoverCard } from "./WidgetHoverCard"
+import { TASK_STATUS_ICON, type StatusIcon } from "./task-status-icon"
 
 /**
  * What runs on the chat's behalf: subagents, background shells, monitors,
@@ -73,20 +74,8 @@ export function taskKindName(type: string): string {
   return KIND_NAMES[type] ?? `${type.charAt(0).toUpperCase()}${type.slice(1)}`
 }
 
-interface StatusIcon {
-  Icon: LucideIcon
-  className: string
-  label: string
-}
-
-export const TASK_STATUS_ICON: Record<SubagentActivity["status"], StatusIcon> = {
-  // Grey: work in progress is the normal state here, not something to flag.
-  running: { Icon: Loader2, className: "animate-spin text-muted-foreground", label: "Running" },
-  completed: { Icon: Check, className: "text-success", label: "Done" },
-  failed: { Icon: X, className: "text-destructive", label: "Failed" },
-  // Someone chose to end it: not an outcome to flag in red or green.
-  stopped: { Icon: Square, className: "text-muted-foreground", label: "Stopped" },
-}
+// Kept apart, in a leaf module: see there.
+export { TASK_STATUS_ICON }
 
 /**
  * A monitor waits on something else (a log line, a CI run) rather than works
@@ -270,6 +259,49 @@ export function TaskHoverCardContent({ task, now, canJump }: { task: SubagentAct
 /** Harness names, from the catalog the provider picker reads. */
 const PROVIDER_LABELS = new Map(PROVIDERS.map((provider) => [provider.id, provider.label]))
 
+export interface TaskRowActions {
+  showInChat: boolean
+  stop: boolean
+}
+
+/**
+ * What a task row's menu offers of its own: Show in Chat when the call that
+ * started it is in the loaded transcript, and Stop while it runs and can be
+ * stopped. One rule for every row, sub-chats included, whatever its status: a
+ * row gets a kebab whenever this offers something (a sub-chat's, whenever the
+ * chat's own menu is there too). A finished task can still be found in the
+ * chat, so it keeps its menu.
+ */
+export function taskRowActions(task: SubagentActivity, { canJump, isStopping }: { canJump: boolean; isStopping: boolean }): TaskRowActions {
+  return { showInChat: canJump, stop: task.status === "running" && Boolean(task.stoppable) && !isStopping }
+}
+
+const hasTaskRowActions = (actions: TaskRowActions) => actions.showInChat || actions.stop
+
+function TaskRowMenuItems({ actions, stopLabel, onJump, onStop }: {
+  actions: TaskRowActions
+  stopLabel: string
+  onJump?: () => void
+  onStop: () => void
+}) {
+  return (
+    <>
+      {actions.showInChat && onJump ? (
+        <ContextMenuItem onSelect={onJump}>
+          <MessageSquare className="size-3.5" />
+          <span>Show in Chat</span>
+        </ContextMenuItem>
+      ) : null}
+      {actions.stop ? (
+        <ContextMenuItem onSelect={onStop} className="text-destructive focus:text-destructive">
+          <Square className="size-3.5" />
+          <span>{stopLabel}</span>
+        </ContextMenuItem>
+      ) : null}
+    </>
+  )
+}
+
 /**
  * A sub-chat's row: a chat this one's agent started, listed with the
  * subagents because it is one, only run by Kanna and on any harness.
@@ -291,26 +323,11 @@ function ChatTaskRow({ task, now, isStopping, onStop, onJump, className }: {
   const thread = useSidebarThread(task.chatId)
   const actions = useChatReferenceActions()
   const { Icon, className: iconClassName, label } = statusIcon(task, isStopping)
-  const canStop = task.status === "running" && task.stoppable && !isStopping
   const harness = thread?.row.provider ? PROVIDER_LABELS.get(thread.row.provider) : undefined
   const chatId = task.chatId
-  const items = (
-    <>
-      {onJump ? (
-        <ContextMenuItem onSelect={onJump}>
-          <MessageSquare className="size-3.5" />
-          <span className="text-xs font-medium">Show in Chat</span>
-        </ContextMenuItem>
-      ) : null}
-      {canStop ? (
-        <ContextMenuItem onSelect={onStop} className="text-destructive focus:text-destructive">
-          <Square className="size-3.5" />
-          <span className="text-xs font-medium">Stop Chat</span>
-        </ContextMenuItem>
-      ) : null}
-    </>
-  )
-  const hasItems = Boolean(onJump) || canStop
+  const rowActions = taskRowActions(task, { canJump: Boolean(onJump), isStopping })
+  const hasItems = hasTaskRowActions(rowActions)
+  const items = <TaskRowMenuItems actions={rowActions} stopLabel="Stop Chat" onJump={onJump} onStop={onStop} />
   const openItems = thread && actions ? chatOpenMenuItems(thread, actions) : null
   return (
     <WidgetRow
@@ -408,7 +425,8 @@ export function TasksWidget({
           const taskDetails = task.type === "subagent" ? details.get(task.id) : undefined
           const title = taskTitle(task, taskDetails)
           const kind = taskKindName(task.type)
-          const canStop = task.status === "running" && task.stoppable && !isStopping
+          const rowActions = taskRowActions(task, { canJump: Boolean(toolId), isStopping })
+          const jump = toolId ? () => onJumpToToolCall(toolId) : undefined
           return (
             <WidgetRow
               key={task.id}
@@ -424,23 +442,12 @@ export function TasksWidget({
               meta={isStopping ? "Stopping…" : formatElapsed((task.endedAt ?? now) - task.startedAt)}
               // Opens the chat at the call that started it: a list of labels
               // with timers otherwise leaves "where is that?" open.
-              onActivate={toolId ? () => onJumpToToolCall(toolId) : undefined}
+              onActivate={jump}
               // Every row has a card, which says it all; a native tooltip on
               // top would be a second popover.
               menuLabel={`${kind} actions`}
-              menu={canStop ? (
-                <>
-                  {toolId ? (
-                    <ContextMenuItem onSelect={() => onJumpToToolCall(toolId)}>
-                      <MessageSquare className="size-3.5" />
-                      <span>Show in Chat</span>
-                    </ContextMenuItem>
-                  ) : null}
-                  <ContextMenuItem onSelect={() => stop(task.id)} className="text-destructive focus:text-destructive">
-                    <Square className="size-3.5" />
-                    <span>Stop {kind}</span>
-                  </ContextMenuItem>
-                </>
+              menu={hasTaskRowActions(rowActions) ? (
+                <TaskRowMenuItems actions={rowActions} stopLabel={`Stop ${kind}`} onJump={jump} onStop={() => stop(task.id)} />
               ) : undefined}
             />
           )
