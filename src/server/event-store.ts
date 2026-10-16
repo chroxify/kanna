@@ -354,6 +354,12 @@ export class EventStore {
    * the agent touches it. Paired with `onTurnEnded`.
    */
   onTurnStarted?: (chatId: string) => void
+  /**
+   * Fired when a message leaves a chat's queue. `taken`: a turn is about to
+   * start with it. Otherwise it was removed unsent. A delegator's hand-off
+   * rides on a queued message, and the board must know which happened.
+   */
+  onQueuedMessageRemoved?: (chatId: string, queuedMessageId: string, taken: boolean) => void
 
   constructor(dataDir = getDataDir(homedir()), private readonly diagnostics?: PerformanceLog) {
     this.dataDir = dataDir
@@ -2231,7 +2237,8 @@ export class EventStore {
     return { ...existing, content: update.content, attachments: [...update.attachments] }
   }
 
-  async removeQueuedMessage(chatId: string, queuedMessageId: string) {
+  /** `taken` when a turn takes it from the queue to start with it; see `onQueuedMessageRemoved`. */
+  async removeQueuedMessage(chatId: string, queuedMessageId: string, options?: { taken?: boolean }) {
     this.requireChat(chatId)
     const existing = this.getQueuedMessages(chatId)
     if (!existing.some((entry) => entry.id === queuedMessageId)) {
@@ -2245,6 +2252,7 @@ export class EventStore {
       queuedMessageId,
     }
     await this.append(this.queuedMessagesLogPath, event)
+    this.onQueuedMessageRemoved?.(chatId, queuedMessageId, Boolean(options?.taken))
   }
 
   /** `model` is what this turn runs with; omitted where the caller has none to name. */

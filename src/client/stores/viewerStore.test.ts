@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { DEFAULT_RIGHT_SIDEBAR_SIZE, persistedChatViewers, useRightSidebarStore } from "./rightSidebarStore"
+import { DEFAULT_RIGHT_SIDEBAR_SIZE, persistedChatViewers, persistedRightSidebarState, useRightSidebarStore } from "./rightSidebarStore"
+import { handleTicketLinkClick, parseTicketLink } from "../lib/tickets"
 import { getChatViewer, openViewer, useViewerStore } from "./viewerStore"
 
 const FILE = { kind: "file", projectId: "p1", path: "README.md" } as const
@@ -10,34 +11,38 @@ const IMAGE = { kind: "attachment", attachment: { url: "/media/a.png", name: "a.
 
 describe("viewerStore", () => {
   beforeEach(() => {
-    useRightSidebarStore.setState({ size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, chatViewers: {} })
+    useRightSidebarStore.setState({ size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, chatViewers: {}, viewerWidthPx: null })
     useViewerStore.setState({ chatKey: "", openCount: 0, chatJump: null, liveChatId: null, floor: null })
     useViewerStore.getState().setChat("chat-1")
   })
 
-  test("each chat keeps its own viewer, expanded state and width", () => {
+  test("each chat keeps its own viewer and expanded state", () => {
     openViewer(FILE)
     useViewerStore.getState().toggleExpanded()
-    useViewerStore.getState().setWidth(700)
 
     useViewerStore.getState().setChat("chat-2")
     expect(getChatViewer()).toBeNull()
 
     useViewerStore.getState().setChat("chat-1")
-    expect(getChatViewer()).toEqual({ item: FILE, expanded: true, widthPx: 700 })
+    expect(getChatViewer()).toEqual({ item: FILE, expanded: true })
   })
 
-  test("a dragged width holds for as long as the pane is open, whatever opens in it", () => {
+  test("a width dragged in one chat is the width in every chat, and stays when the pane is shut", () => {
     openViewer(FILE)
     useViewerStore.getState().setWidth(700)
-    openViewer({ ...FILE, path: "docs/b.md" })
-    expect(getChatViewer()?.widthPx).toBe(700)
+    useViewerStore.getState().setChat("chat-2")
     openViewer(DIFF)
-    expect(getChatViewer()?.widthPx).toBe(700)
-    // Shut and opened again, the pane takes the width of what it opens on.
+    expect(useRightSidebarStore.getState().viewerWidthPx).toBe(700)
+    useViewerStore.getState().setWidth(560)
     useViewerStore.getState().close()
-    openViewer(DIFF)
-    expect(getChatViewer()?.widthPx).toBeUndefined()
+    useViewerStore.getState().setChat("chat-1")
+    expect(useRightSidebarStore.getState().viewerWidthPx).toBe(560)
+    expect(getChatViewer()).toEqual({ item: FILE, expanded: false })
+  })
+
+  test("the width is kept across a reload, with the viewers", () => {
+    useViewerStore.getState().setWidth(640)
+    expect(persistedRightSidebarState(useRightSidebarStore.getState())).toMatchObject({ viewerWidthPx: 640 })
   })
 
   test("a review left for another chat reopens at the file it was scrolled to", () => {
@@ -66,32 +71,27 @@ describe("viewerStore", () => {
       "chat-2": { item: { kind: "chart", payload: { title: "x", type: "bar", data: [] } }, expanded: false },
       "chat-3": { item: { kind: "attachment", attachment: { url: "blob:abc", name: "a.png", mimeType: "image/png", size: 1 } }, expanded: false },
       "": { item: FILE, expanded: false },
-      "chat-4": { item: FILE, expanded: true, widthPx: 640 },
+      "chat-4": { item: FILE, expanded: true },
     })).toEqual({
       "chat-1": { item: { ...DIFF, path: "src/b.ts" }, expanded: false },
-      "chat-4": { item: FILE, expanded: true, widthPx: 640 },
+      "chat-4": { item: FILE, expanded: true },
     })
   })
 
   test("a chat opened over a file arrives in the pane as it stands", () => {
     openViewer(FILE)
-    useViewerStore.getState().setWidth(700)
     openViewer(CHAT)
-    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false, widthPx: 700 })
-    useViewerStore.getState().setWidth(520)
-    openViewer({ kind: "chat", chatId: "sub-2", back: ["sub-1"] })
-    expect(getChatViewer()?.widthPx).toBe(520)
+    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false })
   })
 
-  test("closing what opened over a chat preview goes back to the chat, at its width", () => {
+  test("closing what opened over a chat preview goes back to the chat", () => {
     openViewer(CHAT)
-    useViewerStore.getState().setWidth(520)
     openViewer(IMAGE)
     openViewer(FILE)
     expect(getChatViewer()?.item).toEqual(FILE)
 
     useViewerStore.getState().close()
-    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false, widthPx: 520 })
+    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false })
     useViewerStore.getState().close()
     expect(getChatViewer()).toBeNull()
   })
@@ -110,15 +110,15 @@ describe("viewerStore", () => {
 
   test("a chat preview comes back after a reload, also from under a chart", () => {
     expect(persistedChatViewers({
-      "chat-1": { item: { kind: "chat", chatId: "sub-2", back: ["sub-1"] }, expanded: false, widthPx: 520 },
+      "chat-1": { item: { kind: "chat", chatId: "sub-2", back: ["sub-1"] }, expanded: false },
       "chat-2": {
         item: { kind: "chart", payload: { title: "x", type: "bar", data: [] } },
         expanded: true,
-        returnTo: { item: CHAT, widthPx: 480 },
+        returnTo: { item: CHAT },
       },
     })).toEqual({
-      "chat-1": { item: { kind: "chat", chatId: "sub-2", back: ["sub-1"] }, expanded: false, widthPx: 520 },
-      "chat-2": { item: CHAT, expanded: true, widthPx: 480 },
+      "chat-1": { item: { kind: "chat", chatId: "sub-2", back: ["sub-1"] }, expanded: false },
+      "chat-2": { item: CHAT, expanded: true },
     })
   })
 
@@ -131,13 +131,12 @@ describe("viewerStore", () => {
     expect(getChatViewer()).toEqual({ item: FILE, expanded: false })
     useViewerStore.getState().closeAll()
 
-    // Over a docked chat preview: closing goes back to the chat, docked, at its width.
+    // Over a docked chat preview: closing goes back to the chat, docked.
     openViewer(CHAT)
-    useViewerStore.getState().setWidth(520)
     openViewer(VISUALIZATION, { expanded: true })
     expect(getChatViewer()?.expanded).toBe(true)
     useViewerStore.getState().close()
-    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false, widthPx: 520 })
+    expect(getChatViewer()).toEqual({ item: CHAT, expanded: false })
 
     // Something else opened in its place is not left over the chat either.
     openViewer(VISUALIZATION, { expanded: true })
@@ -239,22 +238,18 @@ describe("viewerStore", () => {
       expect(getChatViewer()).toBeNull()
     })
 
-    test("a file opened over the list goes back to the list at the list's width", () => {
+    test("a file opened over the list goes back to the list", () => {
       openOnList()
-      useViewerStore.getState().setWidth(440)
       openViewer(FILE)
-      expect(getChatViewer()?.widthPx).toBe(440)
       useViewerStore.getState().close()
-      expect(getChatViewer()).toEqual({ item: LIST, expanded: false, widthPx: 440 })
+      expect(getChatViewer()).toEqual({ item: LIST, expanded: false })
     })
 
-    test("a chat picked from the list keeps the pane's width both ways", () => {
+    test("a chat picked from the list goes back to it", () => {
       openOnList()
-      useViewerStore.getState().setWidth(440)
       openViewer({ kind: "chat", chatId: "sub-1", delegated: "chat-1" })
-      expect(getChatViewer()?.widthPx).toBe(440)
       useViewerStore.getState().stepBack()
-      expect(getChatViewer()).toEqual({ item: LIST, expanded: false, widthPx: 440 })
+      expect(getChatViewer()).toEqual({ item: LIST, expanded: false })
     })
 
     test("content that is gone leaves the list, not a shut pane", () => {
@@ -298,4 +293,30 @@ describe("viewerStore", () => {
       expect(getChatViewer()).toBeNull()
     })
   })
+
+  test("a ticket's link in another chat opens the ticket in that chat's pane, and Back shuts it", () => {
+    const clicked = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, defaultPrevented: false, prevented: false, preventDefault() { this.prevented = true } }
+    const ticket = parseTicketLink("/chat/deleg-9?ticket=tk_00000d")!
+    handleTicketLinkClick(clicked, ticket, { canPreview: true, open: ({ chatId, ticketId }) => openViewer({ kind: "ticket", chatId, ticketId }) })
+    expect(clicked.prevented).toBe(true)
+    expect(getChatViewer()?.item).toEqual({ kind: "ticket", chatId: "deleg-9", ticketId: "tk_00000d" })
+    // chat-1 is an ordinary chat: the ticket's board is not this page's to go back to.
+    useViewerStore.getState().stepBack()
+    expect(getChatViewer()).toBeNull()
+  })
+
+  test("on its delegator's page the same link has the board under it", () => {
+    useViewerStore.getState().setChat("deleg-9")
+    openViewer({ kind: "ticket", chatId: "deleg-9", ticketId: "tk_00000d" })
+    useViewerStore.getState().stepBack()
+    expect(getChatViewer()?.item).toEqual({ kind: "delegated", chatId: "deleg-9" })
+  })
+
+  test("a modified click on a ticket's link is left to the browser", () => {
+    const clicked = { button: 0, metaKey: true, ctrlKey: false, shiftKey: false, altKey: false, defaultPrevented: false, prevented: false, preventDefault() { this.prevented = true } }
+    handleTicketLinkClick(clicked, { chatId: "deleg-9", ticketId: "tk_00000d" }, { canPreview: true, open: () => openViewer({ kind: "ticket", chatId: "deleg-9", ticketId: "tk_00000d" }) })
+    expect(clicked.prevented).toBe(false)
+    expect(getChatViewer()).toBeNull()
+  })
 })
+

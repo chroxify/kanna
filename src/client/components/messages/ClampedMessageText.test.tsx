@@ -118,14 +118,13 @@ describe("the surface a folded message opens from", () => {
       onSendNow={() => undefined}
     />,
   )
-  const report = "<system-message>\nSub-chat completed: [Audit](/chat/abc) (chat id abc)\n</system-message>\n\nall clear"
 
   test("is the bubble, for a typed message and for one sent to the chat, delivered or queued", () => {
     const forms = [
       renderToStaticMarkup(<UserMessage content="hello" />),
       renderToStaticMarkup(<SourcedMessage content="hello" source={{ kind: "agent", chatId: "parent" }} />),
       queued({}),
-      queued({ content: report, source: { kind: "report", chatIds: ["abc"] } }),
+      queued({ content: "all clear", source: { kind: "agent", chatId: "parent" } }),
     ]
     for (const html of forms) {
       expect(surfaces(html)).toBe(1)
@@ -135,11 +134,11 @@ describe("the surface a folded message opens from", () => {
   })
 
   test("leaves out what sits around the bubble: the quote over it and a queued message's Remove", () => {
-    const html = queued({ content: report, source: { kind: "report", chatIds: ["abc"] } })
+    const html = queued({ content: "all clear", source: { kind: "agent", chatId: "parent" } })
     const surface = html.indexOf(`${FOLD_SURFACE_ATTRIBUTE}=""`)
     // The quote comes before the bubble opens, and Remove after it closes.
-    expect(html.indexOf(">Sub-chat<")).toBeGreaterThan(-1)
-    expect(html.indexOf(">Sub-chat<")).toBeLessThan(surface)
+    expect(html.indexOf(">Another agent<")).toBeGreaterThan(-1)
+    expect(html.indexOf(">Another agent<")).toBeLessThan(surface)
     const remove = html.indexOf('aria-label="Remove from queue"')
     // From inside the bubble's own tag to Remove, one more box closes than
     // opens: the bubble itself. So Remove is outside it.

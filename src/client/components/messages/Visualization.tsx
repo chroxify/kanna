@@ -1,12 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { Maximize2, Shapes } from "lucide-react"
+import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react"
+import { Download, Maximize2, Shapes } from "lucide-react"
 import { hasOpenLayer, resolveEscapePress } from "../../lib/escape-key"
 import { fetchVisualizationHeights, pickVisualizationHeight, recordVisualizationHeight, rememberedVisualizationHeights, rememberVisualizationHeights } from "../../lib/visualization-heights"
 import { openViewer } from "../../stores/viewerStore"
-import { ViewerSurface } from "../viewer/ViewerSurface"
+import { ViewerIconButton, ViewerSurface } from "../viewer/ViewerSurface"
+import { useOptionalAppDialog } from "../ui/app-dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
 import { type VisualizationArtifact, VISUALIZATION_EXPAND_BUTTON, visualizationHeight, visualizationLink, visualizationDownload, visualizationWidthBucket } from "../../../shared/visualization"
 import { prepareVisualizationDocument, type VisualizationTheme } from "../../../shared/visualization-host"
+import { cssColorAlpha, isPngSignature, visualizationImageFilename, visualizationImageName } from "../../../shared/visualization-capture"
 
 /** Read actual host tokens, rather than deriving dark mode from the OS. This also
  * covers custom transcript backgrounds and theme changes while a widget is live. */
@@ -32,6 +34,35 @@ export function visualizationTheme(): VisualizationTheme {
 const SETTLE_MS = 400
 /** After this long loaded, a change of height is the reader's doing (a row opened, a toggle), not the page's. */
 const SETTLED_FOR_GOOD_MS = 5000
+/** A page that has not drawn itself by now is not going to. */
+const CAPTURE_TIMEOUT_MS = 30_000
+/** Far past what the canvas limits allow a page to draw. */
+const CAPTURE_MAX_BYTES = 128 * 1024 * 1024
+
+/** The frame's page, drawn as a PNG (`shared/visualization-capture`). */
+export type VisualizationCapture = () => Promise<Blob>
+
+/**
+ * What is painted behind the frame, for the image's background: the page's
+ * own is transparent. The first opaque one up from the frame, or none, and
+ * the page falls back to its theme's `--background`.
+ */
+function backdropColor(element: Element | null): string | undefined {
+  for (let node = element?.parentElement; node; node = node.parentElement) {
+    const color = getComputedStyle(node).backgroundColor
+    if (cssColorAlpha(color) >= 1) return color
+  }
+  return undefined
+}
+
+function saveFile(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const link = window.document.createElement("a")
+  link.href = url
+  link.download = filename
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 
 /**
  * The saved document in its sandboxed frame, as tall as its content. Inline
@@ -43,9 +74,11 @@ const SETTLED_FOR_GOOD_MS = 5000
  * while the document loads, so nothing under it moves when the page comes
  * in. With none measured it starts at the height the agent declared.
  */
-function VisualizationFrame({ artifact, onLoaded, onEscape }: {
+function VisualizationFrame({ artifact, onLoaded, onEscape, captureRef }: {
   artifact: VisualizationArtifact
   onLoaded?: () => void
+  /** Set to a way to draw the page as a PNG while the frame is mounted. */
+  captureRef?: MutableRefObject<VisualizationCapture | null>
   /** Escape was pressed in the frame and the visualization had no use for it. */
   onEscape?: (repeat: boolean) => void
 }) {
@@ -119,8 +152,37 @@ function VisualizationFrame({ artifact, onLoaded, onEscape }: {
       frame.current.style.colorScheme = theme.appearance
       frame.current.contentWindow?.postMessage({ type: "kanna:theme", theme }, "*")
     }
+    const captures = new Map<string, { resolve: (png: Blob) => void, reject: (error: Error) => void, timer: number }>()
+    let lastCapture = 0
+    const capture: VisualizationCapture = () => new Promise((resolve, reject) => {
+      const target = frame.current?.contentWindow
+      if (!target) return reject(new Error("The visualization has not loaded yet."))
+      const id = `capture-${++lastCapture}`
+      const timer = window.setTimeout(() => {
+        captures.delete(id)
+        reject(new Error("The visualization did not finish drawing."))
+      }, CAPTURE_TIMEOUT_MS)
+      captures.set(id, { resolve, reject, timer })
+      target.postMessage({ type: "kanna:capture", id, background: backdropColor(frame.current) }, "*")
+    })
+    if (captureRef) captureRef.current = capture
     const onMessage = (event: MessageEvent) => {
       if (!frame.current?.contentWindow || event.source !== frame.current.contentWindow) return
+      if (event.data?.type === "kanna:captured") {
+        const pending = captures.get(event.data.id)
+        if (!pending) return
+        captures.delete(event.data.id)
+        window.clearTimeout(pending.timer)
+        const png: unknown = event.data.png
+        if (!(png instanceof Blob) || png.size > CAPTURE_MAX_BYTES) {
+          pending.reject(new Error(typeof event.data.error === "string" ? event.data.error.slice(0, 200) : "The visualization could not be drawn."))
+          return
+        }
+        void png.slice(0, 8).arrayBuffer().then((head) => {
+          if (isPngSignature(new Uint8Array(head))) pending.resolve(new Blob([png], { type: "image/png" }))
+          else pending.reject(new Error("The visualization did not draw a PNG."))
+        }, () => pending.reject(new Error("The visualization could not be drawn.")))
+      }
       if (event.data?.type === "kanna:ready") syncTheme()
       if (event.data?.type === "kanna:escape") onEscapeRef.current?.(event.data.repeat === true)
       if (event.data?.type === "kanna:resize") {
@@ -146,14 +208,7 @@ function VisualizationFrame({ artifact, onLoaded, onEscape }: {
       }
       if (event.data?.type === "kanna:download") {
         const download = visualizationDownload(event.data.download)
-        if (download) {
-          const url = URL.createObjectURL(new Blob([download.content], { type: download.mimeType }))
-          const link = window.document.createElement("a")
-          link.href = url
-          link.download = download.filename
-          link.click()
-          setTimeout(() => URL.revokeObjectURL(url), 1000)
-        }
+        if (download) saveFile(new Blob([download.content], { type: download.mimeType }), download.filename)
       }
       if (event.data?.type === "kanna:link") {
         const url = visualizationLink(event.data.url)
@@ -164,8 +219,16 @@ function VisualizationFrame({ artifact, onLoaded, onEscape }: {
     const observer = new MutationObserver(syncTheme)
     observer.observe(window.document.documentElement, { attributes: true, attributeFilter: ["class", "style"] })
     syncTheme()
-    return () => { window.removeEventListener("message", onMessage); observer.disconnect() }
-  }, [])
+    return () => {
+      window.removeEventListener("message", onMessage)
+      observer.disconnect()
+      if (captureRef?.current === capture) captureRef.current = null
+      for (const pending of captures.values()) {
+        window.clearTimeout(pending.timer)
+        pending.reject(new Error("The visualization was closed."))
+      }
+    }
+  }, [captureRef])
 
   if (failed) return <p role="alert" className="text-sm text-muted-foreground">This visualization could not be loaded.</p>
   return (
@@ -242,11 +305,53 @@ export function VisualizationExpandButton({ onClick }: { onClick: () => void }) 
  * to its own height, not the viewport's.
  */
 export function VisualizationFullView({ artifact, onClose }: { artifact: VisualizationArtifact; onClose: () => void }) {
+  const capture = useRef<VisualizationCapture | null>(null)
+  const dialog = useOptionalAppDialog()
+  const saving = useRef(false)
+
+  // Drawing starts on the click, while the name is being typed, so the file
+  // is ready by the time it is confirmed. It is the page as it is now: a tab
+  // or a slider set here is in the image.
+  const download = async () => {
+    if (saving.current || !capture.current) return
+    saving.current = true
+    try {
+      const png = capture.current()
+      png.catch(() => {})
+      const name = dialog
+        ? await dialog.prompt({
+            title: "Download as PNG",
+            description: "The .png extension is added for you.",
+            initialValue: visualizationImageName(artifact.title),
+            placeholder: "visualization",
+            confirmLabel: "Download",
+          })
+        : visualizationImageName(artifact.title)
+      if (name === null) return
+      try {
+        saveFile(await png, visualizationImageFilename(name, artifact.title))
+      } catch (error) {
+        const description = error instanceof Error ? error.message : undefined
+        if (dialog) await dialog.alert({ title: "Could not save the image", description })
+        else console.error("Could not save the visualization as a PNG", error)
+      }
+    } finally {
+      saving.current = false
+    }
+  }
+
   return (
-    <ViewerSurface label={`Visualization: ${artifact.title}`} icon={<Shapes />} title={artifact.title} onClose={onClose}>
+    <ViewerSurface
+      label={`Visualization: ${artifact.title}`}
+      icon={<Shapes />}
+      title={artifact.title}
+      onClose={onClose}
+      toolbar={<ViewerIconButton label="Download as PNG" onClick={() => void download()}><Download /></ViewerIconButton>}
+    >
       <div className="p-4">
         <VisualizationFrame
           artifact={artifact}
+          captureRef={capture}
           // A key pressed in the frame is the frame's, and the card never
           // hears it. The frame hands Escape back when it has no use for it.
           onEscape={(repeat) => {

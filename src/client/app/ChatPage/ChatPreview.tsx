@@ -33,6 +33,7 @@ import { createToolPayloadStore } from "./toolPayloadStore"
 import type { TranscriptJumpRequest } from "./transcriptScrollAnchors"
 import { useTranscriptPaddingBottom } from "./useTranscriptPaddingBottom"
 import { hasFileDragTypes, sameContextWindowSnapshot } from "./utils"
+import { usePublishTicketBoard } from "../../stores/ticketBoardStore"
 
 type ChatViewerItem = Extract<ViewerItem, { kind: "chat" }>
 
@@ -125,17 +126,18 @@ export const ChatPreview = memo(function ChatPreview({ item, context, onClose }:
   } : null), [openChat, pageActions])
 
   // What Back goes to, which the pane's levels say (`viewerLevelBelow`): the
-  // chat this one was stepped to from, the graph or the delegator's list it
-  // was picked from, or the list under everything in a delegator's pane.
+  // chat this one was stepped to from, the delegator's board or ticket it
+  // was picked from, or the board under everything in a delegator's pane.
   // Nothing, for a chat opened from an ordinary chat's transcript, which has
   // only a Close.
   const floor = useViewerStore((store) => store.floor)
-  const below = viewerLevelBelow({ item }, floor)
+  const pageChatKey = useViewerStore((store) => store.chatKey)
+  const below = viewerLevelBelow({ item }, floor, pageChatKey || null)
   const backLabel = below === "closed"
     ? null
     : below.item.kind === "chat"
       ? (backThread ? `Back to ${backThread.title}` : "Back")
-      : below.item.kind === "graph" ? "Back to graph" : "Back to delegated chats"
+      : below.item.kind === "ticket" ? "Back to ticket" : "Back to tickets"
   const handleBack = useViewerStore((store) => store.stepBack)
   const handleOpenInTab = useCallback(() => openChat(chatId, { target: "tab" }), [chatId, openChat])
 
@@ -191,6 +193,8 @@ function ChatPreviewSession({ chatId, title, projectId: sidebarProjectId, projec
 }) {
   const { socket } = context
   const session = useChatSession({ socket, chatId, fallbackProviders: context.fallbackProviders })
+  // A delegator previewed here has its tickets in its transcript too.
+  usePublishTicketBoard(session.chatSnapshot)
   const projectId = session.runtime?.projectId ?? sidebarProjectId
   const projectPath = session.runtime?.localPath ?? sidebarProjectPath
   const projectRepoLabel = useNavbarRepoLabel(projectId, projectPath ?? undefined)

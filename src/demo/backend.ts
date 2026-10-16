@@ -811,6 +811,8 @@ export class DemoBackend {
         return { type: "usage-limits", data: { providers: [] } }
       case "terminal":
         return null
+      case "ticket":
+        return { type: "ticket", data: null }
     }
   }
 

@@ -230,6 +230,12 @@ interface Props {
    * `onSubmit`'s: this only changes what the composer shows and carries.
    */
   delegate?: ComposerDelegate
+  /**
+   * Where the draft is kept, when it is not the chat's own: a ticket's
+   * composer writes to the delegator's chat but keeps its draft per ticket,
+   * so neither the chat's draft nor another ticket's is touched.
+   */
+  draftKey?: string
 }
 
 export interface ChatInputHandle {
@@ -268,7 +274,10 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   placeholder: placeholderOverride,
   secondary = false,
   delegate,
+  draftKey,
 }, forwardedRef) {
+  // The draft's key: the chat's, unless the composer keeps its own.
+  const draftId = draftKey ?? chatId ?? null
   // Actions only. Selecting the whole store re-rendered this component on
   // every keystroke in any composer, and on every attachment change anywhere.
   const {
@@ -319,14 +328,14 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     composer.selectProvider(pendingSignInProvider)
     setPendingSignInProvider(null)
   }, [pendingSignInProvider, unauthenticatedHarnesses, composer])
-  const [value, setValue] = useState(() => (chatId ? getDraft(chatId) : ""))
+  const [value, setValue] = useState(() => (draftId ? getDraft(draftId) : ""))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const isStandalone = useIsStandalone()
   // Leading/trailing gutter *inside* the controls scroller, standing in for the
   // horizontal padding its wrapper can't have. Standalone keeps the same 32px
   // net inset the old wrapper produced (20px padding + 12px spacer).
   const controlsScrollSpacer = cn("min-w-3", isStandalone && "min-w-8")
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => hydrateComposerAttachments(chatId ? getAttachmentDrafts(chatId) : []))
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => hydrateComposerAttachments(draftId ? getAttachmentDrafts(draftId) : []))
   const [uploadError, setUploadError] = useState<UploadErrorReport | null>(null)
   const uploadQueueRef = useRef<File[]>([])
   const activeUploadsRef = useRef(0)
@@ -335,7 +344,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const uploadGenerationRef = useRef(0)
   const removedAttachmentIdsRef = useRef<Set<string>>(new Set())
   const previousProjectIdRef = useRef<string | null>(projectId ?? null)
-  const latestChatIdRef = useRef<string | null>(chatId ?? null)
+  const latestDraftIdRef = useRef<string | null>(draftId)
   // "/" skill menu state. caretPosition mirrors the textarea selectionStart so
   // the menu can tell whether the caret is still inside the leading "/token".
   const [caretPosition, setCaretPosition] = useState(0)
@@ -442,7 +451,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!skillMention) return
     const { value: nextValue, caret: nextCaret } = applySkillCompletion(value, skillMention, skill.name)
     setValue(nextValue)
-    if (chatId) setDraft(chatId, nextValue)
+    if (draftId) setDraft(draftId, nextValue)
     setCaretPosition(nextCaret)
     requestAnimationFrame(() => {
       const element = textareaRef.current
@@ -451,7 +460,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       element.selectionStart = nextCaret
       element.selectionEnd = nextCaret
     })
-  }, [value, skillMention, chatId, setDraft])
+  }, [value, skillMention, draftId, setDraft])
 
   // "@" project menu derivations. The project list is read from the store
   // when the menu opens rather than subscribed to: the sidebar changes on
@@ -488,7 +497,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!mention) return
     const next = applyProjectMention(value, mention, project.localPath)
     setValue(next.value)
-    if (chatId) setDraft(chatId, next.value)
+    if (draftId) setDraft(draftId, next.value)
     setCaretPosition(next.caret)
     requestAnimationFrame(() => {
       const element = textareaRef.current
@@ -497,7 +506,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       element.selectionStart = next.caret
       element.selectionEnd = next.caret
     })
-  }, [value, caretPosition, chatId, setDraft])
+  }, [value, caretPosition, draftId, setDraft])
 
   const uploadedAttachments = attachments.filter((attachment) => attachment.status === "uploaded")
   const hasPendingUploads = attachments.some((attachment) => attachment.status === "uploading")
@@ -605,18 +614,18 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [chatId, secondary])
 
   useEffect(() => {
-    latestChatIdRef.current = chatId ?? null
-  }, [chatId])
+    latestDraftIdRef.current = draftId
+  }, [draftId])
 
   // The composer owns `value` and mirrors it into the store, so a draft cleared
   // from outside (the sidebar row's "Clear Draft") would otherwise leave the
   // text sitting here and re-save it on the next keystroke. Only ever empties:
   // an external *edit* has no claim on what you're typing.
-  const storedDraft = useChatInputStore((state) => (chatId ? state.drafts[chatId] : undefined))
+  const storedDraft = useChatInputStore((state) => (draftId ? state.drafts[draftId] : undefined))
   useEffect(() => {
-    if (!chatId || storedDraft !== undefined) return
+    if (!draftId || storedDraft !== undefined) return
     setValue((current) => (current === "" ? current : ""))
-  }, [chatId, storedDraft])
+  }, [draftId, storedDraft])
 
   // Only the new-chat composer gets an eager entry. An existing chat is left
   // without one until the user changes something, so its state keeps deriving
@@ -635,9 +644,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setUploadError(null)
     setAttachments((current) => {
       current.forEach(cleanupAttachmentPreview)
-      return hydrateComposerAttachments(chatId ? getAttachmentDrafts(chatId) : [])
+      return hydrateComposerAttachments(draftId ? getAttachmentDrafts(draftId) : [])
     })
-  }, [chatId, cleanupAttachmentPreview, getAttachmentDrafts])
+  }, [draftId, cleanupAttachmentPreview, getAttachmentDrafts])
 
   useEffect(() => {
     const previousProjectId = previousProjectIdRef.current
@@ -648,29 +657,29 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
 
     clearAttachments()
-    if (chatId) {
-      clearAttachmentDrafts(chatId)
+    if (draftId) {
+      clearAttachmentDrafts(draftId)
     }
-  }, [projectId, chatId, clearAttachments, clearAttachmentDrafts])
+  }, [projectId, draftId, clearAttachments, clearAttachmentDrafts])
 
   useEffect(() => {
     attachmentsRef.current = attachments
   }, [attachments])
 
   useEffect(() => {
-    if (!chatId) return
+    if (!draftId) return
 
     const persistedAttachments = attachments
       .filter((attachment) => attachment.status === "uploaded")
       .map(({ previewUrl: _previewUrl, status: _status, ...attachment }) => attachment)
 
     if (persistedAttachments.length === 0) {
-      clearAttachmentDrafts(chatId)
+      clearAttachmentDrafts(draftId)
       return
     }
 
-    setAttachmentDrafts(chatId, persistedAttachments)
-  }, [attachments, chatId, clearAttachmentDrafts, setAttachmentDrafts])
+    setAttachmentDrafts(draftId, persistedAttachments)
+  }, [attachments, draftId, clearAttachmentDrafts, setAttachmentDrafts])
 
   useEffect(() => () => {
     attachmentsRef.current.forEach(cleanupAttachmentPreview)
@@ -824,7 +833,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const existing = (textareaRef.current?.value ?? "").trimEnd()
     const next = existing ? `${existing}\n\n${text}` : text
     setValue(next)
-    if (chatId) setDraft(chatId, next)
+    if (draftId) setDraft(draftId, next)
     setCaretPosition(next.length)
     requestAnimationFrame(() => {
       const element = textareaRef.current
@@ -833,7 +842,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       element.selectionStart = next.length
       element.selectionEnd = next.length
     })
-  }, [chatId, setDraft])
+  }, [draftId, setDraft])
 
   useImperativeHandle(forwardedRef, () => ({
     enqueueFiles,
@@ -901,11 +910,11 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const attachmentsForSubmit = uploadedAttachments.map(({ previewUrl: _previewUrl, status: _status, ...attachment }) => attachment)
     const submitOptions = buildSubmitOptions(attachmentsForSubmit, submitIntentFor(options ?? {}))
     setValue("")
-    if (chatId) clearDraft(chatId)
+    if (draftId) clearDraft(draftId)
     if (textareaRef.current) textareaRef.current.style.height = "auto"
     clearAttachments({ cleanupPreviews: false })
-    if (latestChatIdRef.current) {
-      clearAttachmentDrafts(latestChatIdRef.current)
+    if (latestDraftIdRef.current) {
+      clearAttachmentDrafts(latestDraftIdRef.current)
     }
 
     try {
@@ -914,7 +923,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } catch (error) {
       console.error("[ChatInput] Submit failed:", error)
       setValue(nextValue)
-      if (chatId) setDraft(chatId, nextValue)
+      if (draftId) setDraft(draftId, nextValue)
       setAttachments(previousAttachments)
       setUploadError(previousUploadError)
     }
@@ -1055,7 +1064,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && value.length === 0 && previousPrompt) {
       event.preventDefault()
       setValue(previousPrompt)
-      if (chatId) setDraft(chatId, previousPrompt)
+      if (draftId) setDraft(draftId, previousPrompt)
       return
     }
 
@@ -1103,7 +1112,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       })
       const nextCaretPosition = textarea.selectionStart + trimmedText.length
       setValue(nextValue)
-      if (chatId) setDraft(chatId, nextValue)
+      if (draftId) setDraft(draftId, nextValue)
       requestAnimationFrame(() => {
         textarea.selectionStart = nextCaretPosition
         textarea.selectionEnd = nextCaretPosition
@@ -1273,7 +1282,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
               onChange={(event) => {
                 setValue(event.target.value)
                 setCaretPosition(event.target.selectionStart ?? event.target.value.length)
-                if (chatId) setDraft(chatId, event.target.value)
+                if (draftId) setDraft(draftId, event.target.value)
                 // No autoResize here: the layout effect on `value` runs it once
                 // the DOM has the new text. Calling it here too thrashed layout
                 // twice per keystroke.

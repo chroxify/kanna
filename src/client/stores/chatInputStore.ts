@@ -80,13 +80,45 @@ interface ChatInputState {
    * which fall back to chat activity.
    */
   draftStartedAt: Record<string, number>
+  /**
+   * When each draft was last changed, text or attachments. Unlike
+   * `draftStartedAt` it moves with every keystroke, so nothing that draws a
+   * list reads it: it only picks between two drafts (`resolveProjectNewChat`).
+   */
+  draftTouchedAt: Record<string, number>
   attachmentDrafts: Record<string, ChatAttachment[]>
+  /**
+   * The chats this browser started as new chats, and the project each is in.
+   * A new chat that is never sent from is deleted by the server once nothing
+   * is connected to speak for its draft, and the draft is then under an id no
+   * list shows. This is what still says which project it was being written
+   * in, so that a click on the project can bring it back.
+   */
+  startedChats: Record<string, StartedChat>
   setDraft: (chatId: string, value: string) => void
   clearDraft: (chatId: string) => void
   getDraft: (chatId: string) => string
   setAttachmentDrafts: (chatId: string, attachments: ChatAttachment[]) => void
   clearAttachmentDrafts: (chatId: string) => void
   getAttachmentDrafts: (chatId: string) => ChatAttachment[]
+  /** Everything one chat's draft is (text, attachments, its times), under another chat's id. */
+  moveDraft: (fromChatId: string, toChatId: string) => void
+  rememberStartedChat: (chatId: string, projectId: string) => void
+  forgetStartedChat: (chatId: string) => void
+}
+
+export interface StartedChat {
+  projectId: string
+  at: number
+}
+
+/** A started chat with nothing written in it is remembered this long, for a draft still to come. */
+const STARTED_CHAT_MEMORY_MS = 24 * 60 * 60 * 1000
+
+function without<TValue>(record: Record<string, TValue>, key: string): Record<string, TValue> {
+  if (!(key in record)) return record
+  const { [key]: _, ...rest } = record
+  return rest
 }
 
 export const useChatInputStore = create<ChatInputState>()(
@@ -94,14 +126,21 @@ export const useChatInputStore = create<ChatInputState>()(
     (set, get) => ({
       drafts: {},
       draftStartedAt: {},
+      draftTouchedAt: {},
       attachmentDrafts: {},
+      startedChats: {},
 
       setDraft: (chatId, value) =>
         set((state) => {
           if (!value) {
             const { [chatId]: _, ...rest } = state.drafts
             const { [chatId]: __, ...restStartedAt } = state.draftStartedAt
-            return { drafts: rest, draftStartedAt: restStartedAt }
+            return {
+              drafts: rest,
+              draftStartedAt: restStartedAt,
+              // Staged attachments are still a draft, last touched when they were.
+              draftTouchedAt: state.attachmentDrafts[chatId] ? state.draftTouchedAt : without(state.draftTouchedAt, chatId),
+            }
           }
           // Stamped on the clean → dirty flip only. Every later keystroke
           // leaves it alone, so the object identity holds still while you type
@@ -112,6 +151,7 @@ export const useChatInputStore = create<ChatInputState>()(
             draftStartedAt: startedAt == null
               ? { ...state.draftStartedAt, [chatId]: Date.now() }
               : state.draftStartedAt,
+            draftTouchedAt: { ...state.draftTouchedAt, [chatId]: Date.now() },
           }
         }),
 
@@ -119,7 +159,11 @@ export const useChatInputStore = create<ChatInputState>()(
         set((state) => {
           const { [chatId]: _, ...rest } = state.drafts
           const { [chatId]: __, ...restStartedAt } = state.draftStartedAt
-          return { drafts: rest, draftStartedAt: restStartedAt }
+          return {
+            drafts: rest,
+            draftStartedAt: restStartedAt,
+            draftTouchedAt: state.attachmentDrafts[chatId] ? state.draftTouchedAt : without(state.draftTouchedAt, chatId),
+          }
         }),
 
       getDraft: (chatId) => get().drafts[chatId] ?? "",
@@ -128,23 +172,60 @@ export const useChatInputStore = create<ChatInputState>()(
         set((state) => {
           if (attachments.length === 0) {
             const { [chatId]: _, ...rest } = state.attachmentDrafts
-            return { attachmentDrafts: rest }
+            return {
+              attachmentDrafts: rest,
+              draftTouchedAt: state.drafts[chatId] ? state.draftTouchedAt : without(state.draftTouchedAt, chatId),
+            }
           }
           return {
             attachmentDrafts: {
               ...state.attachmentDrafts,
               [chatId]: attachments,
             },
+            draftTouchedAt: { ...state.draftTouchedAt, [chatId]: Date.now() },
           }
         }),
 
       clearAttachmentDrafts: (chatId) =>
         set((state) => {
           const { [chatId]: _, ...rest } = state.attachmentDrafts
-          return { attachmentDrafts: rest }
+          return {
+            attachmentDrafts: rest,
+            draftTouchedAt: state.drafts[chatId] ? state.draftTouchedAt : without(state.draftTouchedAt, chatId),
+          }
         }),
 
       getAttachmentDrafts: (chatId) => get().attachmentDrafts[chatId] ?? [],
+
+      moveDraft: (fromChatId, toChatId) =>
+        set((state) => {
+          if (fromChatId === toChatId) return state
+          const move = <TValue,>(record: Record<string, TValue>) => {
+            const value = record[fromChatId]
+            const rest = without(record, fromChatId)
+            return value === undefined ? rest : { ...rest, [toChatId]: value }
+          }
+          return {
+            drafts: move(state.drafts),
+            draftStartedAt: move(state.draftStartedAt),
+            draftTouchedAt: move(state.draftTouchedAt),
+            attachmentDrafts: move(state.attachmentDrafts),
+          }
+        }),
+
+      rememberStartedChat: (chatId, projectId) =>
+        set((state) => {
+          const now = Date.now()
+          // Housekeeping rides along: a chat with no draft has nothing to be
+          // found by, once it is too old to be getting one.
+          const kept = Object.entries(state.startedChats).filter(([id, started]) => (
+            Boolean(state.drafts[id]) || Boolean(state.attachmentDrafts[id]) || now - started.at < STARTED_CHAT_MEMORY_MS
+          ))
+          return { startedChats: { ...Object.fromEntries(kept), [chatId]: { projectId, at: now } } }
+        }),
+
+      forgetStartedChat: (chatId) =>
+        set((state) => (chatId in state.startedChats ? { startedChats: without(state.startedChats, chatId) } : state)),
     }),
     {
       name: "chat-input-drafts",

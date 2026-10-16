@@ -88,3 +88,13 @@ export function useSectionOverrides(scope: string) {
   )
   return [overrides, setExpanded] as const
 }
+
+/** Folds or opens a list's section from outside a component: what its toggle does, for tests and commands. */
+export function setSectionExpanded(scope: string, sectionKey: string, expanded: boolean) {
+  useSidebarSectionStore.getState().setExpanded(scope, sectionKey, expanded)
+}
+
+/** A section's override as the store holds it now, or undefined for its default. */
+export function sectionExpanded(scope: string, sectionKey: string): boolean | undefined {
+  return useSidebarSectionStore.getState().overrides[scope]?.[sectionKey]
+}

@@ -31,7 +31,6 @@ import type {
 } from "../shared/types"
 import { normalizeToolCall } from "../shared/tools"
 import type { ClientCommand } from "../shared/protocol"
-import { stripDelegationBlock } from "../shared/delegation-block"
 import { AsyncQueue } from "./async-queue"
 import { resolveClaudeExecutable } from "./claude-executable"
 import { KannaToolRuntime, KannaToolEventFilter, type KannaToolHost } from "./kanna-tools"
@@ -1802,7 +1801,7 @@ export class AgentCoordinator {
   }
 
   private async dequeueAndStartQueuedMessage(chatId: string, queuedMessage: QueuedChatMessage, options?: { steered?: boolean }) {
-    await this.store.removeQueuedMessage(chatId, queuedMessage.id)
+    await this.store.removeQueuedMessage(chatId, queuedMessage.id, { taken: true })
     const chat = this.store.requireChat(chatId)
     const provider = this.resolveProvider(queuedMessage, chat.provider)
     const settings = this.getProviderSettings(provider, queuedMessage)
@@ -2151,7 +2150,12 @@ export class AgentCoordinator {
     // Orchestration: who sent this prompt when it was not the user, and which
     // sub-chats of this one are still running. The second matters most after a
     // steer, which ends the turn that was tracking them.
-    for (const notice of this.orchestration?.buildTurnNotices(args.chatId, args.source) ?? []) {
+    const turnNotices = this.orchestration?.buildTurnNotices(args.chatId, args.source, {
+      provider: args.provider,
+      planMode: args.planMode,
+      autoPlan: args.autoPlan,
+    }) ?? []
+    for (const notice of turnNotices) {
       wireContent = appendSystemMessageBlock(wireContent, notice)
     }
 
@@ -2259,6 +2263,9 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         planMode: args.planMode,
         delegator,
+        // Kanna, not the model, asks for a Codex plan to be approved, so the
+        // notice above cannot stop that one. See `agent-to-agent.ts`.
+        skipPlanApproval: this.orchestration?.isAgentToAgent(args.chatId, args.source) ?? false,
         onToolRequest,
       })
     }
@@ -2460,10 +2467,6 @@ export class AgentCoordinator {
     }
 
     const chat = this.store.requireChat(chatId)
-    // A delegator is told to delegate in its session instructions. The block
-    // the graph page adds to a message says the same, narrower, so it is
-    // dropped here and the turn carries one or the other, never both.
-    if (chat.delegator) command = { ...command, content: stripDelegationBlock(command.content) }
     // Sending a message to an archived chat resurrects it (viewing alone
     // never unarchives).
     if (chat.archivedAt) {
@@ -2538,13 +2541,11 @@ export class AgentCoordinator {
     extras?: { source?: MessageSource; effort?: string },
   ) {
     if (!extras?.source) this.analytics.track("message_sent")
-    // As in `send`: a delegator's turn does not also carry the graph page's block.
-    const content = this.store.getChat(command.chatId)?.delegator ? stripDelegationBlock(command.content) : command.content
     if (command.group && !command.steer) {
-      const merged = await this.mergeIntoLastQueuedMessage({ ...command, content })
+      const merged = await this.mergeIntoLastQueuedMessage(command)
       if (merged) return { queuedMessageId: merged.id }
     }
-    const queuedMessage = await this.enqueueMessage(command.chatId, content, command.attachments ?? [], {
+    const queuedMessage = await this.enqueueMessage(command.chatId, command.content, command.attachments ?? [], {
       provider: command.provider,
       model: command.model,
       modelOptions: command.modelOptions,
@@ -3413,6 +3414,7 @@ export class AgentCoordinator {
       active.pendingTool = pending
       active.status = "waiting_for_user"
       this.emitStateChange(chatId)
+      this.orchestration?.handleWaitingForUser(chatId)
     })
   }
 

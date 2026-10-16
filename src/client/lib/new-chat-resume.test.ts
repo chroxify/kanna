@@ -1,0 +1,232 @@
+import { describe, expect, test } from "bun:test"
+import type { SidebarChatRow } from "../../shared/types"
+import { hasNewChatDraft, resolveProjectNewChat, type NewChatDrafts } from "./new-chat-resume"
+import type { SidebarThread } from "./thread-sections"
+
+const PROJECT = "project-a"
+
+type Row = Partial<SidebarChatRow> & { chatId: string; archived?: boolean; lastActivityAt?: number }
+
+/** The project's chats as `flattenSidebarThreads` hands them over, from just the fields that matter here. */
+function threads(rows: Row[]): SidebarThread[] {
+  return rows.map(({ archived = false, lastActivityAt = 0, ...row }) => ({
+    chatId: row.chatId,
+    projectId: PROJECT,
+    archived,
+    lastActivityAt,
+    row: { title: "New Chat", ...row } as SidebarChatRow,
+  }) as SidebarThread)
+}
+
+function drafts(entries: Record<string, { text?: string; attachments?: number; touchedAt?: number; startedAt?: number }>): NewChatDrafts {
+  const result = { text: {} as Record<string, string>, attachments: {} as Record<string, unknown[]>, touchedAt: {} as Record<string, number>, startedAt: {} as Record<string, number> }
+  for (const [chatId, entry] of Object.entries(entries)) {
+    if (entry.text !== undefined) result.text[chatId] = entry.text
+    if (entry.attachments) result.attachments[chatId] = Array.from({ length: entry.attachments }, () => ({}))
+    if (entry.touchedAt !== undefined) result.touchedAt[chatId] = entry.touchedAt
+    if (entry.startedAt !== undefined) result.startedAt[chatId] = entry.startedAt
+  }
+  return result
+}
+
+function resolve({ projectChats = [], ...overrides }: Partial<Parameters<typeof resolveProjectNewChat>[0]> & { projectChats?: Row[] }) {
+  const projectThreads = threads(projectChats)
+  return resolveProjectNewChat({
+    entry: "project",
+    projectId: PROJECT,
+    projectThreads,
+    delegatorViewedAt: {},
+    isListed: (chatId) => projectThreads.some((thread) => thread.chatId === chatId),
+    drafts: drafts({}),
+    startedChats: {},
+    startingChatIds: new Set(),
+    ...overrides,
+  })
+}
+
+describe("resolveProjectNewChat", () => {
+  test("a click on a project opens its new chat that holds a draft", () => {
+    expect(resolve({
+      projectChats: [{ chatId: "empty" }, { chatId: "busy", lastMessageAt: 5 }],
+      drafts: drafts({ empty: { text: "half a thought", touchedAt: 10 } }),
+    })).toEqual({ kind: "open", chatId: "empty" })
+  })
+
+  test("an explicit New Chat makes a chat whatever is waiting", () => {
+    expect(resolve({
+      entry: "explicit",
+      projectChats: [{ chatId: "empty" }],
+      drafts: drafts({ empty: { text: "half a thought", touchedAt: 10 } }),
+    })).toEqual({ kind: "create" })
+  })
+
+  test("with no draft anywhere, a chat is made", () => {
+    // An empty chat with nothing written in it is not come back to.
+    expect(resolve({ projectChats: [{ chatId: "empty" }] })).toEqual({ kind: "create" })
+    expect(resolve({ projectChats: [{ chatId: "empty" }], drafts: drafts({ empty: { text: "  \n ", touchedAt: 10 } }) })).toEqual({ kind: "create" })
+  })
+
+  test("attachments staged without text are a draft", () => {
+    const staged = drafts({ empty: { attachments: 1, touchedAt: 10 } })
+    expect(hasNewChatDraft(staged, "empty")).toBe(true)
+    expect(resolve({ projectChats: [{ chatId: "empty" }], drafts: staged })).toEqual({ kind: "open", chatId: "empty" })
+  })
+
+  test("a chat with messages, a delegator and a sub-chat are not new chats, draft or no", () => {
+    expect(resolve({
+      projectChats: [
+        { chatId: "busy", lastMessageAt: 5 },
+        { chatId: "sub", parentChatId: "busy" },
+      ],
+      drafts: drafts({ busy: { text: "a", touchedAt: 3 }, sub: { text: "c", touchedAt: 1 } }),
+    })).toEqual({ kind: "create" })
+    // A delegator is opened for being one, not for its draft, which it keeps
+    // under its own id like any chat. A sub-chat delegator is neither.
+    expect(resolve({
+      projectChats: [
+        { chatId: "delegator", delegator: true, title: "Lead" },
+        { chatId: "sub", parentChatId: "busy", delegator: true },
+      ],
+      drafts: drafts({ delegator: { text: "b", touchedAt: 2 }, sub: { text: "c", touchedAt: 1 } }),
+    })).toEqual({ kind: "delegator", chatId: "delegator" })
+    // One the user started and an agent took on later is still theirs.
+    expect(resolve({
+      projectChats: [{ chatId: "adopted", parentChatId: "busy", adopted: true }],
+      drafts: drafts({ adopted: { text: "mine", touchedAt: 1 } }),
+    })).toEqual({ kind: "open", chatId: "adopted" })
+  })
+
+  test("another project's draft is not this project's", () => {
+    expect(resolve({
+      projectChats: [],
+      isListed: () => true,
+      drafts: drafts({ elsewhere: { text: "over there", touchedAt: 10 } }),
+      startedChats: { elsewhere: { projectId: "project-b" } },
+    })).toEqual({ kind: "create" })
+  })
+
+  test("of several drafts, the one changed most recently", () => {
+    expect(resolve({
+      projectChats: [{ chatId: "older" }, { chatId: "newer" }],
+      drafts: drafts({ older: { text: "first", touchedAt: 10 }, newer: { text: "second", touchedAt: 20 } }),
+    })).toEqual({ kind: "open", chatId: "newer" })
+    // A draft from before its changes were timed goes by when it was begun.
+    expect(resolve({
+      projectChats: [{ chatId: "older" }, { chatId: "newer" }],
+      drafts: drafts({ older: { text: "first", startedAt: 30 }, newer: { text: "second", touchedAt: 20 } }),
+    })).toEqual({ kind: "open", chatId: "older" })
+  })
+
+  test("a draft whose chat was cleared away is carried into a new one", () => {
+    expect(resolve({
+      projectChats: [],
+      drafts: drafts({ pruned: { text: "written before lunch", touchedAt: 10 } }),
+      startedChats: { pruned: { projectId: PROJECT } },
+    })).toEqual({ kind: "carry", fromChatId: "pruned" })
+  })
+
+  test("nothing is taken for gone before the sidebar has loaded", () => {
+    expect(resolve({
+      projectChats: [],
+      isListed: null,
+      drafts: drafts({ started: { text: "still there, probably", touchedAt: 10 } }),
+      startedChats: { started: { projectId: PROJECT } },
+    })).toEqual({ kind: "create" })
+  })
+
+  test("a started chat the server has not answered for yet is opened, not carried", () => {
+    expect(resolve({
+      projectChats: [],
+      drafts: drafts({ starting: { text: "typed at once", touchedAt: 10 } }),
+      startedChats: { starting: { projectId: PROJECT } },
+      startingChatIds: new Set(["starting"]),
+    })).toEqual({ kind: "open", chatId: "starting" })
+  })
+
+  test("a started chat that is listed elsewhere, as archived say, is not carried", () => {
+    expect(resolve({
+      projectChats: [],
+      isListed: () => true,
+      drafts: drafts({ archived: { text: "put away", touchedAt: 10 } }),
+      startedChats: { archived: { projectId: PROJECT } },
+    })).toEqual({ kind: "create" })
+  })
+
+  test("a chat that is there wins a tie with one to be made again", () => {
+    expect(resolve({
+      projectChats: [{ chatId: "live" }],
+      drafts: drafts({ live: { text: "here", touchedAt: 10 }, pruned: { text: "gone", touchedAt: 10 } }),
+      startedChats: { pruned: { projectId: PROJECT } },
+    })).toEqual({ kind: "open", chatId: "live" })
+    expect(resolve({
+      projectChats: [{ chatId: "live" }],
+      drafts: drafts({ live: { text: "here", touchedAt: 10 }, pruned: { text: "gone", touchedAt: 11 } }),
+      startedChats: { pruned: { projectId: PROJECT } },
+    })).toEqual({ kind: "carry", fromChatId: "pruned" })
+  })
+
+  describe("a project with a delegator", () => {
+    test("opens the delegator, and makes nothing", () => {
+      expect(resolve({ projectChats: [{ chatId: "lead", delegator: true }, { chatId: "busy", lastMessageAt: 5 }] }))
+        .toEqual({ kind: "delegator", chatId: "lead" })
+    })
+
+    test("of several, the one last viewed here", () => {
+      expect(resolve({
+        projectChats: [
+          { chatId: "active", delegator: true, lastActivityAt: 50 },
+          { chatId: "viewed", delegator: true, lastActivityAt: 10 },
+        ],
+        delegatorViewedAt: { active: 100, viewed: 200 },
+      })).toEqual({ kind: "delegator", chatId: "viewed" })
+    })
+
+    test("of several none of which has been viewed here, the most recently active", () => {
+      expect(resolve({
+        projectChats: [
+          { chatId: "quiet", delegator: true, lastActivityAt: 10 },
+          { chatId: "active", delegator: true, lastActivityAt: 50 },
+        ],
+        // Viewed, but no longer one of this project's delegators.
+        delegatorViewedAt: { elsewhere: 300 },
+      })).toEqual({ kind: "delegator", chatId: "active" })
+    })
+
+    test("a pinned delegator counts like any other", () => {
+      expect(resolve({ projectChats: [{ chatId: "pinned", delegator: true, pinnedAt: 1 }] }))
+        .toEqual({ kind: "delegator", chatId: "pinned" })
+    })
+
+    test("wins over a new chat with a draft, which is left where it is", () => {
+      expect(resolve({
+        projectChats: [{ chatId: "lead", delegator: true }, { chatId: "drafted" }],
+        drafts: drafts({ drafted: { text: "for the delegator", touchedAt: 10 } }),
+      })).toEqual({ kind: "delegator", chatId: "lead" })
+    })
+
+    test("brings back a draft whose new chat is gone, without going to it", () => {
+      expect(resolve({
+        projectChats: [{ chatId: "lead", delegator: true }],
+        drafts: drafts({ pruned: { text: "written before lunch", touchedAt: 10 } }),
+        startedChats: { pruned: { projectId: PROJECT } },
+      })).toEqual({ kind: "delegator", chatId: "lead", restoreDraftFrom: "pruned" })
+    })
+
+    test("an archived delegator is put away, and is not opened", () => {
+      expect(resolve({ projectChats: [{ chatId: "put-away", delegator: true, archived: true, lastMessageAt: 5 }] }))
+        .toEqual({ kind: "create" })
+    })
+
+    test("a delegator another chat's agent started is that chat's, and is not opened", () => {
+      expect(resolve({ projectChats: [{ chatId: "born-under", delegator: true, parentChatId: "busy" }, { chatId: "busy", lastMessageAt: 5 }] }))
+        .toEqual({ kind: "create" })
+      // One the user made and an agent took on later is still the project's.
+      expect(resolve({ projectChats: [{ chatId: "adopted", delegator: true, parentChatId: "busy", adopted: true }] }))
+        .toEqual({ kind: "delegator", chatId: "adopted" })
+    })
+
+    test("an explicit New Chat still makes a chat", () => {
+      expect(resolve({ entry: "explicit", projectChats: [{ chatId: "lead", delegator: true }] })).toEqual({ kind: "create" })
+    })
+  })
+})

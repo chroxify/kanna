@@ -167,8 +167,7 @@ export interface ChatRecord {
   /**
    * Set while the parent has not yet been told how this sub-chat's work ended.
    * Persisted so a result that lands across a restart is still delivered, and
-   * cleared by whichever comes first: the report, or a `wait_for_chats` that
-   * returned the result.
+   * cleared by the report.
    *
    * A report sent while the sub-chat still waits on work it handed off does
    * not clear it: the work has not ended, and the turn that work wakes owes
