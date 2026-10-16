@@ -117,3 +117,15 @@ describe("markdownComponents", () => {
     expect(html).not.toContain('target="_blank"')
   })
 })
+
+describe("a ticket's link", () => {
+  test("renders as written, with the ticket's address", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <TranscriptMarkdown text="See [#8 One live row per hand-off](/chat/deleg-9?ticket=tk_00000d)." />
+      </MemoryRouter>,
+    )
+    expect(html).toMatch(/<a[^>]*href="\/chat\/deleg-9\?ticket=tk_00000d"[^>]*>#8 One live row per hand-off<\/a>/)
+  })
+})
+

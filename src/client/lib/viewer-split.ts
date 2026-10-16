@@ -1,3 +1,5 @@
+import type { ViewerWidthClass } from "../stores/viewerStore"
+
 /**
  * How the chat page's split, the chat column beside the viewer's pane,
  * follows the viewer.
@@ -67,4 +69,42 @@ export function resolveViewerSplitMove(
  */
 export function viewerCardEnters(previous: ViewerPaneState, next: ViewerPaneState): boolean {
   return previous === "closed" && next !== "closed"
+}
+
+/**
+ * The viewer's pane for anything but a review of changes (a file, an
+ * attachment, a chart): room for the markdown preview's 72ch measure with
+ * air either side, or about 100 columns of code, and no wider, so the chat
+ * keeps the rest of the room.
+ */
+const VIEWER_PREVIEW_PANE_WIDTH_PX = 800
+/**
+ * The viewer's pane for a sub-chat: half the room, so the chat it reports to
+ * keeps the other half, between a width its composer still fits in and the
+ * transcript column's own.
+ */
+const VIEWER_CHAT_PANE_MIN_WIDTH_PX = 420
+const VIEWER_CHAT_PANE_MAX_WIDTH_PX = 800
+
+/**
+ * How wide a docked viewer is: the width you dragged it to, in this chat or
+ * any other (`viewerWidthPx`), else the one for what's open. Never so wide
+ * the chat goes under its minimum. The narrowing is only here, where it is
+ * laid out: the dragged width stays as it was, and a wider window gets it
+ * back.
+ */
+export function dockedViewerPaneWidthPx({ splitWidthPx, chatMinPx, draggedWidthPx, widthClass }: {
+  splitWidthPx: number
+  chatMinPx: number
+  draggedWidthPx: number | null
+  widthClass: ViewerWidthClass | null
+}): number {
+  const wanted = draggedWidthPx ?? (
+    widthClass === "review"
+      ? Infinity
+      : widthClass === "chat"
+        ? Math.min(VIEWER_CHAT_PANE_MAX_WIDTH_PX, Math.max(VIEWER_CHAT_PANE_MIN_WIDTH_PX, splitWidthPx / 2))
+        : VIEWER_PREVIEW_PANE_WIDTH_PX
+  )
+  return Math.max(0, Math.min(splitWidthPx - chatMinPx, wanted))
 }

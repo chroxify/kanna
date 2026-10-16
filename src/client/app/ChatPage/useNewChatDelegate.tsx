@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react"
 import { useNavigate } from "react-router-dom"
 import type { AgentProvider, ChatAttachment, ModelOptions } from "../../../shared/types"
+import { createDelegator } from "../../components/chat-ui/create-delegator"
 import { DelegateControl, type ComposerDelegate } from "../../components/chat-ui/DelegateControl"
 import type { useAppDialog } from "../../components/ui/app-dialog"
 import { projectDelegators, resolveDelegateTarget } from "../../lib/delegators"
@@ -32,7 +33,7 @@ export interface DelegatedSendOptions {
  * there. Nothing of the page's chat is used but its project.
  */
 export function useNewChatDelegate({ enabled, projectId, socket, dialog }: {
-  /** The page is a new chat's: empty, and not the graph's. */
+  /** The page is a new chat's: empty. */
   enabled: boolean
   projectId: string | null
   socket: KannaSocket
@@ -62,49 +63,34 @@ export function useNewChatDelegate({ enabled, projectId, socket, dialog }: {
     store.setPreference(projectId, chatId ? { on: true, chatId } : { on: false, chatId: store.projects[projectId]?.chatId })
   }, [projectId])
 
-  const handleCreate = useCallback(async () => {
-    if (!projectId) return
-    // A delegator is kept and come back to, so it is named for what it looks
-    // after, here, before it exists. Left blank it is "New Chat" until its
-    // first message names it, as any chat is.
-    const name = await dialog.prompt({
-      title: "New Delegator",
-      description: "A chat that hands work to the chats under it instead of doing it. Name it for what it looks after.",
-      placeholder: "Name (optional)",
-      allowEmpty: true,
-      confirmLabel: "Create",
-    })
-    if (name === null) return
-    try {
-      const { chatId } = await socket.command<{ chatId: string }>({ type: "chat.create", projectId, delegator: true })
-      if (name) await socket.command({ type: "chat.rename", chatId, title: name })
-      useDelegateStore.getState().setPreference(projectId, { on: true, chatId })
-    } catch (error) {
-      await dialog.alert({
-        title: "Could not create the delegator",
-        description: error instanceof Error ? error.message : String(error),
-        closeLabel: "OK",
-      })
-    }
+  const handleCreate = useCallback(() => {
+    if (projectId) void createDelegator({ projectId, socket, dialog })
   }, [dialog, projectId, socket])
 
   const targetChatId = target?.chatId ?? null
   const targetTitle = target?.title ?? ""
   const targetProvider = target?.row.provider ?? null
-  const delegate = useMemo<ComposerDelegate | undefined>(() => (enabled && projectId ? {
+  // Only in a project that has a delegator. A grey "Delegate" under every
+  // new chat's input put the feature in front of projects that have never
+  // used it; a project's first delegator is made from the command palette
+  // or a chat's menu (`createDelegator`), and the control is here from then
+  // on. It is one item in a single row of options, so the row's other items
+  // move along by its width when it comes and nothing changes height.
+  const hasDelegators = delegators.length > 0
+  const delegate = useMemo<ComposerDelegate | undefined>(() => (enabled && projectId && hasDelegators ? {
     control: (
       <DelegateControl
         delegators={delegators}
         target={target}
         projectName={projectName}
         onPick={handlePick}
-        onCreate={() => { void handleCreate() }}
+        onCreate={handleCreate}
       />
     ),
     target: targetChatId ? { chatId: targetChatId, title: targetTitle, provider: targetProvider } : null,
     // `target` is covered by the three fields read off it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  } : undefined), [delegators, enabled, handleCreate, handlePick, projectId, projectName, targetChatId, targetProvider, targetTitle])
+  } : undefined), [delegators, enabled, handleCreate, handlePick, hasDelegators, projectId, projectName, targetChatId, targetProvider, targetTitle])
 
   const sendToDelegator = useCallback(async (chatId: string, content: string, options?: DelegatedSendOptions) => {
     const message = {

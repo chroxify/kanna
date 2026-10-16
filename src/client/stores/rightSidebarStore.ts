@@ -50,8 +50,6 @@ export interface ChatViewerState {
    * over the chat. Gone once you expand or collapse it yourself.
    */
   expandedBefore?: boolean
-  /** The pane's width once you've dragged it; until then, the default for what's open. */
-  widthPx?: number
   /**
    * The file the diff list is scrolled to, which the Changes card lights.
    * Apart from `item`, the file that was opened, which decides where the
@@ -60,11 +58,11 @@ export interface ChatViewerState {
    */
   reviewPath?: string
   /**
-   * The chat preview this replaced, and the width it had. A file or an image
-   * opened while a chat is in the previewer is a look at something, and
-   * closing it goes back to the chat instead of shutting the pane on it.
+   * The chat preview this replaced. A file or an image opened while a chat
+   * is in the previewer is a look at something, and closing it goes back to
+   * the chat instead of shutting the pane on it.
    */
-  returnTo?: { item: Extract<ViewerItem, { kind: "chat" | "graph" | "delegated" }>; widthPx?: number }
+  returnTo?: { item: Extract<ViewerItem, { kind: "chat" | "delegated" | "ticket" }> }
 }
 
 interface RightSidebarState {
@@ -73,6 +71,13 @@ interface RightSidebarState {
   projectUi: Record<string, ProjectRightSidebarUiState>
   /** By chat id; see viewerStore for who reads and writes it. */
   chatViewers: Record<string, ChatViewerState>
+  /**
+   * The viewer's docked width once you've dragged it, in every chat: set in
+   * one, it is the width in all of them. Until then, the default for what's
+   * open. Kept as dragged; a window too narrow for it narrows the pane where
+   * it is laid out (`ChatPage`), not here, so a wider window gets it back.
+   */
+  viewerWidthPx: number | null
   /**
    * `chatKey` is the chat whose own state to change (see lib/paneVisibility);
    * null or omitted changes the project's.
@@ -87,6 +92,7 @@ interface RightSidebarState {
   clearProject: (projectId: string) => void
   /** Sets (or, with null, clears) what a chat has open in the viewer. */
   setChatViewer: (chatKey: string, viewer: ChatViewerState | null) => void
+  setViewerWidth: (widthPx: number) => void
 }
 
 export const DEFAULT_RIGHT_SIDEBAR_SIZE = 420
@@ -138,14 +144,15 @@ function withWidgetsOpen(
  */
 export function migrateRightSidebarStore(persistedState: unknown, version = 0) {
   if (!persistedState || typeof persistedState !== "object") {
-    return { size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, chatViewers: {} }
+    return { size: DEFAULT_RIGHT_SIDEBAR_SIZE, projects: {}, projectUi: {}, chatViewers: {}, viewerWidthPx: null }
   }
 
   const state = persistedState as {
     size?: number
     projects?: Record<string, Partial<{ isVisible: boolean; rightPanel: string; widgetsOpen: boolean; chats: Record<string, boolean> }>>
     projectUi?: Record<string, Partial<ProjectRightSidebarUiState> & { viewMode?: unknown }>
-    chatViewers?: Record<string, ChatViewerState>
+    chatViewers?: Record<string, ChatViewerState & { widthPx?: number }>
+    viewerWidthPx?: number | null
   }
   const projects = Object.fromEntries(
     Object.entries(state.projects ?? {}).map(([projectId, layout]) => [
@@ -170,7 +177,14 @@ export function migrateRightSidebarStore(persistedState: unknown, version = 0) {
 
   // Sizes before v7 were percentages of the window, not pixels.
   const size = version >= 7 && state.size !== undefined ? clampSize(state.size) : DEFAULT_RIGHT_SIDEBAR_SIZE
-  return { size, projects, projectUi, chatViewers: state.chatViewers ?? {} }
+  // Before v10 each chat's viewer kept its own width. There is one now, and
+  // which chat's to take is anyone's guess: the pane starts from its defaults.
+  const chatViewers = Object.fromEntries(Object.entries(state.chatViewers ?? {}).map(([chatKey, { widthPx: _width, returnTo, ...viewer }]) => [
+    chatKey,
+    { ...viewer, ...(returnTo ? { returnTo: { item: returnTo.item } } : {}) },
+  ]))
+  const viewerWidthPx = typeof state.viewerWidthPx === "number" && Number.isFinite(state.viewerWidthPx) ? state.viewerWidthPx : null
+  return { size, projects, projectUi, chatViewers, viewerWidthPx }
 }
 
 /**
@@ -201,6 +215,17 @@ export function settledChatViewer(viewer: ChatViewerState): ChatViewerState {
   return rest.item.kind === "diff" && reviewPath ? { ...rest, item: { ...rest.item, path: reviewPath } } : rest
 }
 
+/** What of the layout outlives the page: everything but what can't come back (`persistedChatViewers`). */
+export function persistedRightSidebarState(state: RightSidebarState) {
+  return {
+    size: state.size,
+    projects: state.projects,
+    projectUi: state.projectUi,
+    chatViewers: persistedChatViewers(state.chatViewers),
+    viewerWidthPx: state.viewerWidthPx,
+  }
+}
+
 export const useRightSidebarStore = create<RightSidebarState>()(
   persist(
     (set) => ({
@@ -208,6 +233,7 @@ export const useRightSidebarStore = create<RightSidebarState>()(
       projects: {},
       projectUi: {},
       chatViewers: {},
+      viewerWidthPx: null,
       toggleWidgets: (projectId, chatKey) =>
         set((state) => ({
           projects: withWidgetsOpen(state.projects, projectId, chatKey, !isWidgetsOpen(state.projects, projectId, chatKey)),
@@ -279,17 +305,13 @@ export const useRightSidebarStore = create<RightSidebarState>()(
           const { [chatKey]: _removed, ...rest } = state.chatViewers
           return { chatViewers: rest }
         }),
+      setViewerWidth: (widthPx) => set((state) => (state.viewerWidthPx === widthPx ? state : { viewerWidthPx: widthPx })),
     }),
     {
       name: "right-sidebar-layouts",
-      version: 9,
+      version: 10,
       migrate: migrateRightSidebarStore,
-      partialize: (state) => ({
-        size: state.size,
-        projects: state.projects,
-        projectUi: state.projectUi,
-        chatViewers: persistedChatViewers(state.chatViewers),
-      }),
+      partialize: persistedRightSidebarState,
     }
   )
 )

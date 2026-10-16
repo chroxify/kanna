@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SidebarChatRow } from "../../shared/types"
-import { delegatedAttentionCount, delegatedThreads, delegatorDisplayTitle, projectDelegators, resolveDelegateTarget } from "./delegators"
+import { delegatedAttentionCount, delegatedListTitle, delegatedThreads, delegatorDisplayTitle, projectDelegators, resolveDelegateTarget } from "./delegators"
 import type { SidebarThread } from "./thread-sections"
 
 function thread(chatId: string, row: Partial<SidebarChatRow> = {}, extra: Partial<SidebarThread> = {}): SidebarThread {
@@ -98,5 +98,17 @@ describe("delegatorDisplayTitle", () => {
   test("an unnamed one is called a new delegator", () => {
     expect(delegatorDisplayTitle("New Chat")).toBe("New delegator")
     expect(delegatorDisplayTitle("Ship 0.83")).toBe("Ship 0.83")
+  })
+})
+
+describe("delegatedListTitle", () => {
+  test("a named delegator's list is headed by its name alone", () => {
+    expect(delegatedListTitle("Ship 0.83")).toBe("Ship 0.83")
+  })
+
+  test("an unnamed or unknown one is headed Delegator, as on iOS", () => {
+    expect(delegatedListTitle("New Chat")).toBe("Delegator")
+    expect(delegatedListTitle("  ")).toBe("Delegator")
+    expect(delegatedListTitle(undefined)).toBe("Delegator")
   })
 })

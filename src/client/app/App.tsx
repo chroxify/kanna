@@ -347,6 +347,7 @@ function KannaLayout() {
       onCollapse={state.collapseSidebar}
       onExpand={state.expandSidebar}
       onCreateChat={handleSidebarCreateChat}
+      onOpenProjectNewChat={state.handleOpenProjectNewChat}
       onCompose={state.handleCompose}
       onForkChat={handleSidebarForkChat}
       currentProjectId={state.activeProjectId}
@@ -526,9 +527,6 @@ export function App() {
             <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
             <Route path="/settings/:sectionId" element={<Suspense fallback={null}><SettingsPage /></Suspense>} />
             <Route path="/chat/:chatId" element={<ChatPage />} />
-            {/* A chat and its sub-chats as a graph, in the chat page's shell.
-                Reached by URL only for now: nothing in the app links here. */}
-            <Route path="/graph/:chatId" element={<ChatPage view="graph" />} />
             {/* A project's chats as a page: the sidebar, focused on it (see
                 `routeProjectId` in KannaSidebar). What opening a channel
                 shows on a phone. Like `/`, the sidebar is the whole page

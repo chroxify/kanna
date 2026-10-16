@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
-import type { ChatSchedule, HydratedTranscriptMessage } from "../../../shared/types"
+import type { ChatSchedule } from "../../../shared/types"
 import { ChatSchedulesProvider } from "../chat-ui/chat-reference"
-import type { ChatToolCall } from "./ChatToolMessage"
-import { delegationsFor, noteDelegation, REPLY_LINE, REPLY_LINE_LEFT_PX, SourcedMessage, sourcedSections } from "./SourcedMessage"
+import { REPLY_LINE, REPLY_LINE_LEFT_PX, SourcedMessage, sourcedSections } from "./SourcedMessage"
 import { QUOTE_GEOMETRY, QUOTE_MARK_CENTER_PX } from "./tool-card"
 
 const schedule: ChatSchedule = {
@@ -17,10 +16,6 @@ const schedule: ChatSchedule = {
   updatedAt: 0,
   nextRunAt: Date.now() + 4 * 60_000 - 1_000,
   runCount: 0,
-}
-
-function chatCall(id: string, toolName: string, payload: Record<string, unknown>, rawResult: unknown, extra: Partial<ChatToolCall> = {}): HydratedTranscriptMessage {
-  return { id, kind: "tool", toolKind: "chat", toolName, toolId: id, input: { payload }, rawResult, resultEntryId: `r-${id}`, timestamp: new Date(0).toISOString(), ...extra } as HydratedTranscriptMessage
 }
 
 describe("SourcedMessage", () => {
@@ -113,19 +108,38 @@ describe("SourcedMessage", () => {
     expect(html).toContain("bg-transparent")
   })
 
-  test("a report on several sub-chats has a quote and a line over each bubble", () => {
+  test("a report on several sub-chats is a line for each, saying what happened, and nothing of what they said", () => {
     const html = renderToStaticMarkup(
       <SourcedMessage
         content={[
           "<system-message>\nSub-chat completed: [Joke](/chat/one) (chat id one)\n</system-message>\n\nFirst answer",
           "<system-message>\nSub-chat failed: [Deploy](/chat/two) (chat id two)\n</system-message>\n\n---\n\ncredentials expired",
+          "<system-message>\nSub-chat needs_input: [Ask](/chat/three) (chat id three)\n</system-message>\n\n---\n\nwhich one?",
         ].join("\n\n")}
-        source={{ kind: "report", chatIds: ["one", "two"] }}
+        source={{ kind: "report", chatIds: ["one", "two", "three"] }}
       />,
     )
-    expect(count(html, LINE)).toBe(2)
-    expect(count(html, "rounded-2xl")).toBe(2)
-    expect(count(html, ">Sub-chat<")).toBe(2)
+    // Nothing here knows the chats' titles, so each is named for what it is.
+    const order = [">A sub-chat replied<", ">A sub-chat failed<", ">A sub-chat needs input<"].map((text) => html.indexOf(text))
+    expect(order.every((position) => position >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    // No bubble, no quote, no line joining them, no reply.
+    expect(html).not.toContain("rounded-2xl")
+    expect(count(html, LINE)).toBe(0)
+    expect(html).not.toContain(">Sub-chat<")
+    for (const said of ["First answer", "credentials expired", "which one?", "Show more"]) expect(html).not.toContain(said)
+    // A failed one takes a failed tool's mark.
+    expect(count(html, "text-destructive")).toBe(1)
+  })
+
+  test("a report's line is a tool row's line: its slot, its mark and its words", () => {
+    const html = renderToStaticMarkup(<SourcedMessage content="all clear" source={{ kind: "report", chatIds: ["child"] }} />)
+    expect(html).toContain("relative flex h-5 w-5 items-center justify-center")
+    expect(html).toContain("size-4 text-muted-icon")
+    expect(html).toContain("font-medium text-foreground/80")
+    expect(html).toContain("text-sm")
+    // A chat the sidebar does not know has nowhere to go, so it is no button.
+    expect(html).not.toContain("<button")
   })
 
   // The line under a quote's title, where there is one.
@@ -134,7 +148,6 @@ describe("SourcedMessage", () => {
   test("a quote with nothing to add is one line: the chat, and no words under it", () => {
     for (const html of [
       renderToStaticMarkup(<SourcedMessage content="hello" source={{ kind: "agent", chatId: "parent" }} />),
-      renderToStaticMarkup(<SourcedMessage content="all clear" source={{ kind: "report", chatIds: ["child"] }} />),
     ]) {
       expect(html).not.toContain(CAPTION)
       expect(html).not.toContain("Replied to")
@@ -176,28 +189,18 @@ describe("reports that are not a sub-chat's last word", () => {
   const final = "<system-message>\nSub-chat completed: [Coordinator](/chat/abc) (chat id abc)\n</system-message>\n\nAll done."
   const render = (content: string) => renderToStaticMarkup(<SourcedMessage content={content} source={{ kind: "report", chatIds: ["abc"] }} />)
 
-  test("an interim reply says so in its quote, and the final one after it does not", () => {
+  test("an interim reply's line says the sub-chat is still working, and the final one after it does not", () => {
     const first = render(interim)
-    expect(first).toContain(">Not final<")
-    expect(first).toContain("Started the legwork.")
-    // Nothing of the header reaches the reader.
+    expect(first).toContain(">A sub-chat replied · still working<")
+    // Nothing of the header, or of the reply, reaches the reader.
+    expect(first).not.toContain("Started the legwork.")
     expect(first).not.toContain("Not its last word")
     expect(first).not.toContain("Legwork")
     expect(first).not.toContain("chat id")
 
-    // The last word has nothing to add, so its quote is the chat's row alone.
     const last = render(final)
-    expect(last).toContain(">Sub-chat<")
-    expect(last).not.toContain("Not final")
-    expect(last).not.toContain("truncate pl-[26px]")
-  })
-
-  test("the mark comes before what the sub-chat was asked, which is the part that gets cut", () => {
-    const call = chatCall("a", "create_chat", { message: "coordinate the audit" }, { chatId: "abc" }) as ChatToolCall
-    const html = renderToStaticMarkup(
-      <SourcedMessage content={interim} source={{ kind: "report", chatIds: ["abc"] }} delegations={[{ chatId: "abc", call }]} />,
-    )
-    expect(html).toContain(">Not final · coordinate the audit<")
+    expect(last).toContain(">A sub-chat replied<")
+    expect(last).not.toContain("still working")
   })
 
   test("a report from a sub-chat that set itself a schedule draws as any other, with the schedule kept from the reader", () => {
@@ -209,8 +212,7 @@ describe("reports that are not a sub-chat's last word", () => {
       "",
       "Deployed. Checking back in an hour.",
     ].join("\n"))
-    expect(html).toContain(">Sub-chat<")
-    expect(html).toContain("Deployed. Checking back in an hour.")
+    expect(html).toContain(">A sub-chat replied<")
     expect(html).not.toContain("Deploy check")
     expect(html).not.toContain("It set itself")
   })
@@ -246,42 +248,11 @@ describe("a sub-chat adopted by another chat", () => {
         source={{ kind: "report", chatIds: ["one", "abc", "two"] }}
       />,
     )
-    const order = ["First answer", " was adopted by ", "credentials expired"].map((text) => html.indexOf(text))
+    const order = [">A sub-chat replied<", " was adopted by ", ">A sub-chat failed<"].map((text) => html.indexOf(text))
     expect(order.every((position) => position >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
-    // Two bubbles, and the line between them.
-    expect(html.split("rounded-2xl").length - 1).toBe(2)
+    // Three lines, and no bubble.
+    expect(html).not.toContain("rounded-2xl")
     expect(html).not.toContain("<hr")
-  })
-})
-
-describe("delegations", () => {
-  test("the newest call to a chat is the one its report answers", () => {
-    const latest = new Map<string, ChatToolCall>()
-    const messages = [
-      chatCall("a", "create_chat", { message: "start" }, { chatId: "child" }),
-      chatCall("b", "send_message", { chatId: "child", message: "more" }, { started: true }),
-      chatCall("c", "create_chat", { message: "other" }, { chatId: "sibling" }),
-    ]
-    for (const message of messages) noteDelegation(latest, message)
-    expect(delegationsFor(latest, { kind: "report", chatIds: ["child", "missing"] })?.map((found) => [found.chatId, found.call.id])).toEqual([["child", "b"]])
-    // Only a report answers a call.
-    expect(delegationsFor(latest, { kind: "agent", chatId: "child" })).toBeUndefined()
-    expect(delegationsFor(latest, undefined)).toBeUndefined()
-    expect(delegationsFor(latest, { kind: "report", chatIds: ["missing"] })).toBeUndefined()
-  })
-
-  test("a call that failed or has not returned reached no chat", () => {
-    const latest = new Map<string, ChatToolCall>()
-    noteDelegation(latest, chatCall("a", "send_message", { chatId: "child", message: "x" }, [{ type: "text", text: "no such chat" }], { isError: true }))
-    noteDelegation(latest, chatCall("b", "create_chat", { message: "x" }, undefined, { resultEntryId: undefined }))
-    noteDelegation(latest, { id: "t", kind: "assistant_text", text: "hi", timestamp: new Date(0).toISOString() })
-    expect(latest.size).toBe(0)
-  })
-
-  test("a call recorded before the chat tool kind is read from its JSON text", () => {
-    const latest = new Map<string, ChatToolCall>()
-    noteDelegation(latest, { ...chatCall("a", "create_chat", { message: "x" }, [{ type: "text", text: JSON.stringify({ chatId: "child" }) }]), toolKind: "unknown_tool" } as HydratedTranscriptMessage)
-    expect([...latest.keys()]).toEqual(["child"])
   })
 })

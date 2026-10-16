@@ -3,15 +3,42 @@ import type {
   ChatSchedule,
   KannaStatus,
   MessageSource,
-  PendingToolSnapshot,
   ScheduleTrigger,
   SubagentActivity,
   TranscriptEntry,
 } from "../shared/types"
+import { stripSystemMessages } from "../shared/message-preview"
+import { buildAgentToAgentNote, type AgentToAgentTurn } from "./agent-to-agent"
 import type { ChatChange, ChatCommands } from "./chat-commands"
 import type { EventStore } from "./event-store"
 import type { ChatRecord } from "./events"
+import { renderToolResultContent } from "./handoff"
 import { getServerProviderCatalog, SERVER_PROVIDERS } from "./provider-catalog"
+import {
+  compareTicketsByActivity,
+  snapshotTickets,
+  ticketAttentionCount,
+  ticketLinkPath,
+  type TicketArtifact,
+  type TicketChatInfo,
+  type TicketChatState,
+  type TicketHandoff,
+  type TicketRecord,
+  type TicketState,
+} from "../shared/tickets"
+import type { ChatAttachment } from "../shared/types"
+import type { ClientCommand } from "../shared/protocol"
+import { TicketBoard } from "./ticket-board"
+import {
+  agentTicketDetail,
+  agentTicketSummary,
+  buildTicketNudge,
+  buildTicketReopenMessage,
+  buildTicketReplyHeader,
+  stillAskingNote,
+  ticketReportLine,
+} from "./ticket-messages"
+import type { TicketStore } from "./ticket-store"
 import {
   computeFirstRun,
   MIN_SCHEDULE_INTERVAL_MS,
@@ -19,6 +46,28 @@ import {
   ScheduleRunner,
   type ScheduleFireResult,
 } from "./schedules"
+
+/**
+ * The ticket a hand-off's result names: `ticket: { id, number, link }`, which
+ * clients read off the tool result, and `link` the agent copies to link it.
+ *
+ * `reopened` and `note` when the hand-off took a Done ticket back out of
+ * Done. A delegator once reopened Done tickets for new asks without noticing;
+ * the note puts the rule where the reopen happens.
+ */
+interface HandedOffTicket { id: string; number: number; link: string; reopened?: true; note?: string }
+
+function handedOffTicket(delegatorChatId: string, ticket: Pick<TicketRecord, "id" | "number">, reopened = false): HandedOffTicket {
+  return {
+    id: ticket.id,
+    number: ticket.number,
+    link: ticketLinkPath(delegatorChatId, ticket.id),
+    ...(reopened ? { reopened: true as const, note: `Reopened #${ticket.number}, which was Done. A new ask needs a new ticket.` } : {}),
+  }
+}
+
+/** A composer's settings for a turn, as `chat.send` carries them: what a ticket reply runs the delegator with. */
+type TurnSettings = Partial<Pick<Extract<ClientCommand, { type: "chat.send" }>, "provider" | "model" | "modelOptions" | "planMode" | "autoPlan">>
 
 /**
  * What an agent can do to chats, and the rules that keep that safe.
@@ -50,19 +99,23 @@ export const MAX_CHAT_DEPTH = 3
 /** Chats one user-started chat can have running under it at once, at any depth. */
 export const MAX_LIVE_CHATS = 8
 
-const MAX_WAIT_MS = 60 * 60 * 1_000
-const DEFAULT_WAIT_MS = 5 * 60 * 1_000
-/**
- * How often a wait re-reads its chats. Turn ends wake it directly; this
- * covers the one state with no event of its own, a chat stopping to ask the
- * user something.
- */
-const WAIT_POLL_MS = 1_000
 /** How far back a chat's final message is looked for. */
 const TAIL_ENTRIES = 400
-const REPORT_TEXT_LIMIT = 6_000
-const READ_ENTRY_TEXT_LIMIT = 4_000
-const READ_TOTAL_TEXT_LIMIT = 40_000
+/**
+ * A report carries the sub-chat's last reply whole. A parent that got part of
+ * one went back to read the rest four times out of five, so this is only a
+ * guard against pathological output. It matches what one `read_chat` call
+ * returns, so a reply cut here is read whole in one call.
+ */
+const REPORT_TEXT_LIMIT = 50_000
+/**
+ * Characters of entry text one `read_chat` call returns. Entries come whole
+ * up to it; one that does not fit is cut, marked, and read on with `next`.
+ * Claude Code drops MCP results over about 25k tokens, so it stays under.
+ */
+const READ_TOTAL_TEXT_LIMIT = 50_000
+/** Entries back from the end a `read_chat` with no `after` reads first, before reading the whole transcript. */
+const READ_TAIL_WINDOW = 2_000
 const SUBCHAT_TASK_PREFIX = "chat:"
 /** Sub-chats listed in a parent's task log. Everything running is always listed. */
 const TASK_LOG_CHATS = 20
@@ -85,7 +138,6 @@ export interface OrchestratorAgent {
   getLeftRunning(chatId: string): string[]
   isPlanning(chatId: string): boolean
   getActiveStatuses(): Map<string, KannaStatus>
-  getPendingTool(chatId: string): PendingToolSnapshot | null
   /** Used directly only for the cascade, which is not an action anyone asked for. */
   cancel(chatId: string): Promise<void>
 }
@@ -100,7 +152,24 @@ interface OrchestratorArgs {
   now?: () => number
   /** Tests shorten it. See `CLOSE_OUT_GRACE_MS`. */
   closeOutGraceMs?: number
+  /**
+   * Where delegators' ticket boards are kept. Without it there are no
+   * tickets, and a delegator hands work off without naming one.
+   */
+  tickets?: TicketStore
 }
+
+/**
+ * What names the ticket a delegator's hand-off is for: one it has, or one
+ * to create in the same call.
+ */
+export interface TicketChoice {
+  ticketId?: string
+  ticket?: { title: string; body?: string }
+}
+
+/** A hand-off's ticket once checked: found, or to be created when the hand-off goes through. */
+type TicketTarget = { ticket: TicketRecord } | { create: { title: string; body?: string } }
 
 /**
  * A chat's state as an agent should read it. `running` covers queued work.
@@ -171,20 +240,64 @@ export interface ChatOutcome {
   status: AgentChatStatus
   /** The chat's last reply, or the error that ended its turn. */
   finalMessage?: string
-  /** What the chat is asking the user, when `status` is `needs_input`. */
-  question?: string
+  /** `finalMessage` is the start of a reply longer than `REPORT_TEXT_LIMIT`: where `read_chat` picks it up. */
+  cut?: { index: number; textOffset: number; totalChars: number }
 }
 
+/**
+ * What `read_chat` can filter on. The names are the transcript's entry kinds,
+ * with two of its own: `report` is a prompt that is a report from sub-chats
+ * (a `user_prompt` with a report source), and `reply` is each turn's last
+ * `assistant_text`, the agent's answer without its narration.
+ */
+export const READ_CHAT_KINDS = ["user_prompt", "report", "assistant_text", "reply", "tool_call", "tool_result", "result", "interrupted"] as const
+export type ReadChatKind = typeof READ_CHAT_KINDS[number]
+/** What was said: no tool traffic. */
+const DEFAULT_READ_KINDS: readonly ReadChatKind[] = ["user_prompt", "report", "assistant_text", "result", "interrupted"]
+
 export interface ReadChatEntry {
-  /** Position in the transcript. Pass the last one back as `after` to read on. */
+  /** Position in the transcript, for `after` and `before`. */
   index: number
-  role: "user" | "assistant" | "tool" | "system"
+  kind: Exclude<ReadChatKind, "reply">
   text: string
   at: string
-  /** Set when a user-role message did not come from the user. */
+  /** Set when a prompt did not come from the user. */
   from?: MessageSource
-  truncated?: true
+  /** An `assistant_text` that ends its turn: the reply. */
+  final?: true
+  /** On `tool_call`: the tool's name. */
+  tool?: string
+  /** On `tool_call` and `tool_result`: pairs a result with its call. */
+  toolId?: string
   error?: true
+  /** `text` is part of the entry, from `textOffset` on, out of `totalChars`. */
+  truncated?: true
+  textOffset?: number
+  totalChars?: number
+}
+
+/** The arguments that read the next or the previous page, as `read_chat` takes them. */
+interface ReadChatPosition {
+  after?: number
+  before?: number
+  textOffset?: number
+  kinds?: ReadChatKind[]
+  lastTurns?: number
+}
+
+interface ReadableRow {
+  index: number
+  kind: ReadChatEntry["kind"]
+  entry: TranscriptEntry
+  final: boolean
+}
+
+/** One sub-chat's part of a report: the line for the agent, and what it said. */
+interface ReportSection {
+  header: string
+  reply?: string
+  /** A delegator's report: the tickets the header names. Rides on the report's source (`MessageSource.tickets`). */
+  ticketIds?: string[]
 }
 
 interface RunOptions {
@@ -194,12 +307,6 @@ interface RunOptions {
   planMode?: boolean
 }
 
-interface Waiter {
-  actorChatId: string
-  chatIds: string[]
-  check: () => void
-}
-
 function chatLink(chatId: string) {
   return `/chat/${chatId}`
 }
@@ -207,6 +314,45 @@ function chatLink(chatId: string) {
 function clip(text: string, limit: number) {
   if (text.length <= limit) return { text, truncated: false }
   return { text: `${text.slice(0, limit)}…`, truncated: true }
+}
+
+/** An entry's whole text as `read_chat` returns it. Tool entries need their payload merged back first. */
+function readableText(entry: TranscriptEntry): string {
+  switch (entry.kind) {
+    case "user_prompt": return entry.content
+    case "assistant_text": return entry.text
+    case "tool_call": return `${entry.tool.toolName} ${JSON.stringify(entry.tool.input)}`
+    case "tool_result": return renderToolResultContent(entry.content)
+    case "result": return entry.result || "unknown error"
+    case "interrupted": return "Turn stopped."
+    default: return ""
+  }
+}
+
+function toReadChatEntry(row: ReadableRow, text: string): ReadChatEntry {
+  const { entry } = row
+  return {
+    index: row.index,
+    kind: row.kind,
+    text,
+    at: iso(entry.createdAt),
+    ...(entry.kind === "user_prompt" && entry.source ? { from: entry.source } : {}),
+    ...(row.final ? { final: true as const } : {}),
+    ...(entry.kind === "tool_call" ? { tool: entry.tool.toolName, toolId: entry.tool.toolId } : {}),
+    ...(entry.kind === "tool_result" ? { toolId: entry.toolId } : {}),
+    ...((entry.kind === "tool_result" || entry.kind === "result") && entry.isError ? { error: true as const } : {}),
+  }
+}
+
+/**
+ * Sections joined into one report, or added to one already waiting in the
+ * parent's queue. A rule goes ahead of a sub-chat's words only when words
+ * came before them (`splitReportSections` reads it that way).
+ */
+function appendReportSection(report: string, section: ReportSection) {
+  const shown = stripSystemMessages(report) !== ""
+  const body = section.reply ? `${section.header}\n\n${shown ? "---\n\n" : ""}${section.reply}` : section.header
+  return report ? `${report}\n\n${body}` : body
 }
 
 function iso(timestamp: number) {
@@ -225,13 +371,6 @@ export class ChatOrchestrator {
   private readonly onError: (message: string) => void
   private readonly now: () => number
   private readonly schedules: ScheduleRunner
-  private readonly waiters = new Set<Waiter>()
-  /**
-   * Sub-chats a `wait_for_chats` from their parent is holding, by chat id.
-   * The wait will hand the result to the parent itself, so the report holds
-   * back while one is open. That is what keeps a result from arriving twice.
-   */
-  private readonly claims = new Map<string, number>()
   /** Reports being written, so two turn ends in a row send one. */
   private readonly reporting = new Set<string>()
   /** The last report delivery under way per parent, for the next one to follow. */
@@ -250,11 +389,28 @@ export class ChatOrchestrator {
    * it, so there is no later turn left to watch for.
    */
   private readonly laterTurns = new Map<string, ReturnType<typeof setTimeout> | null>()
+  /**
+   * Sub-chats whose latest turn started while they owed their parent a
+   * report, until a report covers it. The turn that starts next looks here to
+   * know whether the one before it was the parent's to hear (`reportEndedTurn`).
+   *
+   * In memory only. A restart resumes a turn, and its start sets this again.
+   */
+  private readonly owedTurns = new Set<string>()
   /** Sub-chats waiting out `closeOutGraceMs` before their last report. See `closeOutDue`. */
   private readonly closeOuts = new Map<string, { ready: boolean; timer?: ReturnType<typeof setTimeout> }>()
   private readonly closeOutGraceMs: number
   private childIndex: { version: number; byParent: Map<string, ChatRecord[]> } | null = null
   private bootSweep: ReturnType<typeof setTimeout> | null = null
+  /** Delegators' ticket boards. Null when the orchestrator was built without a ticket store. */
+  readonly tickets: TicketBoard | null
+  /**
+   * Hand-offs whose send has not returned. Until it does, nothing knows
+   * whether the message went into a turn or the queue (`placeHandoff`).
+   */
+  private readonly sendingHandoffs = new Set<string>()
+  /** Per chat: the queued message its starting turn took, until that turn's start places its hand-offs. */
+  private readonly takenMessages = new Map<string, string>()
 
   constructor(args: OrchestratorArgs) {
     this.store = args.store
@@ -264,6 +420,9 @@ export class ChatOrchestrator {
     this.onError = args.onError ?? (() => {})
     this.now = args.now ?? Date.now
     this.closeOutGraceMs = args.closeOutGraceMs ?? CLOSE_OUT_GRACE_MS
+    this.tickets = args.tickets
+      ? new TicketBoard({ store: args.tickets, chatInfo: (chatId) => this.ticketChatInfo(chatId), now: this.now })
+      : null
     this.schedules = new ScheduleRunner({
       store: this.store,
       fire: (schedule) => this.fireSchedule(schedule),
@@ -471,27 +630,45 @@ export class ChatOrchestrator {
   }
 
   /**
-   * How the chat's last turn ended, in words: its final reply, or the error.
-   * Only the main agent's own text counts, not a subagent's.
+   * How the chat's last turn ended, in words: its final reply whole, or the
+   * error. Only the main agent's own text counts, not a subagent's.
+   *
+   * A chat that is running went straight on into another turn
+   * (`reportEndedTurn`), so its reply is the one before the entry that ended
+   * the last turn, not whatever the new turn has said so far.
    */
   private outcomeOf(chat: ChatRecord): ChatOutcome {
     const status = this.statusOf(chat)
     const outcome: ChatOutcome = { chatId: chat.id, title: chat.title, link: chatLink(chat.id), status }
-    if (status === "needs_input") {
-      const question = this.agent.getPendingTool(chat.id)?.preview
-      if (question) outcome.question = question
-      return outcome
+    // Its reply is not in yet: the turn is parked on a question.
+    if (status === "needs_input") return outcome
+    const { entries, startIndex } = this.tailEntries(chat.id)
+    let end = entries.length
+    if (status === "running") {
+      while (end > 0 && entries[end - 1]!.kind !== "result" && entries[end - 1]!.kind !== "interrupted") end -= 1
     }
-    const { entries } = this.tailEntries(chat.id)
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const lastEnd = entries[end - 1]
+    const endedInError = status === "failed" || (status === "running" && lastEnd?.kind === "result" && Boolean(lastEnd.isError))
+    const take = (index: number, raw: string) => {
+      // Offsets count from the entry's own text, untrimmed, which is what read_chat reads.
+      const lead = raw.length - raw.trimStart().length
+      const text = raw.trim()
+      if (text.length <= REPORT_TEXT_LIMIT) {
+        outcome.finalMessage = text
+        return
+      }
+      outcome.finalMessage = `${text.slice(0, REPORT_TEXT_LIMIT)}…`
+      outcome.cut = { index: startIndex + index, textOffset: lead + REPORT_TEXT_LIMIT, totalChars: text.length }
+    }
+    for (let index = end - 1; index >= 0; index -= 1) {
       const entry = entries[index]!
       if (entry.kind === "user_prompt") break
-      if (entry.kind === "result" && entry.isError && entry.result && status === "failed") {
-        outcome.finalMessage = clip(entry.result, REPORT_TEXT_LIMIT).text
+      if (entry.kind === "result" && entry.isError && entry.result && endedInError) {
+        take(index, entry.result)
         break
       }
       if (entry.kind === "assistant_text" && !entry.hidden && !entry.parentToolUseId && entry.text.trim()) {
-        outcome.finalMessage = clip(entry.text.trim(), REPORT_TEXT_LIMIT).text
+        take(index, entry.text)
         break
       }
     }
@@ -532,7 +709,7 @@ export class ChatOrchestrator {
       if (chatChain[chatChain.length - 1]!.id === rootId && this.isLive(chat.id)) live += 1
     }
     if (live >= MAX_LIVE_CHATS) {
-      throw new Error(`${live} chats started from this conversation are still running, which is the limit. Wait for one to finish (wait_for_chats) or stop one (cancel_chat).`)
+      throw new Error(`${live} chats started from this conversation are still running, which is the limit. End this turn, and the next one to finish wakes this chat with its report and frees a place. Or stop one with cancel_chat.`)
     }
   }
 
@@ -646,71 +823,167 @@ export class ChatOrchestrator {
     }
   }
 
-  readChat(input: { chatId: string; after?: number; limit?: number; view?: "messages" | "activity" }) {
+  /**
+   * A chat's transcript, for an agent to read on its own: whole entries,
+   * filtered by kind and position, up to `READ_TOTAL_TEXT_LIMIT` characters a
+   * call. `after` reads forward from an index, `before` back from one, and
+   * neither reads back from the end. `lastTurns` keeps to the latest turns.
+   *
+   * Nothing is cut silently. An entry that does not fit in what is left of
+   * the budget ends the page, unless it is the first, which is cut, marked,
+   * and finished by `next` (`textOffset` resumes inside it). Tool bodies come
+   * from the payload sidecar, only for the tool entries on the page.
+   */
+  readChat(input: {
+    chatId: string
+    after?: number
+    before?: number
+    textOffset?: number
+    lastTurns?: number
+    kinds?: ReadChatKind[]
+    limit?: number
+  }) {
     const chat = this.requireChat(input.chatId)
     const limit = input.limit ?? 40
-    const activity = input.view === "activity"
+    const kinds = new Set<ReadChatKind>(input.kinds?.length ? input.kinds : DEFAULT_READ_KINDS)
     const total = this.store.getTranscriptLength(chat.id)
-    const fromCursor = input.after !== undefined
-    // With no cursor only the end is wanted, so only the end is read: enough
-    // entries to fill a page even when most of them are tool calls.
-    const transcript = this.store.getClientTranscript(
-      chat.id,
-      fromCursor ? Math.max(0, input.after! + 1) : Math.max(0, total - Math.max(2_000, limit * 50)),
+    const forward = input.after !== undefined
+    const lower = forward ? Math.max(0, input.after! + 1) : 0
+    const upper = Math.min(total, input.before ?? total)
+    const matches = (row: ReadableRow) => (
+      kinds.has(row.kind) || (row.kind === "assistant_text" && row.final && kinds.has("reply"))
     )
 
-    const readable: ReadChatEntry[] = []
-    transcript.messages.forEach((entry, offset) => {
-      const index = transcript.startIndex + offset
-      const base = { index, at: iso(entry.createdAt) }
-      if (entry.hidden) return
-      if (entry.kind === "user_prompt") {
-        readable.push({ ...base, role: "user", text: entry.content, ...(entry.source ? { from: entry.source } : {}) })
-      } else if (entry.kind === "assistant_text") {
-        if (!entry.parentToolUseId && entry.text.trim()) readable.push({ ...base, role: "assistant", text: entry.text })
-      } else if (entry.kind === "result") {
-        if (entry.isError) readable.push({ ...base, role: "system", text: `Turn failed: ${entry.result || "unknown error"}`, error: true })
-      } else if (entry.kind === "interrupted") {
-        readable.push({ ...base, role: "system", text: "Turn stopped." })
-      } else if (activity && entry.kind === "tool_call") {
-        readable.push({ ...base, role: "tool", text: `${entry.tool.toolName} ${JSON.stringify(entry.tool.input)}` })
-      } else if (activity && entry.kind === "tool_result" && entry.isError) {
-        readable.push({ ...base, role: "tool", text: "Tool call failed.", error: true })
+    // Reading back, or counting turns from the end, the end is read first. The
+    // whole transcript is read only when that is too short to fill the page
+    // (one more than it, to know whether there is an earlier one) or to reach
+    // back to the turns asked for.
+    const tail = Math.max(0, (forward ? total : upper) - READ_TAIL_WINDOW)
+    let rows = this.readableRows(chat, !forward ? tail : input.lastTurns ? Math.min(lower, tail) : lower)
+    const select = () => {
+      let from = lower
+      let turnsFound = true
+      if (input.lastTurns) {
+        // A turn starts at a prompt: the user's, an agent's, or a report.
+        const prompts = rows.rows.filter((row) => row.kind === "user_prompt" || row.kind === "report")
+        const turnStart = prompts[prompts.length - input.lastTurns]
+        if (turnStart) from = Math.max(from, turnStart.index)
+        else turnsFound = false
       }
-    })
+      const candidates = rows.rows.filter((row) => row.index >= from && row.index < upper && matches(row))
+      const complete = rows.startIndex === 0
+        || (turnsFound && (rows.startIndex <= from || (!forward && candidates.length > limit)))
+      return { candidates, complete }
+    }
+    let selected = select()
+    if (!selected.complete) {
+      rows = this.readableRows(chat, 0)
+      selected = select()
+    }
+    const { candidates } = selected
+    const page = forward ? candidates.slice(0, limit) : candidates.slice(-limit)
 
-    // Reading on from a cursor takes the first page after it. With no cursor
-    // the newest page is the one wanted.
-    const page = fromCursor ? readable.slice(0, limit) : readable.slice(-limit)
+    // Tool bodies live in the sidecar. One read for the whole page.
+    const toolIds = page.filter((row) => row.kind === "tool_call" || row.kind === "tool_result").map((row) => row.entry._id)
+    const whole = new Map(this.store.getEntriesById(chat.id, toolIds).map((entry) => [entry._id, entry]))
+    const textOf = (row: ReadableRow) => readableText(whole.get(row.entry._id) ?? row.entry)
+
     let budget = READ_TOTAL_TEXT_LIMIT
     const entries: ReadChatEntry[] = []
-    for (const entry of page) {
-      const clipped = clip(entry.text, Math.min(READ_ENTRY_TEXT_LIMIT, Math.max(200, budget)))
-      budget -= clipped.text.length
-      entries.push({ ...entry, text: clipped.text, ...(clipped.truncated ? { truncated: true as const } : {}) })
+    let cut: { index: number; textOffset: number } | null = null
+    const ordered = forward ? page : [...page].reverse()
+    for (const [position, row] of ordered.entries()) {
+      const full = textOf(row)
+      const start = forward && position === 0 && input.textOffset ? Math.min(input.textOffset, full.length) : 0
+      const rest = full.length - start
+      const fits = rest <= budget
+      // Only the first entry may be cut. Any other that does not fit starts the next page.
+      if (!fits && entries.length > 0) break
+      const shown = fits ? rest : budget
+      const entry = toReadChatEntry(row, full.slice(start, start + shown))
+      if (start > 0 || !fits) Object.assign(entry, { truncated: true as const, textOffset: start, totalChars: full.length })
+      if (forward) entries.push(entry)
+      else entries.unshift(entry)
+      budget -= shown
+      if (!fits) {
+        cut = { index: row.index, textOffset: start + shown }
+        break
+      }
     }
+
+    // How to go on: the arguments for the page after this one and the one before.
+    const filters: ReadChatPosition = {
+      ...(input.kinds?.length ? { kinds: input.kinds } : {}),
+      ...(input.lastTurns ? { lastTurns: input.lastTurns } : {}),
+    }
+    const first = entries[0]
     const last = entries[entries.length - 1]
-    const hasMore = fromCursor && readable.length > page.length
+    let next: ReadChatPosition | undefined
+    if (cut) next = { after: cut.index - 1, textOffset: cut.textOffset, ...filters }
+    else if (last && candidates.some((row) => row.index > last.index)) next = { after: last.index, ...filters }
+    const earlier: ReadChatPosition | undefined = first && candidates.some((row) => row.index < first.index)
+      ? { before: first.index, ...filters }
+      : undefined
+
     return {
       chat: this.summarize(chat),
       subchats: this.childrenOf(chat.id).map((child) => this.summarize(child)),
-      queue: this.store.getQueuedMessages(chat.id).map((message) => ({
-        queuedMessageId: message.id,
-        text: clip(message.content, 500).text,
-        ...(message.source ? { from: message.source } : {}),
-      })),
+      queue: this.store.getQueuedMessages(chat.id).map((message) => {
+        const preview = clip(message.content, 500)
+        return {
+          queuedMessageId: message.id,
+          text: preview.text,
+          ...(preview.truncated ? { truncated: true as const } : {}),
+          ...(message.source ? { from: message.source } : {}),
+        }
+      }),
       entries,
       transcriptEntries: total,
-      ...(last ? { nextCursor: last.index } : {}),
-      ...(hasMore ? { hasMore: true } : {}),
-      // Truncated text and tool output are in the file, for an agent that needs them.
-      transcriptPath: this.store.getTranscriptPath(chat.id),
+      ...(next ? { next } : {}),
+      ...(earlier ? { earlier } : {}),
     }
+  }
+
+  /**
+   * The transcript from `fromIndex` to its end, as rows `read_chat` can
+   * return. Always to the end, because whether an `assistant_text` is its
+   * turn's reply depends on what follows it.
+   */
+  private readableRows(chat: ChatRecord, fromIndex: number) {
+    const transcript = this.store.getClientTranscript(chat.id, fromIndex)
+    const rows: ReadableRow[] = []
+    // Walked from the end: text is final when its turn ended before more text
+    // came. At the very end that is only so when no turn is running.
+    let closed = !this.hasTurnInFlight(chat)
+    for (let offset = transcript.messages.length - 1; offset >= 0; offset -= 1) {
+      const entry = transcript.messages[offset]!
+      const index = transcript.startIndex + offset
+      if (entry.hidden) continue
+      let kind: ReadChatEntry["kind"] | null = null
+      let final = false
+      if (entry.kind === "user_prompt") {
+        kind = entry.source?.kind === "report" ? "report" : "user_prompt"
+        closed = true
+      } else if (entry.kind === "result" || entry.kind === "interrupted") {
+        // A successful result says nothing the reply did not.
+        if (entry.kind === "interrupted" || entry.isError) kind = entry.kind
+        closed = true
+      } else if (entry.kind === "assistant_text") {
+        if (entry.parentToolUseId || !entry.text.trim()) continue
+        kind = "assistant_text"
+        final = closed
+        closed = false
+      } else if (entry.kind === "tool_call" || entry.kind === "tool_result") {
+        kind = entry.kind
+      }
+      if (kind) rows.push({ index, kind, entry, final })
+    }
+    return { rows: rows.reverse(), startIndex: transcript.startIndex }
   }
 
   // ── Writes ─────────────────────────────────────────────────────────────
 
-  async createChat(actorChatId: string, input: RunOptions & {
+  async createChat(actorChatId: string, input: RunOptions & TicketChoice & {
     message: string
     title?: string
     projectId?: string
@@ -723,6 +996,7 @@ export class ChatOrchestrator {
     if (!this.store.getProject(projectId)) {
       throw new Error(`Project ${projectId} not found. get_context lists the projects.`)
     }
+    const ticket = this.chooseTicket(caller, input)
     this.checkBudget(actorChatId)
     const run = this.resolveRun(actorChatId, input, {
       provider: caller.provider,
@@ -737,21 +1011,23 @@ export class ChatOrchestrator {
     })
     const chat = this.requireChat(created.result.chatId)
     if (input.title?.trim()) await this.commands.rename(chat.id, input.title)
-    await this.send(actorChatId, chat, input.message, run, { report: subchat })
+    const sent = await this.send(actorChatId, chat, input.message, run, { report: subchat, ticket })
     this.push(created.changed!)
-    return this.summarize(this.requireChat(chat.id))
+    return { ...this.summarize(this.requireChat(chat.id)), ...(sent.ticket ? { ticket: sent.ticket } : {}) }
   }
 
-  async forkChat(actorChatId: string, input: RunOptions & {
+  async forkChat(actorChatId: string, input: RunOptions & TicketChoice & {
     chatId?: string
     message?: string
     title?: string
     subchat?: boolean
   }) {
     const source = this.requireChat(input.chatId ?? actorChatId)
+    const caller = this.requireChat(actorChatId)
     // A fork handed work is delegation, so it reports back unless told not to.
     // A delegator's fork is under it either way.
-    const subchat = this.requireChat(actorChatId).delegator ? true : input.subchat ?? Boolean(input.message)
+    const subchat = caller.delegator ? true : input.subchat ?? Boolean(input.message)
+    const ticket = this.chooseTicket(caller, input)
     this.checkBudget(actorChatId)
     const forked = await this.commands.fork(source.id, {
       createdByChatId: actorChatId,
@@ -759,6 +1035,8 @@ export class ChatOrchestrator {
     })
     const chat = this.requireChat(forked.result.chatId)
     if (input.title?.trim()) await this.commands.rename(chat.id, input.title)
+    // Results name the ticket as `ticket: { id, number }`, which clients read off a hand-off's tool result.
+    let handedOff: HandedOffTicket | undefined
     if (input.message) {
       const run = this.resolveRun(actorChatId, input, {
         provider: chat.provider,
@@ -766,13 +1044,18 @@ export class ChatOrchestrator {
         planMode: chat.planMode,
         autoPlan: chat.autoPlan,
       })
-      await this.send(actorChatId, chat, input.message, run, { report: subchat })
+      handedOff = (await this.send(actorChatId, chat, input.message, run, { report: subchat, ticket })).ticket
+    } else if (ticket) {
+      // A copy with no message has no work yet and owes nothing, but it is
+      // the ticket's: the hand-off is what links it.
+      const { ticket: record, reopened } = await this.startHandoff(actorChatId, ticket, chat.id, { outstanding: false })
+      handedOff = handedOffTicket(actorChatId, record, reopened)
     }
     this.push({ ...forked.changed, chatIds: [chat.id] })
-    return this.summarize(this.requireChat(chat.id))
+    return { ...this.summarize(this.requireChat(chat.id)), ...(handedOff ? { ticket: handedOff } : {}) }
   }
 
-  async sendMessage(actorChatId: string, input: RunOptions & {
+  async sendMessage(actorChatId: string, input: RunOptions & TicketChoice & {
     chatId: string
     message: string
     delivery?: "queue" | "steer"
@@ -782,6 +1065,7 @@ export class ChatOrchestrator {
       throw new Error("A chat cannot message itself. Use set_schedule to send this chat a message later.")
     }
     const target = this.requireChat(input.chatId)
+    const ticket = this.chooseTicket(this.requireChat(actorChatId), input)
     const run = this.resolveRun(actorChatId, input, {
       provider: target.provider,
       model: target.lastModel,
@@ -792,12 +1076,13 @@ export class ChatOrchestrator {
     // report it earns is addressed by the link.
     const delegating = Boolean(this.requireChat(actorChatId).delegator)
     const adoption = input.adopt || delegating ? await this.adopt(actorChatId, target, { forced: delegating && !input.adopt }) : null
-    let sent: { queuedMessageId?: string }
+    let sent: { queuedMessageId?: string; ticket?: HandedOffTicket }
     try {
       sent = await this.send(actorChatId, target, input.message, run, {
         // Only its own parent is owed a sub-chat's result.
         report: this.requireChat(target.id).parentChatId === actorChatId,
         steer: input.delivery === "steer",
+        ticket,
       })
     } catch (error) {
       // The caller is told the send failed, so nothing of it may remain.
@@ -807,7 +1092,13 @@ export class ChatOrchestrator {
     if (!adoption) {
       this.push({ sidebar: true, chatIds: [target.id] })
     } else {
-      if (adoption.formerParentChatId) await this.tellFormerParent(adoption.formerParentChatId, target.id, adoption.owedFormerParent)
+      if (adoption.formerParentChatId) {
+        // Its result goes here now, so a delegator it worked for is owed nothing on its tickets.
+        await this.tickets?.settle(adoption.formerParentChatId, target.id).catch((error) => {
+          this.onError(`could not settle the tickets of chat ${target.id} after its adoption: ${errorMessage(error)}`)
+        })
+        await this.tellFormerParent(adoption.formerParentChatId, target.id, adoption.owedFormerParent)
+      }
       // Both task logs changed: the new parent's gained a row, the old one's lost it.
       this.push({
         sidebar: true,
@@ -818,6 +1109,7 @@ export class ChatOrchestrator {
       ...this.summarize(this.requireChat(target.id)),
       started: sent.queuedMessageId === undefined,
       ...(sent.queuedMessageId === undefined ? {} : { queuedMessageId: sent.queuedMessageId }),
+      ...(sent.ticket ? { ticket: sent.ticket } : {}),
     }
   }
 
@@ -849,8 +1141,9 @@ export class ChatOrchestrator {
     }
     await this.store.setChatParent(target.id, { parentChatId: actorChatId, adopted: true })
     // What it owed, and what it had already told, were the former parent's.
-    // The new one starts with nothing heard.
+    // The new one starts with nothing heard, and a turn in flight was not its.
     await this.store.setReportOwed(target.id, false)
+    this.owedTurns.delete(target.id)
     return {
       formerParentChatId: former.parent?.parentChatId,
       /** The former parent was still waiting for a result from this chat. */
@@ -867,13 +1160,14 @@ export class ChatOrchestrator {
   /**
    * The chat a sub-chat was adopted away from. A result it was still owed is
    * not coming, so it hears that now, as the report the result would have
-   * been (`buildReport` writes the line). Then it is looked at again as a
+   * been (`buildSection` writes the line). Then it is looked at again as a
    * chat that ran out of turns: it may have been waiting on this chat alone,
    * with a report of its own held back.
    */
   private async tellFormerParent(parentChatId: string, chatId: string, owed: boolean) {
-    if (owed) {
-      await this.deliverInTurn(parentChatId, chatId).catch((error) => {
+    const chat = this.store.getChat(chatId)
+    if (owed && chat) {
+      await this.deliverInTurn(parentChatId, chatId, this.buildSection(parentChatId, chat)).catch((error) => {
         this.onError(`could not tell chat ${parentChatId} that sub-chat ${chatId} was adopted: ${errorMessage(error)}`)
       })
     }
@@ -883,19 +1177,28 @@ export class ChatOrchestrator {
   /**
    * One chat's agent sending another a message. Returns the queue id when the
    * message is waiting behind a turn, and none when its own turn has started.
+   *
+   * From a delegator it is also a hand-off on `ticket`, minted before the
+   * message goes so that a turn failing at once still reports against it.
    */
   private async send(
     actorChatId: string,
     target: ChatRecord,
     content: string,
     run: ReturnType<ChatOrchestrator["resolveRun"]>,
-    options: { report: boolean; steer?: boolean },
-  ): Promise<{ queuedMessageId?: string }> {
+    options: { report: boolean; steer?: boolean; ticket?: TicketTarget | null },
+  ): Promise<{ queuedMessageId?: string; ticket?: HandedOffTicket }> {
     const source: MessageSource = { kind: "agent", chatId: actorChatId }
     // Marked before the turn starts: a turn that fails at once still ends, and
     // that end is what sends the report.
     if (options.report) await this.store.setReportOwed(target.id, true)
+    let ticket: TicketRecord | null = null
+    let delegationId: string | null = null
+    let reopened = false
     try {
+      if (options.ticket) ({ ticket, delegationId, reopened } = await this.startHandoff(actorChatId, options.ticket, target.id))
+      if (delegationId) this.sendingHandoffs.add(delegationId)
+      const handedOff = ticket ? { ticket: handedOffTicket(actorChatId, ticket, reopened) } : {}
       if (options.steer) {
         const { provider, model, effort, planMode, autoPlan } = run
         // A steer either starts the message or throws, so nothing is left queued.
@@ -903,128 +1206,105 @@ export class ChatOrchestrator {
           { type: "message.enqueue", chatId: target.id, content, provider, model, planMode, autoPlan, steer: true },
           { source, effort },
         )
-        return {}
+        if (delegationId) await this.placeHandoff(actorChatId, target.id, delegationId)
+        return handedOff
       }
       const sent = await this.commands.send({ type: "chat.send", chatId: target.id, content, ...run }, { source })
-      return "queued" in sent.result ? { queuedMessageId: sent.result.queuedMessageId } : {}
+      const queuedMessageId = "queued" in sent.result ? sent.result.queuedMessageId : undefined
+      if (delegationId) await this.placeHandoff(actorChatId, target.id, delegationId, queuedMessageId)
+      return queuedMessageId ? { queuedMessageId, ...handedOff } : handedOff
     } catch (error) {
       if (options.report) await this.store.setReportOwed(target.id, false).catch(() => {})
-      throw new Error(`Chat ${target.id} exists, but its turn did not start: ${errorMessage(error)}`)
+      if (delegationId) await this.tickets?.settle(actorChatId, target.id, [delegationId]).catch(() => {})
+      // An inline ticket was made all the same. Retrying with it again would make a second.
+      const retry = ticket ? ` The hand-off was recorded on ticket #${ticket.number}; pass ticketId "${ticket.id}" to try again.` : ""
+      throw new Error(`Chat ${target.id} exists, but its turn did not start: ${errorMessage(error)}${retry}`)
+    } finally {
+      if (delegationId) this.sendingHandoffs.delete(delegationId)
     }
   }
 
   /**
-   * Blocks until each chat's turn has ended or one needs the user. A timeout
-   * or a cancelled caller stops the wait, never the chats.
-   *
-   * A chat whose turn ended while work it handed off is still going counts,
-   * the same moment its report goes (`maybeReport`): the caller gets that
-   * status and the reply so far. It counts once per turn. A caller that has
-   * that reply and waits again is held until the chat's next turn ends, or a
-   * loop of waits would return the same answer as fast as it could ask.
+   * Says where a hand-off's message went once its send returns: into the
+   * chat's queue, or into the turn it started or was steered into. Placed
+   * here and not by the turn's start (`placeQueuedHandoffs`), because the
+   * send is what knows which message is this hand-off's.
    */
-  async waitForChats(
-    actorChatId: string,
-    input: { chatIds: string[]; mode?: "all" | "any"; timeoutMs?: number },
-    signal?: AbortSignal,
-  ) {
-    const chatIds = [...new Set(input.chatIds)]
-    if (chatIds.includes(actorChatId)) throw new Error("A chat cannot wait for itself.")
-    for (const chatId of chatIds) this.requireChat(chatId)
-    const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(0, input.timeoutMs ?? DEFAULT_WAIT_MS))
+  private async placeHandoff(actorChatId: string, childChatId: string, delegationId: string, queuedMessageId?: string) {
+    const board = this.tickets
+    const handoff = board?.findHandoff(actorChatId, delegationId)
+    if (!board || !handoff || handoff.turn !== null) return
+    // Still waiting: the turn that takes it from the queue places it.
+    if (queuedMessageId && this.store.getQueuedMessage(childChatId, queuedMessageId)) {
+      await board.delivered(actorChatId, [handoff], { queuedMessageId })
+      return
+    }
+    await board.delivered(actorChatId, [handoff], { turn: this.store.getChat(childChatId)?.turnCount ?? 0 })
+  }
 
-    const claimed = chatIds.filter((chatId) => this.store.getChat(chatId)?.parentChatId === actorChatId)
-    const turnEndedAtStart = new Map(chatIds.map((chatId) => [chatId, this.store.getChat(chatId)?.lastTurnEndedAt]))
-    /** A reply from the chat's latest turn that this caller does not have yet. */
-    const hasNews = (chat: ChatRecord) => {
-      // A sub-chat that owes this caller a report: by the report's own mark,
-      // or a report sent and still unread in the caller's queue.
-      if (chat.reportOwed && chat.parentChatId === actorChatId && claimed.includes(chat.id)) {
-        if (chat.reportedThrough !== (chat.lastTurnEndedAt ?? 0)) return true
-        return this.store.getQueuedMessages(actorChatId)
-          .some((message) => message.source?.kind === "report" && message.source.chatIds.includes(chat.id))
+  /**
+   * A turn of the chat began: the hand-offs whose queued message it took
+   * are its, and only those. The coordinator says which message that was as
+   * it leaves the queue (`handleQueuedMessageRemoved`), just before the turn
+   * starts.
+   *
+   * Not "every message gone from the queue": one removed by hand left too,
+   * and a turn that ran something else once counted its hand-off as done
+   * (a delegator moved a commit ahead of a ticket's work, and the commit's
+   * report said the ticket had finished). A removal withdraws its hand-offs
+   * as it happens, so a message gone while another was taken went unsent.
+   * One gone with no record of any take (a restart between the two, or a
+   * store without the hook) is read the old way, as taken by this turn.
+   */
+  private placeQueuedHandoffs(chat: ChatRecord) {
+    const board = this.tickets
+    const takenMessageId = this.takenMessages.get(chat.id)
+    this.takenMessages.delete(chat.id)
+    if (!board || !chat.parentChatId) return
+    const taken: TicketHandoff[] = []
+    const gone: TicketHandoff[] = []
+    for (const handoff of board.queuedFor(chat.parentChatId, chat.id)) {
+      if (!handoff.queuedMessageId) {
+        // A send still under way places its own hand-off when it returns.
+        if (!this.sendingHandoffs.has(handoff.delegationId)) taken.push(handoff)
+      } else if (handoff.queuedMessageId === takenMessageId) {
+        taken.push(handoff)
+      } else if (!this.store.getQueuedMessage(chat.id, handoff.queuedMessageId)) {
+        (takenMessageId === undefined ? taken : gone).push(handoff)
       }
-      return chat.lastTurnEndedAt !== turnEndedAtStart.get(chat.id)
     }
-    const stillGoing = (chatId: string) => {
-      const chat = this.store.getChat(chatId)
-      if (!chat) return false
-      const status = this.statusOf(chat)
-      return status === "running" || (isStillGoing(status) && !hasNews(chat))
+    const parentChatId = chat.parentChatId
+    if (taken.length > 0) {
+      void board.delivered(parentChatId, taken, { turn: chat.turnCount ?? 0 }).catch((error) => {
+        this.onError(`could not place hand-offs to chat ${chat.id} in its turn: ${errorMessage(error)}`)
+      })
     }
-    const satisfied = () => {
-      const going = chatIds.filter(stillGoing).length
-      return input.mode === "any" ? going < chatIds.length : going === 0
-    }
+    if (gone.length > 0) void this.withdrawHandoffs(parentChatId, gone)
+  }
 
-    for (const chatId of claimed) this.claims.set(chatId, (this.claims.get(chatId) ?? 0) + 1)
-    let timedOut = false
-    let aborted = false
+  /**
+   * A message left a chat's queue. `taken`: a turn is starting with it, and
+   * `placeQueuedHandoffs` places its hand-offs there. Otherwise it was
+   * removed unsent (the user, or an agent's `update_queued_message`), and
+   * the hand-offs it carried are withdrawn: no chat ever had that work.
+   */
+  handleQueuedMessageRemoved(chatId: string, queuedMessageId: string, taken: boolean) {
+    if (taken) {
+      this.takenMessages.set(chatId, queuedMessageId)
+      return
+    }
+    const chat = this.store.getChat(chatId)
+    if (!chat?.parentChatId || !this.tickets) return
+    const carried = this.tickets.carriedBy(chat.parentChatId, chatId, queuedMessageId)
+    if (carried.length > 0) void this.withdrawHandoffs(chat.parentChatId, carried)
+  }
+
+  private async withdrawHandoffs(delegatorChatId: string, handoffs: readonly TicketHandoff[]) {
     try {
-      if (!satisfied()) {
-        await new Promise<void>((resolve) => {
-          const waiter: Waiter = {
-            actorChatId,
-            chatIds,
-            check: () => {
-              if (!aborted && !timedOut && !satisfied()) return
-              clearTimeout(timer)
-              clearInterval(poll)
-              signal?.removeEventListener("abort", onAbort)
-              this.waiters.delete(waiter)
-              resolve()
-            },
-          }
-          const onAbort = () => {
-            aborted = true
-            waiter.check()
-          }
-          const timer = setTimeout(() => {
-            timedOut = true
-            waiter.check()
-          }, timeoutMs)
-          const poll = setInterval(waiter.check, WAIT_POLL_MS)
-          signal?.addEventListener("abort", onAbort, { once: true })
-          this.waiters.add(waiter)
-          if (signal?.aborted) onAbort()
-        })
-      }
-      // The caller's turn ended, so it never sees this result.
-      if (aborted) throw new Error("Cancelled")
-
-      const outcomes = chatIds.map((chatId) => this.outcomeOf(this.requireChat(chatId)))
-      // The caller now has these results, so they must not also arrive as a
-      // report: neither one still owed, nor one already waiting in its queue.
-      const delivered: string[] = []
-      for (const chatId of claimed) {
-        const chat = this.store.getChat(chatId)
-        // Adopted away during the wait: the report it owes is its new parent's.
-        if (chat?.parentChatId !== actorChatId) continue
-        const status = outcomes.find((entry) => entry.chatId === chatId)?.status
-        if (!status || status === "running" || status === "needs_input") continue
-        delivered.push(chatId)
-        // Still waiting on work of its own: the caller has this turn's reply,
-        // and is owed the next one's.
-        if (isStillGoing(status)) {
-          if (chat.reportOwed) await this.store.setReportedThrough(chatId, chat.lastTurnEndedAt ?? 0)
-        } else {
-          if (chat.reportOwed) this.watchForLaterTurn(chatId)
-          await this.store.setReportOwed(chatId, false)
-        }
-      }
-      await this.dropQueuedReports(actorChatId, delivered)
-      return { timedOut: timedOut && !satisfied(), chats: outcomes }
-    } finally {
-      // Held until here, so no report can slip out between the wait ending
-      // and its results being marked as delivered.
-      for (const chatId of claimed) {
-        const count = (this.claims.get(chatId) ?? 1) - 1
-        if (count > 0) this.claims.set(chatId, count)
-        else this.claims.delete(chatId)
-      }
-      // Whatever the wait did not hand over is the report's to deliver again:
-      // a sub-chat still going, or every one of them when the caller was cancelled.
-      for (const chatId of claimed) void this.maybeReport(chatId)
+      await this.tickets!.withdraw(delegatorChatId, handoffs)
+      this.push({ sidebar: true, chatIds: [delegatorChatId] })
+    } catch (error) {
+      this.onError(`could not withdraw hand-offs on ${delegatorChatId}'s board: ${errorMessage(error)}`)
     }
   }
 
@@ -1035,6 +1315,8 @@ export class ChatOrchestrator {
     if (this.isParentOf(target.id, actorChatId)) {
       this.forgetLaterTurn(target.id)
       await this.store.setReportOwed(target.id, false)
+      // With no report coming, nothing else would settle its hand-offs.
+      if (target.parentChatId) await this.tickets?.settle(target.parentChatId, target.id)
     }
     await this.commands.cancel(target.id)
     this.push({ sidebar: true, chatIds: [target.id] })
@@ -1074,6 +1356,11 @@ export class ChatOrchestrator {
     const outcome = input.action === "remove"
       ? await this.commands.dequeue({ type: "message.dequeue", chatId: chat.id, queuedMessageId: input.queuedMessageId })
       : await this.commands.steer({ type: "message.steer", chatId: chat.id, queuedMessageId: input.queuedMessageId })
+    // The store's hook does this too; here as well so the result is true at once. A second pass finds nothing.
+    if (input.action === "remove" && chat.parentChatId && this.tickets) {
+      const carried = this.tickets.carriedBy(chat.parentChatId, chat.id, input.queuedMessageId)
+      if (carried.length > 0) await this.withdrawHandoffs(chat.parentChatId, carried)
+    }
     this.push(outcome.changed!)
     return this.summarize(this.requireChat(chat.id))
   }
@@ -1309,9 +1596,9 @@ export class ChatOrchestrator {
 
   // ── Coordinator hooks ──────────────────────────────────────────────────
 
-  /** A chat ran out of turns. Wakes waits on it and reports it, and any ancestor it was holding up. */
+  /** A chat ran out of turns. Reports it, and any ancestor it was holding up. */
   handleChatSettled(chatId: string) {
-    for (const waiter of [...this.waiters]) waiter.check()
+    this.maybeNudge(chatId)
     // What a reported sub-chat was watched for is over. Its end is not a
     // turn's start: a provider about to answer it has not begun to, so the
     // watch runs on for as long as a closing report would wait.
@@ -1338,20 +1625,48 @@ export class ChatOrchestrator {
 
   /**
    * A sub-chat's turn began. Its parent's task log shows that, and every chat
-   * above it that was at rest is waiting on it from now.
+   * above it that was at rest is waiting on it from now. A turn that ended
+   * just before it, owed and not yet reported, is reported now
+   * (`reportEndedTurn`).
    */
   handleTurnStarted(chatId: string) {
+    const endedTurnOwed = this.owedTurns.delete(chatId)
+    const chat = this.store.getChat(chatId)
+    let owed = Boolean(chat?.reportOwed)
     if (this.laterTurns.has(chatId)) {
       // The turn a sub-chat's shell was watched for, or one someone gave it
       // meanwhile. Either way its parent has not heard what it says.
       this.forgetLaterTurn(chatId)
-      if (this.store.getChat(chatId)?.parentChatId) {
+      if (chat?.parentChatId) {
+        owed = true
         void this.store.setReportOwed(chatId, true).catch((error) => {
           this.onError(`could not mark sub-chat ${chatId} as owing a report: ${errorMessage(error)}`)
         })
       }
     }
+    if (owed && chat?.parentChatId) this.owedTurns.add(chatId)
+    // The turn that ended is the one before this one. It is reported, and its
+    // hand-offs settled, before this turn's are placed and could be counted in.
+    if (endedTurnOwed) void this.reportEndedTurn(chatId, (chat?.turnCount ?? 1) - 1)
+    if (chat) this.placeQueuedHandoffs(chat)
     this.pushChatsAbove(chatId)
+  }
+
+  /**
+   * The chat stopped to ask the user something, or for plan approval. That
+   * ends no turn, so no report says it; a delegator's tickets hear it here,
+   * and its board, which puts them in Waiting on you, is pushed.
+   */
+  handleWaitingForUser(chatId: string) {
+    const chat = this.store.getChat(chatId)
+    const parentChatId = chat?.parentChatId
+    if (!chat || !parentChatId || !this.tickets) return
+    // The tickets whose work is in this turn or before it, not those still queued.
+    const { tickets } = this.tickets.coveredBy(parentChatId, chatId, chat.turnCount ?? 0, { final: true, sending: this.sendingHandoffs })
+    void this.tickets.recordAsking(parentChatId, chatId, tickets).then(
+      () => this.push({ sidebar: true, chatIds: [parentChatId] }),
+      (error) => this.onError(`could not note on its tickets that chat ${chatId} is asking: ${errorMessage(error)}`),
+    )
   }
 
   /**
@@ -1382,9 +1697,14 @@ export class ChatOrchestrator {
   handleChatStopped(chatId: string) {
     for (const child of this.childrenOf(chatId)) {
       this.forgetLaterTurn(child.id)
+      // No report comes back from any of them, so their hand-offs end here.
+      void this.tickets?.settle(chatId, child.id).catch((error) => {
+        this.onError(`could not settle the tickets of sub-chat ${child.id}: ${errorMessage(error)}`)
+      })
       if (child.adopted) {
         // Not this chat's to stop: its turn may be the user's. It only stops
         // owing a report, for the reason the others report nothing.
+        this.owedTurns.delete(child.id)
         void this.store.setReportOwed(child.id, false).catch((error) => {
           this.onError(`could not release adopted chat ${child.id} from its report: ${errorMessage(error)}`)
         })
@@ -1442,23 +1762,46 @@ export class ChatOrchestrator {
   }
 
   /**
+   * Whether the message that starts this turn is one agent talking to
+   * another, with no person there to answer a prompt.
+   *
+   * A message another chat's agent sent is. A report is not: it arrives in
+   * the chat that handed the work out, where the user is. A schedule is when
+   * an agent wrote it for another chat, or a sub-chat set it for itself as
+   * more of the work its parent hears about (`reportsToParent`). One a chat
+   * set for itself otherwise, or the user set, runs for the user.
+   */
+  isAgentToAgent(chatId: string, source?: MessageSource) {
+    if (source?.kind === "agent") return true
+    if (source?.kind !== "schedule") return false
+    const schedule = this.store.getSchedule(source.scheduleId)
+    if (!schedule) return false
+    return Boolean(schedule.reportsToParent || (schedule.createdByChatId && schedule.createdByChatId !== chatId))
+  }
+
+  /**
    * Wire-only notes for the harness at the start of a turn: who sent the
    * prompt when it was not the user, and which sub-chats are still running.
    */
-  buildTurnNotices(chatId: string, source?: MessageSource): string[] {
+  buildTurnNotices(chatId: string, source?: MessageSource, turn?: AgentToAgentTurn): string[] {
     const notices: string[] = []
+    // No person to answer a prompt in this turn. See `agent-to-agent.ts`.
+    const agentNote = turn && this.isAgentToAgent(chatId, source) ? ` ${buildAgentToAgentNote(turn)}` : ""
     if (source?.kind === "agent") {
       const sender = this.store.getChat(source.chatId)
       const chat = this.store.getChat(chatId)
       const parentNote = chat?.parentChatId !== source.chatId
         ? ""
         : ` It ${chat.adopted ? "adopted" : "started"} this chat, and your final reply is sent back to it when you finish.`
-      notices.push(`<system-message>This message was sent by the agent in Kanna chat "${sender?.title ?? "unknown"}" (chat id ${source.chatId}), not typed by the user.${parentNote}</system-message>`)
+      notices.push(`<system-message>This message was sent by the agent in Kanna chat "${sender?.title ?? "unknown"}" (chat id ${source.chatId}), not typed by the user.${parentNote}${agentNote}</system-message>`)
     } else if (source?.kind === "report") {
       notices.push("<system-message>This is Kanna reporting on chats you started, not a message from the user. Carry on with what you were doing for the user.</system-message>")
     } else if (source?.kind === "schedule") {
       const schedule = this.store.getSchedule(source.scheduleId)
-      notices.push(`<system-message>This message was sent by the schedule "${schedule?.name ?? "unknown"}" (schedule id ${source.scheduleId}), not typed by the user just now.</system-message>`)
+      notices.push(`<system-message>This message was sent by the schedule "${schedule?.name ?? "unknown"}" (schedule id ${source.scheduleId}), not typed by the user just now.${agentNote}</system-message>`)
+    } else if (source?.kind === "ticket" && source.replyId) {
+      const notice = this.ticketReplyNotice(chatId, source.ticketId, source.replyId)
+      if (notice) notices.push(notice)
     }
     // An adopted chat is listed only while a result from it is still to come.
     const running = this.childrenOf(chatId).filter((child) => this.isLive(child.id) && (!child.adopted || this.isReportDue(child)))
@@ -1472,6 +1815,22 @@ export class ChatOrchestrator {
     return notices
   }
 
+  /**
+   * The header for the user's reply on a ticket: which ticket, how it stands
+   * now, its chats, and how to answer. Wire-only, like every notice here,
+   * so the stored prompt is just what the user wrote and goes to the harness
+   * as a chat message does, with a leading `/skill` still leading. Null for
+   * a ticket or reply no longer on the board.
+   */
+  private ticketReplyNotice(chatId: string, ticketId: string, replyId: string): string | null {
+    const ticket = this.tickets?.get(chatId, ticketId)
+    const reply = ticket?.replies.find((candidate) => candidate.id === replyId)
+    if (!this.tickets || !ticket || !reply) return null
+    // A reply on a Done ticket reopens it in the same moment it lands.
+    const reopened = ticket.history.some((event) => event.kind === "reopened" && event.cause === "user_reply" && event.createdAt === reply.createdAt)
+    return buildTicketReplyHeader(this.tickets.summary(ticket), reopened)
+  }
+
   // ── Reports ────────────────────────────────────────────────────────────
 
   /**
@@ -1483,49 +1842,59 @@ export class ChatOrchestrator {
    * said is for both, and is the only part the user sees. A rule separates
    * one sub-chat's words from the next, and only where both have some.
    *
-   * Clients take the message apart again to draw one bubble per sub-chat
+   * Clients take the message apart again to draw one line per sub-chat
    * (`splitReportSections`). They rely on the block, on `(chat id …)` inside
-   * it, and on the rule. They also read the word after `Sub-chat` (a status
-   * that is still going marks the reply "Not final", and `adopted` draws a
-   * line of its own) and, for an adoption, the adopter's `(/chat/…)` link
+   * it, and on the rule. They also read the word after `Sub-chat` (the line
+   * says "replied", "failed", "needs input", or "still working" for a status
+   * that is still going, and `adopted` draws a line of its own) and, for an adoption, the adopter's `(/chat/…)` link
    * followed by `, which adopted it`. A change to any of those is a change
    * there too.
+   *
+   * One section per report, written when the report is decided on, so it
+   * holds the reply of the turn that earned it. A report that finds another
+   * still waiting in the parent's queue is added to it (`deliverReport`), and
+   * one sub-chat can then have a section for each turn, in order.
+   *
+   * The reply goes whole, up to `REPORT_TEXT_LIMIT`. `replyReported` is a
+   * close-out after an interim report that already carried the same reply.
    */
-  private buildReport(parentChatId: string, chatIds: string[]) {
-    const sections: string[] = []
-    let shown = false
-    for (const chatId of chatIds) {
-      const chat = this.store.getChat(chatId)
-      if (!chat) continue
-      // Adopted by another chat since this report was owed. The result goes
-      // there now, so this parent gets the news instead, in the same shape.
-      const adopter = chat.parentChatId && chat.parentChatId !== parentChatId ? this.store.getChat(chat.parentChatId) : null
-      if (adopter) {
-        sections.push(`<system-message>\nSub-chat adopted: [${chat.title}](${chatLink(chat.id)}) (chat id ${chat.id}) now reports to the chat "${adopter.title}" (${chatLink(adopter.id)}), which adopted it. Its result will not arrive here. read_chat and wait_for_chats still reach it.\n</system-message>`)
-        continue
-      }
-      const outcome = this.outcomeOf(chat)
-      const lines = [`Sub-chat ${outcome.status}: [${chat.title}](${chatLink(chat.id)}) (chat id ${chat.id})`]
-      const interim = this.interimNote(chat, outcome.status)
-      if (interim) lines.push(interim)
-      // Not waiting on anything, so this is its answer. What it left running
-      // may still give it something to add (`laterTurns`).
-      else {
-        const left = describeLeftRunning(this.agent.getLeftRunning(chat.id))
-        if (left) lines.push(`It left ${left} running in the background, which it is not waiting on. If that gives it another turn, that turn is reported here too.`)
-      }
-      for (const schedule of this.followUpSchedules(chat.id)) {
-        lines.push(`It set itself the schedule "${schedule.name}", which next runs at ${iso(schedule.nextRunAt!)}. The turn each run starts is reported here too.`)
-      }
-      const header = `<system-message>\n${lines.join("\n")}\n</system-message>`
-      if (!outcome.finalMessage) {
-        sections.push(header)
-        continue
-      }
-      sections.push(`${header}\n\n${shown ? "---\n\n" : ""}${outcome.finalMessage}`)
-      shown = true
+  private buildSection(parentChatId: string, chat: ChatRecord, options?: { replyReported?: boolean; tickets?: readonly TicketRecord[] }): ReportSection {
+    // Adopted by another chat since this report was owed. The result goes
+    // there now, so this parent gets the news instead, in the same shape.
+    const adopter = chat.parentChatId && chat.parentChatId !== parentChatId ? this.store.getChat(chat.parentChatId) : null
+    if (adopter) {
+      return { header: `<system-message>\nSub-chat adopted: [${chat.title}](${chatLink(chat.id)}) (chat id ${chat.id}) now reports to the chat "${adopter.title}" (${chatLink(adopter.id)}), which adopted it. Its result will not arrive here. read_chat still reads it.\n</system-message>` }
     }
-    return sections.join("\n\n")
+    const outcome = this.outcomeOf(chat)
+    const lines = [`Sub-chat ${outcome.status}: [${chat.title}](${chatLink(chat.id)}) (chat id ${chat.id})`]
+    // A delegator's: the tickets of the hand-offs the reported turns handled
+    // (`TicketBoard.coveredBy`). Second, so
+    // the status line stays first for the clients that read it.
+    const awaiting = options?.tickets ?? []
+    const tickets = ticketReportLine(awaiting)
+    if (tickets) lines.push(tickets)
+    const ticketIds = awaiting.length ? { ticketIds: awaiting.map((ticket) => ticket.id) } : {}
+    const interim = this.interimNote(chat, outcome.status)
+    if (interim) lines.push(interim)
+    // Not waiting on anything, so this is its answer. What it left running
+    // may still give it something to add (`laterTurns`).
+    else {
+      if (options?.replyReported && outcome.finalMessage) {
+        lines.push("The work it was waiting on ended without giving it another turn, so the reply already reported here is its result.")
+      }
+      const left = describeLeftRunning(this.agent.getLeftRunning(chat.id))
+      if (left) lines.push(`It left ${left} running in the background, which it is not waiting on. If that gives it another turn, that turn is reported here too.`)
+    }
+    for (const schedule of this.followUpSchedules(chat.id)) {
+      lines.push(`It set itself the schedule "${schedule.name}", which next runs at ${iso(schedule.nextRunAt!)}. The turn each run starts is reported here too.`)
+    }
+    if (outcome.cut && !options?.replyReported) {
+      const { index, textOffset, totalChars } = outcome.cut
+      lines.push(`Its reply is ${totalChars.toLocaleString("en-US")} characters, more than a report carries, so only the first ${REPORT_TEXT_LIMIT.toLocaleString("en-US")} are below. read_chat reads the rest: ${JSON.stringify({ chatId: chat.id, after: index - 1, textOffset })}.`)
+    }
+    const header = `<system-message>\n${lines.join("\n")}\n</system-message>`
+    if (!outcome.finalMessage || options?.replyReported) return { header, ...ticketIds }
+    return { header, reply: outcome.finalMessage, ...ticketIds }
   }
 
   /**
@@ -1533,7 +1902,7 @@ export class ChatOrchestrator {
    * word. The parent's agent reads the reply under it as a result otherwise.
    */
   private interimNote(chat: ChatRecord, status: AgentChatStatus) {
-    if (status === "running") return "It has started another turn since. Its report follows when that turn ends."
+    if (status === "running") return "It went straight on into another turn, so what follows is the whole reply of the turn before. The new turn's report follows when it ends."
     if (!isStillGoing(status)) return null
     const waitingOn = status === "waiting_on_subagent"
       ? "work it handed to agents of its own (a subagent or a workflow)"
@@ -1564,8 +1933,11 @@ export class ChatOrchestrator {
    *
    * It travels as an ordinary message: the parent's turn starts if it is
    * idle, and it waits its turn in the queue otherwise. A report already
-   * waiting there is replaced by one that covers both, so five sub-chats
-   * finishing do not cost the parent five turns.
+   * waiting there takes this one in, so five sub-chats finishing do not cost
+   * the parent five turns.
+   *
+   * A turn that another starts straight after never settles the chat, so it
+   * is not reported here but by `reportEndedTurn`.
    */
   private async maybeReport(chatId: string) {
     const chat = this.store.getChat(chatId)
@@ -1573,14 +1945,14 @@ export class ChatOrchestrator {
       this.cancelCloseOut(chatId)
       return
     }
-    if (this.claims.has(chatId) || this.reporting.has(chatId)) return
+    if (this.reporting.has(chatId)) return
     const status = this.statusOf(chat)
     if (status === "running" || status === "needs_input") {
       this.cancelCloseOut(chatId)
       return
     }
     // A report from one of its own sub-chats is being written. It starts a
-    // turn here, and that turn's end is the one to report.
+    // turn here, whose start reports this one (`reportEndedTurn`).
     if (this.childrenOf(chatId).some((child) => this.reporting.has(child.id))) return
     const waiting = isStillGoing(status)
     const through = chat.lastTurnEndedAt ?? 0
@@ -1597,6 +1969,13 @@ export class ChatOrchestrator {
       this.cancelCloseOut(chatId)
     }
     const parentChatId = chat.parentChatId
+    // Every turn up to the last has ended, so this report covers their
+    // hand-offs. Only a last word settles them: an interim one names them.
+    const covered = this.tickets?.coveredBy(parentChatId, chatId, chat.turnCount ?? 0, { final: !waiting, sending: this.sendingHandoffs })
+    // Written now, from the turn that earned it, before anything can change.
+    const section = this.buildSection(parentChatId, chat, { replyReported: chat.reportedThrough === through, tickets: covered?.tickets })
+    // This report covers the turn that ended last. See `owedTurns`.
+    this.owedTurns.delete(chatId)
     this.reporting.add(chatId)
     try {
       // Written before the send, so a failure cannot leave it to be sent twice.
@@ -1605,13 +1984,63 @@ export class ChatOrchestrator {
       } else {
         await this.store.setReportOwed(chatId, false)
         this.watchForLaterTurn(chatId)
+        // Its last word, so the tickets its turns worked for hear how it
+        // ended and those hand-offs are done. An interim report is neither.
+        if (covered) {
+          await this.tickets?.recordReport(parentChatId, chatId, status === "failed" ? "chat_failed" : "chat_finished", covered)
+            .catch((error) => this.onError(`could not record sub-chat ${chatId}'s report on its tickets: ${errorMessage(error)}`))
+        }
       }
-      await this.deliverInTurn(parentChatId, chatId)
+      await this.deliverInTurn(parentChatId, chatId, section)
     } catch (error) {
       this.onError(`could not report sub-chat ${chatId} to its parent: ${errorMessage(error)}`)
     } finally {
       this.reporting.delete(chatId)
       // The parent's own report held back while this one was being written.
+      void this.maybeReport(parentChatId)
+    }
+  }
+
+  /**
+   * Reports the turn that just ended when the next one started at once.
+   *
+   * A message waiting in a sub-chat's queue (most often its parent's
+   * follow-up, sent while it was busy) starts the next turn the moment one
+   * ends. The chat never settles in between, so `maybeReport` finds it
+   * running, and the reply of the turn that ended would be lost: the next
+   * report carries only the newer turn. So it goes up now, marked as one the
+   * chat has gone on from, and `reportedThrough` keeps it from going twice.
+   *
+   * Only a turn that was owed when it started (`owedTurns`), so a parent
+   * that queued a message behind someone else's turn does not get that
+   * turn's reply. A turn that was stopped is not reported: whoever stopped
+   * it knows, and a steer's new turn carries the same work on.
+   */
+  private async reportEndedTurn(chatId: string, endedTurn: number) {
+    const chat = this.store.getChat(chatId)
+    if (!chat?.reportOwed || !chat.parentChatId || this.reporting.has(chatId)) return
+    if (chat.lastTurnOutcome === "cancelled") return
+    const through = chat.lastTurnEndedAt ?? 0
+    if (chat.reportedThrough === through) return
+    const parentChatId = chat.parentChatId
+    // The ended turn's reply is its whole answer to the hand-offs it took,
+    // so they settle now, though the chat goes on with the next one's.
+    const covered = this.tickets?.coveredBy(parentChatId, chatId, endedTurn)
+    const section = this.buildSection(parentChatId, chat, { tickets: covered?.tickets })
+    this.reporting.add(chatId)
+    try {
+      await this.store.setReportedThrough(chatId, through)
+      if (covered) {
+        await this.tickets?.recordReport(parentChatId, chatId, chat.lastTurnOutcome === "failed" ? "chat_failed" : "chat_finished", covered)
+          .catch((error) => this.onError(`could not record sub-chat ${chatId}'s report on its tickets: ${errorMessage(error)}`))
+      }
+      await this.deliverInTurn(parentChatId, chatId, section)
+    } catch (error) {
+      this.onError(`could not report sub-chat ${chatId} to its parent: ${errorMessage(error)}`)
+    } finally {
+      this.reporting.delete(chatId)
+      // A turn end that came while this was being written was held back by it.
+      void this.maybeReport(chatId)
       void this.maybeReport(parentChatId)
     }
   }
@@ -1662,9 +2091,9 @@ export class ChatOrchestrator {
    * One delivery at a time per parent: two sub-chats finishing together would
    * each miss the other's report in the queue and send two.
    */
-  private deliverInTurn(parentChatId: string, chatId: string) {
+  private deliverInTurn(parentChatId: string, chatId: string, section: ReportSection) {
     const previous = this.deliveries.get(parentChatId) ?? Promise.resolve()
-    const delivery = previous.then(() => this.deliverReport(parentChatId, chatId))
+    const delivery = previous.then(() => this.deliverReport(parentChatId, chatId, section))
     const tail = delivery.catch(() => {})
     this.deliveries.set(parentChatId, tail)
     void tail.then(() => {
@@ -1673,49 +2102,293 @@ export class ChatOrchestrator {
     return delivery
   }
 
-  private async deliverReport(parentChatId: string, chatId: string) {
+  private async deliverReport(parentChatId: string, chatId: string, section: ReportSection) {
     const parent = this.store.getChat(parentChatId)
     // A report to a chat the user put away would bring it back uninvited.
     if (!parent || parent.archivedAt) return
     let chatIds = [chatId]
+    let before = ""
+    let tickets: Record<string, string[]> = section.ticketIds ? { [chatId]: section.ticketIds } : {}
     const waiting = this.store.getQueuedMessages(parent.id).find((message) => message.source?.kind === "report")
     if (waiting?.source?.kind === "report") {
-      // Once each: a sub-chat can report again before the parent has read
-      // its last report, and the newer one is written from how it stands now.
+      // Added to, not rewritten: what it already says is a reply of its own,
+      // and a sub-chat that reports again before the parent reads it would
+      // otherwise lose the earlier one.
       const merged = [...new Set([...waiting.source.chatIds, chatId])]
+      const mergedTickets = { ...waiting.source.tickets }
+      if (section.ticketIds) mergedTickets[chatId] = [...new Set([...(mergedTickets[chatId] ?? []), ...section.ticketIds])]
       // If it is gone by now the parent's turn ended and took it, and those
       // results are already delivered.
-      await this.store.removeQueuedMessage(parent.id, waiting.id).then(() => { chatIds = merged }, () => {})
+      await this.store.removeQueuedMessage(parent.id, waiting.id).then(() => {
+        chatIds = merged
+        before = waiting.content
+        tickets = mergedTickets
+      }, () => {})
     }
     await this.commands.send({
       type: "chat.send",
       chatId: parent.id,
-      content: this.buildReport(parent.id, chatIds),
+      content: appendReportSection(before, section),
       // The parent carries on as it was running: same model and mode.
       provider: parent.provider ?? undefined,
       model: parent.lastModel,
       planMode: parent.planMode,
       autoPlan: parent.autoPlan,
-    }, { source: { kind: "report", chatIds } })
+    }, { source: { kind: "report", chatIds, ...(Object.keys(tickets).length ? { tickets } : {}) } })
     this.push({ sidebar: true, chatIds: [parent.id] })
   }
 
-  /** Takes results the parent already has out of a report still waiting in its queue. */
-  private async dropQueuedReports(parentChatId: string, chatIds: string[]) {
-    if (chatIds.length === 0) return
-    const waiting = this.store.getQueuedMessages(parentChatId).find((message) => message.source?.kind === "report")
-    if (waiting?.source?.kind !== "report") return
-    const remaining = waiting.source.chatIds.filter((chatId) => !chatIds.includes(chatId))
-    if (remaining.length === waiting.source.chatIds.length) return
-    await this.store.removeQueuedMessage(parentChatId, waiting.id).catch(() => {})
-    if (remaining.length > 0) {
-      await this.store.enqueueMessage(parentChatId, {
-        ...waiting,
-        id: undefined,
-        content: this.buildReport(parentChatId, remaining),
-        source: { kind: "report", chatIds: remaining },
+  // ── Tickets ────────────────────────────────────────────────────────────
+  //
+  // A delegator's board (`shared/tickets.ts`, `ticket-board.ts`). The board
+  // is a layer over the delegator's chat: its transcript is unchanged, and
+  // only `reply_to_ticket` (and the media tools given a ticketId) write on a
+  // ticket. Hand-offs, reports and the user's replies are recorded here.
+
+  /** How a chat stands, as a ticket shows it. Undefined for a chat that is gone. */
+  ticketChatInfo(chatId: string): TicketChatInfo | undefined {
+    const chat = this.store.getChat(chatId)
+    if (!chat || chat.deletedAt) return undefined
+    const status = this.statusOf(chat)
+    const state: TicketChatState = status === "needs_input"
+      ? "waiting_on_you"
+      : isStillGoing(status)
+        ? "working"
+        : status === "failed"
+          ? "failed"
+          : status === "cancelled"
+            ? "stopped"
+            : "finished"
+    return { chatId: chat.id, title: chat.title, state }
+  }
+
+  private requireBoard(actorChatId: string): TicketBoard {
+    if (!this.tickets) throw new Error("Tickets are not available in this session.")
+    if (!this.requireChat(actorChatId).delegator) {
+      throw new Error("Tickets belong to delegator chats, and this chat is not one.")
+    }
+    return this.tickets
+  }
+
+  /**
+   * The ticket a hand-off from this chat is for. Every hand-off from a
+   * delegator names one; from any other chat the choice is ignored. Checked
+   * before anything is created or sent, so a bad choice changes nothing.
+   */
+  private chooseTicket(caller: ChatRecord, input: TicketChoice): TicketTarget | null {
+    if (!caller.delegator || !this.tickets) return null
+    if (input.ticketId && input.ticket) {
+      throw new Error("Pass ticketId or ticket, not both: ticketId hands work on an existing ticket, ticket creates one.")
+    }
+    if (input.ticketId) return { ticket: this.tickets.require(caller.id, input.ticketId) }
+    if (input.ticket) {
+      if (!input.ticket.title?.trim()) throw new Error("ticket needs a title.")
+      return { create: input.ticket }
+    }
+    throw new Error("This chat is a delegator, so every hand-off names a ticket. Pass ticketId to hand on work for an existing ticket (list_tickets shows them), or ticket: { title, body } to create one in the same call.")
+  }
+
+  /** Mints the hand-off, creating its ticket first when the choice was a new one. */
+  private async startHandoff(actorChatId: string, target: TicketTarget, childChatId: string, options?: { outstanding?: boolean }) {
+    const board = this.tickets!
+    const ticket = "ticket" in target ? target.ticket : await board.create(actorChatId, target.create)
+    const { delegationId, reopened } = await board.handoff(actorChatId, ticket.id, childChatId, options)
+    this.push({ sidebar: true, chatIds: [actorChatId] })
+    return { ticket, delegationId, reopened }
+  }
+
+  /**
+   * When a delegator's turns run out: one hidden message about tickets that
+   * got a user reply or a final report it neither wrote on nor handed work
+   * from. The ledger is cleared as it is read, so the nudge's own turn
+   * cannot earn another one for the same news.
+   *
+   * Not while more is about to arrive (a queued message, a report being
+   * delivered): the round is not over. Not after the user stopped it: a
+   * nudge would start it again.
+   */
+  private maybeNudge(chatId: string) {
+    const board = this.tickets
+    if (!board) return
+    const chat = this.store.getChat(chatId)
+    if (!chat?.delegator || chat.deletedAt || chat.archivedAt || chat.lastTurnOutcome === "cancelled") {
+      board.forgetNews(chatId)
+      return
+    }
+    if (this.hasTurnInFlight(chat) || this.deliveries.has(chatId)) return
+    if (this.childrenOf(chatId).some((child) => this.reporting.has(child.id))) return
+    const unanswered = board.takeUnanswered(chatId)
+    if (unanswered.length === 0) return
+    const content = buildTicketNudge(unanswered, (id) => this.store.getChat(id)?.title ?? id)
+    void this.commands.send({
+      type: "chat.send",
+      chatId,
+      content,
+      provider: chat.provider ?? undefined,
+      model: chat.lastModel,
+      planMode: chat.planMode,
+      autoPlan: chat.autoPlan,
+    }, { source: { kind: "ticket_nudge", ticketIds: unanswered.map(({ ticket }) => ticket.id) } }).then(
+      () => this.push({ sidebar: true, chatIds: [chatId] }),
+      (error) => this.onError(`could not nudge delegator ${chatId} about its tickets: ${errorMessage(error)}`),
+    )
+  }
+
+  /**
+   * A message for the delegator from the ticket pane: steered into a turn
+   * that is running, so it is read now, and queued behind one parked on a
+   * question, which a steer would throw away.
+   */
+  private async tellDelegator(chat: ChatRecord, content: string, source: MessageSource, attachments?: ChatAttachment[], settings: TurnSettings = {}) {
+    // What the delegator last ran with, under what the user's composer chose:
+    // a reply typed in the ticket's composer, which is the delegator's own,
+    // runs as a message typed in the chat would.
+    const run = {
+      provider: settings.provider ?? chat.provider ?? undefined,
+      model: settings.model ?? chat.lastModel,
+      ...(settings.modelOptions ? { modelOptions: settings.modelOptions } : {}),
+      planMode: settings.planMode ?? chat.planMode,
+      autoPlan: settings.autoPlan ?? chat.autoPlan,
+    }
+    const parked = this.agent.getActiveStatuses().get(chat.id) === "waiting_for_user"
+    if (this.agent.isBusy(chat.id) && !parked) {
+      try {
+        await this.commands.enqueue({ type: "message.enqueue", chatId: chat.id, content, attachments, ...run, steer: true }, { source })
+      } catch (error) {
+        // The message is queued; it only failed to cut in. It runs next.
+        this.onError(`could not steer a ticket message into delegator ${chat.id}: ${errorMessage(error)}`)
+      }
+      return
+    }
+    await this.commands.send({ type: "chat.send", chatId: chat.id, content, attachments, ...run }, { source })
+  }
+
+  // Reads for the snapshots.
+
+  /** The board on a delegator's chat snapshot. Null for any other chat. */
+  ticketBoard(chatId: string): { tickets: ReturnType<TicketBoard["summaries"]>; ticketAttention: number; untrackedChatIds: string[]; readDoneTotal: number } | null {
+    const chat = this.store.getChat(chatId)
+    if (!this.tickets || !chat?.delegator) return null
+    const all = this.tickets.summaries(chatId)
+    const children = this.childrenOf(chatId).map((child) => child.id)
+    // Capped to the latest read Done tickets (`snapshotTickets`). The count
+    // is of all of them: what waits on the user is never what is cut.
+    const { tickets, readDoneTotal } = snapshotTickets(all)
+    return {
+      tickets,
+      ticketAttention: ticketAttentionCount(all),
+      untrackedChatIds: this.tickets.untracked(chatId, children),
+      readDoneTotal,
+    }
+  }
+
+  ticketDetail(chatId: string, ticketId: string) {
+    return this.tickets?.detail(chatId, ticketId) ?? null
+  }
+
+  /** Every delegator's count for the compass button, those above zero only. For the sidebar. */
+  ticketAttentionByChat(): Map<string, number> {
+    const counts = new Map<string, number>()
+    if (!this.tickets) return counts
+    for (const chat of this.store.state.chatsById.values()) {
+      if (!chat.delegator || chat.deletedAt || !this.tickets.hasBoard(chat.id)) continue
+      const count = this.tickets.attention(chat.id)
+      if (count > 0) counts.set(chat.id, count)
+    }
+    return counts
+  }
+
+  // The user's commands, from the ticket pane. The router pushes what they
+  // change, after its ack.
+
+  /** Stores the reply and sends it to the delegator. See `MessageSource` kind `ticket`. */
+  async replyToTicketAsUser(input: { chatId: string; ticketId: string; text: string; attachments?: ChatAttachment[] } & TurnSettings) {
+    const board = this.requireBoard(input.chatId)
+    const chat = this.requireChat(input.chatId)
+    const ticket = board.require(chat.id, input.ticketId)
+    const reply = await board.reply(chat.id, ticket.id, { author: "user", text: input.text, attachments: input.attachments })
+    // Only what the user wrote, as any message they send: the ticket's header
+    // goes on the wire behind it (`ticketReplyNotice`), so the prompt is a
+    // chat message in every respect, slash commands and skills included.
+    const { provider, model, modelOptions, planMode, autoPlan } = input
+    await this.tellDelegator(chat, reply.text, { kind: "ticket", ticketId: ticket.id, number: ticket.number, title: ticket.title, replyId: reply.id }, input.attachments, { provider, model, modelOptions, planMode, autoPlan })
+    return { replyId: reply.id }
+  }
+
+  /** Close or reopen. A reopen is the delegator's to act on; a close is not. */
+  async setTicketStatusAsUser(input: { chatId: string; ticketId: string; status: "done" | "open" }) {
+    const board = this.requireBoard(input.chatId)
+    const chat = this.requireChat(input.chatId)
+    const ticket = board.require(chat.id, input.ticketId)
+    const changed = await board.setStatus(chat.id, ticket.id, input.status, "user")
+    if (changed && input.status === "open") {
+      await this.tellDelegator(chat, buildTicketReopenMessage(board.summary(ticket)), {
+        kind: "ticket", ticketId: ticket.id, number: ticket.number, title: ticket.title, reopened: true,
       })
     }
-    this.push({ sidebar: true, chatIds: [parentChatId] })
+  }
+
+  async setTicketReadAsUser(input: { chatId: string; ticketId: string; read: boolean }) {
+    const board = this.requireBoard(input.chatId)
+    if (input.read) await board.markRead(input.chatId, input.ticketId)
+    else await board.markUnread(input.chatId, input.ticketId)
+  }
+
+  // The delegator's tools.
+
+  async createTicket(actorChatId: string, input: { title: string; body?: string }) {
+    const board = this.requireBoard(actorChatId)
+    const ticket = await board.create(actorChatId, input)
+    this.push({ sidebar: true, chatIds: [actorChatId] })
+    return { ticketId: ticket.id, number: ticket.number, link: ticketLinkPath(actorChatId, ticket.id) }
+  }
+
+  async updateTicket(actorChatId: string, input: { ticketId: string; title?: string; body?: string; status?: "done" | "open" }) {
+    const board = this.requireBoard(actorChatId)
+    const ticket = board.require(actorChatId, input.ticketId)
+    await board.edit(actorChatId, ticket.id, { title: input.title, body: input.body })
+    if (input.status) await board.setStatus(actorChatId, ticket.id, input.status, "delegator")
+    this.push({ sidebar: true, chatIds: [actorChatId] })
+    return agentTicketSummary(board.summary(ticket))
+  }
+
+  /**
+   * The delegator's reply. Posting on a ticket that still waits on the user
+   * for an earlier question returns `note` saying so: a delegator once left a
+   * ticket in Waiting on you under a status post, and the user could not find
+   * what they were being asked.
+   */
+  async replyToTicket(actorChatId: string, input: { ticketId: string; text: string; asksUser?: boolean; artifacts?: TicketArtifact[] }) {
+    const board = this.requireBoard(actorChatId)
+    const reply = await board.reply(actorChatId, input.ticketId, {
+      author: "delegator",
+      text: input.text,
+      asksUser: input.asksUser,
+      artifacts: input.artifacts,
+    })
+    this.push({ sidebar: true, chatIds: [actorChatId] })
+    const ticket = board.require(actorChatId, input.ticketId)
+    const question = input.asksUser === undefined && ticket.asksUser ? [...ticket.replies].reverse().find((candidate) => candidate.asksUser) : undefined
+    return { replyId: reply.id, ...(question ? { note: stillAskingNote(ticket, question) } : {}) }
+  }
+
+  /** Throws unless the actor is a delegator with this ticket. The media tools check before they store anything. */
+  checkTicket(actorChatId: string, ticketId: string) {
+    this.requireBoard(actorChatId).require(actorChatId, ticketId)
+  }
+
+  readTicket(actorChatId: string, ticketId: string) {
+    const board = this.requireBoard(actorChatId)
+    const ticket = board.require(actorChatId, ticketId)
+    return agentTicketDetail(board.detail(actorChatId, ticket.id)!, (id) => this.store.getChat(id)?.title ?? id)
+  }
+
+  listTickets(actorChatId: string, input: { status?: TicketState | "open"; limit?: number }) {
+    const board = this.requireBoard(actorChatId)
+    const matching = board.summaries(actorChatId)
+      .filter((ticket) => !input.status || (input.status === "open" ? ticket.state !== "done" : ticket.state === input.status))
+      .sort(compareTicketsByActivity)
+    const limit = input.limit ?? 50
+    return { total: matching.length, tickets: matching.slice(0, limit).map(agentTicketSummary) }
   }
 }

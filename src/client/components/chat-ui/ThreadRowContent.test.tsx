@@ -270,3 +270,51 @@ describe("ThreadRowContent detail label", () => {
     expect(html).toContain("3")
   })
 })
+
+describe("ThreadRowContent delegator mark", () => {
+  const iconUrl = "/api/project-icons/0123456789abcdef-0123456789ab.png"
+
+  test("a delegator at rest wears the compass where its harness icon would go", () => {
+    const html = renderRow({ thread: thread({ delegator: true }), showStatus: true, detailLabel: "4h" })
+
+    expect(html).toContain("lucide-compass")
+  })
+
+  test("and in place of the project's icon, in a list that shows those", () => {
+    const html = renderRow({
+      thread: { ...thread({ delegator: true }), projectIconUrl: iconUrl },
+      showProjectIcon: true,
+      detailLabel: null,
+    })
+
+    expect(html).toContain("lucide-compass")
+    expect(html).not.toContain(iconUrl)
+  })
+
+  test("with the mark off it is drawn as any chat's row", () => {
+    // Under a "Delegators" heading, and on a quote or card in a transcript.
+    const plain = renderRow({ thread: thread({ delegator: true }), showStatus: true, delegatorMark: false, detailLabel: "4h" })
+    expect(plain).not.toContain("lucide-compass")
+    expect(plain).toBe(renderRow({ thread: thread(), showStatus: true, detailLabel: "4h" }))
+
+    const withProjectIcon = renderRow({
+      thread: { ...thread({ delegator: true }), projectIconUrl: iconUrl },
+      showProjectIcon: true,
+      delegatorMark: false,
+      detailLabel: null,
+    })
+    expect(withProjectIcon).toContain(`src="${iconUrl}"`)
+  })
+
+  test("a status mark or the draft pencil takes the slot, and no second compass stands in beside the age", () => {
+    for (const hoverActions of [undefined, <button key="a">Archive</button>]) {
+      const running = renderRow({ thread: thread({ delegator: true, status: "running" }), showStatus: true, detailLabel: "4h", hoverActions })
+      expect(running).toContain("animate-spin")
+      expect(running).not.toContain("lucide-compass")
+
+      const drafted = renderRow({ thread: thread({ delegator: true }), showStatus: true, hasDraft: true, detailLabel: "4h", hoverActions })
+      expect(drafted).toContain("lucide-pencil-line")
+      expect(drafted).not.toContain("lucide-compass")
+    }
+  })
+})

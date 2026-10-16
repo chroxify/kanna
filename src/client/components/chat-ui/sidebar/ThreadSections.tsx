@@ -212,7 +212,14 @@ function ThreadSectionsImpl({
     && sections.archived.length === 0
   ) return null
 
-  const renderRow = (thread: SidebarThread, showDoneAction = false) => (
+  // `delegatorMark` is off for the Delegators section alone: its heading
+  // says what its rows are. A delegator anywhere else here (pinned, or
+  // archived) has only its mark to say so. `showDoneAction` is on for
+  // Relevant alone: done is how a chat leaves it.
+  const renderRow = (
+    thread: SidebarThread,
+    { delegatorMark = true, showDoneAction = false }: { delegatorMark?: boolean; showDoneAction?: boolean } = {},
+  ) => (
     <ThreadRow
       key={thread.chatId}
       thread={thread}
@@ -223,6 +230,7 @@ function ThreadSectionsImpl({
       dimIdleTitles={false}
       showProjectIcon={showProjectIcons}
       showDoneAction={showDoneAction}
+      delegatorMark={delegatorMark}
       onSelect={onSelectChat}
       onCreateChat={onCreateChat}
       onRenameChat={onRenameChat}
@@ -251,7 +259,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {group.threads.map((thread) => renderRow(thread))}
+                {group.threads.map((thread) => renderRow(thread, { delegatorMark: group.key !== "delegators" }))}
               </div>
             ) : null}
           </div>
@@ -275,7 +283,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {relevant.map((thread) => renderRow(thread, true))}
+                {relevant.map((thread) => renderRow(thread, { showDoneAction: true }))}
               </div>
             ) : null}
           </div>

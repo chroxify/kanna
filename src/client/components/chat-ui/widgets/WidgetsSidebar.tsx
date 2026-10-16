@@ -21,12 +21,10 @@ import { WorkflowWidget } from "./WorkflowWidget"
  * work is. Each sits in a WidgetPresence slot, so one arriving or leaving
  * slides the rest instead of jumping them.
  *
- * Order runs from what the agent is doing right now to what it has left
- * behind: what is running on its behalf (tasks, then any workflow opened up),
- * what is set to run later (schedules),
- * then git (branch, working tree, history),
- * the files it sent, the servers it started and the commands that start
- * them. Usage limits close the column: the selected harness's, or on a new
+ * Git leads (branch and working tree, then history), since the branch card
+ * is used every turn. Then what is running on the agent's behalf (tasks,
+ * then any workflow opened up), what is set to run later (schedules), the
+ * files it sent, the servers it started and the commands that start them. Usage limits close the column: the selected harness's, or on a new
  * chat every harness's, selected first.
  *
  * The git widgets arrive as a node because the page lazy-loads them (they pull
@@ -97,6 +95,7 @@ function WidgetsSidebarImpl({
       {/* The slideover's fade is drawn behind this stack and no taller than
           it (index.css), so it ends where the cards do. */}
       <div data-widgets-stack className="relative isolate flex flex-col px-2 pb-2 pt-[var(--chat-navbar-h,0px)]">
+        {gitWidgets}
         <WidgetPresence show={tasks.length > 0}>
           <TasksWidget
             tasks={tasks}
@@ -112,7 +111,6 @@ function WidgetsSidebarImpl({
         <WidgetPresence show={schedules.length > 0}>
           <SchedulesWidget schedules={schedules} chatId={chatId} onEdit={onEditSchedule} />
         </WidgetPresence>
-        {gitWidgets}
         <WidgetPresence show={attachments.length > 0}>
           <AttachmentsWidget attachments={attachments} />
         </WidgetPresence>

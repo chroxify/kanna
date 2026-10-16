@@ -215,3 +215,8 @@ export function useAppDialog() {
   }
   return context
 }
+
+/** For what also renders outside the app's provider (the export viewer), and does without a dialog there. */
+export function useOptionalAppDialog() {
+  return useContext(AppDialogContext)
+}
