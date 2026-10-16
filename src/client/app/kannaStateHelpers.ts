@@ -11,8 +11,8 @@ import { processTranscriptMessages } from "../lib/parseTranscript"
  * The last thing typed into this chat, for the composer to bring back.
  *
  * What was typed, so without anything Kanna put in the message for the agent
- * (`stripSystemMessages`): a message sent from the graph view carries a block
- * the user never saw, and recalling it would put that block in the composer.
+ * (`stripSystemMessages`): a message can carry a block the user never saw,
+ * and recalling it would put that block in the composer.
  */
 export function getPreviousPrompt(messages: ReturnType<typeof processTranscriptMessages>) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {

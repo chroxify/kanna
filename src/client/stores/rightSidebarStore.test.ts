@@ -145,7 +145,24 @@ describe("rightSidebarStore", () => {
           },
         },
         chatViewers: {},
+        viewerWidthPx: null,
       })
+    })
+
+    test("v10 keeps one viewer width for every chat, and drops each chat's own", () => {
+      const v9 = migrateRightSidebarStore({
+        size: 420,
+        chatViewers: {
+          "chat-1": { item: { kind: "chat", chatId: "a" }, expanded: false, widthPx: 520 },
+          "chat-2": { item: { kind: "file", projectId: "p", path: "a.md" }, expanded: false, widthPx: 700, returnTo: { item: { kind: "chat", chatId: "b" }, widthPx: 480 } },
+        },
+      }, 9)
+      expect(v9.chatViewers).toEqual({
+        "chat-1": { item: { kind: "chat", chatId: "a" }, expanded: false },
+        "chat-2": { item: { kind: "file", projectId: "p", path: "a.md" }, expanded: false, returnTo: { item: { kind: "chat", chatId: "b" } } },
+      })
+      expect(v9.viewerWidthPx).toBeNull()
+      expect(migrateRightSidebarStore({ size: 420, viewerWidthPx: 640 }, 10).viewerWidthPx).toBe(640)
     })
 
     test("keeps a v7 pixel width but resets an older percentage", () => {

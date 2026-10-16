@@ -39,10 +39,33 @@ import { SwapIn } from "./WidgetCard"
 export const ROW_HIGHLIGHT_CLASS = "border-border bg-muted"
 // Also while the row's hover card is up (`HOVER_CARD_OPEN_ATTRIBUTE`): the
 // pointer leaves the row to reach the card, and the row should not go plain.
-export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted data-[hover-card-open]:border-border data-[hover-card-open]:bg-muted"
+// And while its menu is open (Radix marks the trigger `data-state="open"`):
+// the menu is modal, so the row loses :hover and focus the moment it opens.
+// On touch, it lights on touch-down: a tap, or the start of a long-press.
+export const ROW_HOVER_CLASS = "hover:border-border hover:bg-muted data-[hover-card-open]:border-border data-[hover-card-open]:bg-muted data-[state=open]:border-border data-[state=open]:bg-muted [@media(hover:none)]:active:border-border [@media(hover:none)]:active:bg-muted"
 
-/** A row's box, before any highlight. */
-const ROW_BASE_CLASS = "flex w-full min-w-0 items-start gap-2 rounded-lg border border-transparent px-[5px] py-1.5 text-left text-sm"
+/** A row's box, before any highlight. Relative: the kebab is laid over its trailing slot. */
+const ROW_BASE_CLASS = "relative flex w-full min-w-0 items-start gap-2 rounded-lg border border-transparent px-[5px] py-1.5 text-left text-sm"
+
+/**
+ * The kebab never has a slot of its own. It is laid over the row's last
+ * trailing thing, which gives way to it while the row is revealed (see the
+ * `row-revealed` variant): the idle glyph if there is one, else the meta's
+ * first line, else the end of the title. So the time sits flush right in
+ * every state, and a row gaining or losing its menu (a task you just
+ * stopped) moves nothing.
+ *
+ * In at 120ms, out at once: a pointer sweeps down a list, and a fade out
+ * leaves a trail of half-swapped rows (the highlight is instant for the same
+ * reason). What leaves shrinks toward the right edge it is anchored to, with
+ * a 1px blur so the two read as one thing turning into another. Opacity only
+ * under reduced motion.
+ */
+const ROW_SWAP_CLASS = "origin-right transition-[opacity,scale,filter] duration-0 ease-snappy row-revealed:duration-120"
+const ROW_TRAILING_OUT_CLASS = cn(ROW_SWAP_CLASS, "row-revealed:opacity-0 motion-safe:row-revealed:scale-92 motion-safe:row-revealed:blur-[1px]")
+const ROW_KEBAB_IN_CLASS = cn(ROW_SWAP_CLASS, "opacity-0 motion-safe:scale-92 motion-safe:blur-[1px] row-revealed:opacity-100 row-revealed:scale-100 row-revealed:blur-none")
+/** A row with nothing trailing: the title's end fades out under the kebab rather than reflowing around it. */
+const ROW_TITLE_OUT_CLASS = "row-revealed:[mask-image:linear-gradient(to_left,transparent_18px,black_34px)]"
 
 /** The 16px icon column, one text line tall so it centers on a row's first line. */
 export function WidgetIconColumn({ children, className }: { children?: ReactNode; className?: string }) {
@@ -169,6 +192,30 @@ function activateOnKey(onActivate: () => void) {
   }
 }
 
+/**
+ * The menu key and Shift+F10, from the row or anything in it. Browsers don't
+ * agree on where a key-fired `contextmenu` lands, or whether one fires at
+ * all, so the keys are taken here and the menu opens under the kebab, as a
+ * click on it would. Where the kebab isn't laid out (touch), under the row's
+ * trailing end.
+ */
+function openMenuOnKey(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return false
+  event.preventDefault()
+  const row = event.currentTarget
+  const kebab = row.querySelector<HTMLElement>("[data-row-menu]")
+  const anchor = kebab && kebab.offsetParent !== null ? kebab.getBoundingClientRect() : null
+  const box = row.getBoundingClientRect()
+  row.dispatchEvent(new MouseEvent("contextmenu", {
+    bubbles: true,
+    cancelable: true,
+    clientX: anchor ? anchor.left + anchor.width / 2 : box.right - 12,
+    clientY: anchor ? anchor.bottom : box.top + 27,
+    view: window,
+  }))
+  return true
+}
+
 export interface WidgetRowProps {
   /** The 16px icon column: a glyph, a status, a checkbox. */
   icon?: ReactNode
@@ -179,11 +226,15 @@ export interface WidgetRowProps {
   meta?: ReactNode
   /** Right-aligned on the second line, under `meta`: state at a glance (a PR's checks). */
   subMeta?: ReactNode
-  /** Context menu items. Also puts a kebab at the row's end that opens them. */
+  /**
+   * Context menu items. Also lays a kebab over the row's trailing end that
+   * opens them. Pass it only when there is something in it: a row with a
+   * menu is a row with a kebab.
+   */
   menu?: ReactNode
   /**
-   * What the kebab's slot shows at rest (a file's status letter). The kebab
-   * swaps in for it on hover or keyboard focus.
+   * A glyph after `meta` (a file's status letter). The kebab swaps in for it
+   * when the row is revealed, rather than for the meta.
    */
   menuIdle?: ReactNode
   menuLabel?: string
@@ -252,6 +303,9 @@ export function WidgetRow({
 }: WidgetRowProps) {
   const interactive = Boolean(onActivate) && !disabled
   const hasMenu = Boolean(menu) || Boolean(wrapMenu)
+  // What the kebab is laid over, and so what gives way to it.
+  const trailing = widgetRowTrailing({ hasMenu, meta, menuIdle })
+  const activate = interactive && onActivate ? activateOnKey(onActivate) : undefined
   const row = (
     <div
       id={id}
@@ -262,11 +316,16 @@ export function WidgetRow({
       title={tooltip}
       data-active={active || undefined}
       onClick={interactive ? onActivate : undefined}
-      onKeyDown={interactive && onActivate ? activateOnKey(onActivate) : undefined}
+      onKeyDown={hasMenu || activate ? (event) => {
+        if (hasMenu && openMenuOnKey(event)) return
+        activate?.(event)
+      } : undefined}
       className={cn(
         ROW_BASE_CLASS,
         "group/row outline-none focus-visible:ring-2 focus-visible:ring-ring",
         interactive && "cursor-pointer",
+        // A long-press opens the menu on touch; it shouldn't select text too.
+        hasMenu && "[@media(hover:none)]:select-none",
         disabled && "opacity-60",
         muted && "text-muted-foreground",
         highlightClassName ?? (active ? ROW_HIGHLIGHT_CLASS : interactive || hasMenu ? ROW_HOVER_CLASS : undefined),
@@ -276,38 +335,46 @@ export function WidgetRow({
     >
       <WidgetIconColumn>{icon}</WidgetIconColumn>
       <div className="min-w-0 flex-1">
-        <div className={cn("truncate leading-5", muted ? "text-muted-foreground group-hover/row:text-foreground group-data-[hover-card-open]/row:text-foreground" : "text-foreground")}>{title}</div>
+        <div
+          data-row-trailing={trailing === "title" ? "" : undefined}
+          className={cn(
+            "truncate leading-5",
+            muted ? "text-muted-foreground group-hover/row:text-foreground group-data-[hover-card-open]/row:text-foreground" : "text-foreground",
+            trailing === "title" && ROW_TITLE_OUT_CLASS,
+          )}
+        >
+          {title}
+        </div>
         {subtitle ? <div className="truncate text-xs leading-4 text-muted-foreground">{subtitle}</div> : null}
       </div>
       {meta || subMeta ? (
         // A column, so the second line's state sits under the first line's
         // time, each on its own line's height (20px, then the subtitle's 16px).
         <div className="flex shrink-0 flex-col items-end text-xs tabular-nums text-muted-foreground">
-          <div className="flex h-5 items-center gap-1.5">{meta}</div>
+          <div
+            data-row-trailing={trailing === "meta" ? "" : undefined}
+            className={cn("flex h-5 items-center gap-1.5", trailing === "meta" && ROW_TRAILING_OUT_CLASS)}
+          >
+            {meta}
+          </div>
           {subMeta ? <div className="flex h-4 items-center gap-1.5">{subMeta}</div> : null}
         </div>
       ) : null}
+      {menuIdle ? (
+        <span
+          aria-hidden={hasMenu || undefined}
+          data-row-trailing={trailing === "idle" ? "" : undefined}
+          className={cn("flex h-5 w-4 shrink-0 items-center justify-center", trailing === "idle" && ROW_TRAILING_OUT_CLASS)}
+        >
+          {menuIdle}
+        </span>
+      ) : null}
       {hasMenu ? (
-        menuIdle ? (
-          // One slot, two occupants: the idle glyph at rest, the kebab when
-          // the row is hovered or focused. They cross-fade in place (shrink
-          // to 75%, 1px blur, fade) so it reads as one thing turning into
-          // another, not two things trading places. Devices that can't hover
-          // get the kebab, since they'd never see it otherwise.
-          <span className="relative flex h-5 w-4 shrink-0 items-center justify-center">
-            <span
-              aria-hidden
-              className="flex items-center justify-center transition-[opacity,scale,filter] duration-150 ease-snappy group-hover/row:scale-75 group-hover/row:opacity-0 group-hover/row:blur-[1px] group-focus-within/row:scale-75 group-focus-within/row:opacity-0 group-focus-within/row:blur-[1px] [@media(hover:none)]:hidden"
-            >
-              {menuIdle}
-            </span>
-            <span className="absolute inset-0 flex items-center justify-center">
-              <WidgetRowMenuButton label={menuLabel} swap />
-            </span>
-          </span>
-        ) : (
-          <span className="flex h-5 shrink-0 items-center"><WidgetRowMenuButton label={menuLabel} /></span>
-        )
+        // Over the content box's top-right corner: the first line's trailing
+        // end, whatever sits there. The row's 1px border and 6px/5px padding.
+        <span className="absolute right-[5px] top-1.5 flex h-5 items-center">
+          <WidgetRowMenuButton label={menuLabel} />
+        </span>
       ) : null}
     </div>
   )
@@ -322,16 +389,28 @@ export function WidgetRow({
 }
 
 /**
- * The kebab at a row's end. It opens the row's context menu, so the menu is
- * there for touch and for anyone who never right-clicks. It shows on hover
- * or keyboard focus, and always on devices that can't hover (an iPad at desktop
- * width included, which a breakpoint would miss).
+ * What a row's kebab is laid over: the idle glyph, else the meta's first
+ * line, else the end of the title. Null without a menu: nothing gives way.
  */
-export function WidgetRowMenuButton({ label, swap = false }: {
-  label: string
-  /** Enters with the same shrink-blur-fade the idle glyph leaves with (see WidgetRow's `menuIdle`). */
-  swap?: boolean
-}) {
+export function widgetRowTrailing({ hasMenu, meta, menuIdle }: {
+  hasMenu: boolean
+  meta?: ReactNode
+  menuIdle?: ReactNode
+}): "idle" | "meta" | "title" | null {
+  if (!hasMenu) return null
+  if (menuIdle) return "idle"
+  if (meta) return "meta"
+  return "title"
+}
+
+/**
+ * The kebab over a row's trailing end. It opens the row's context menu, so
+ * the menu is there for anyone who never right-clicks; it shows while the row
+ * is revealed, and Tab reaches it. Not on devices that can't hover (an iPad
+ * at desktop width included, which a breakpoint would miss): there the time
+ * stays put and a long-press on the row opens the menu, as across iOS.
+ */
+export function WidgetRowMenuButton({ label }: { label: string }) {
   return (
     <Button
       type="button"
@@ -339,12 +418,11 @@ export function WidgetRowMenuButton({ label, swap = false }: {
       size="none"
       aria-label={label}
       title={label}
+      data-row-menu=""
       onClick={openContextMenuFromButton}
       className={cn(
-        "!h-auto !w-auto shrink-0 border-border/0 text-muted-foreground opacity-0 hover:!border-border/0 hover:!bg-transparent hover:text-foreground group-hover/row:opacity-100 group-focus-within/row:opacity-100 [@media(hover:none)]:opacity-100",
-        swap
-          ? "scale-75 blur-[1px] transition-[opacity,scale,filter] duration-150 ease-snappy group-hover/row:scale-100 group-hover/row:blur-none group-focus-within/row:scale-100 group-focus-within/row:blur-none [@media(hover:none)]:scale-100 [@media(hover:none)]:blur-none"
-          : "transition-opacity duration-150",
+        "!h-auto !w-auto shrink-0 border-border/0 text-muted-foreground hover:!border-border/0 hover:!bg-transparent hover:text-foreground active:scale-95 [@media(hover:none)]:hidden",
+        ROW_KEBAB_IN_CLASS,
       )}
     >
       <Ellipsis className="w-4" />

@@ -18,6 +18,14 @@ interface DelegateState {
    */
   paneShown: Record<string, true>
   markPaneShown: (chatId: string) => void
+  /**
+   * When each delegator's page was last opened here. A click on a project
+   * with several opens the one last viewed (`resolveProjectNewChat`). Kept in
+   * this browser like the rest: another device goes by its own, or by which
+   * is most active.
+   */
+  viewedAt: Record<string, number>
+  markViewed: (chatId: string) => void
 }
 
 export const useDelegateStore = create<DelegateState>()(
@@ -33,6 +41,8 @@ export const useDelegateStore = create<DelegateState>()(
       markPaneShown: (chatId) => set((state) => (
         state.paneShown[chatId] ? state : { paneShown: { ...state.paneShown, [chatId]: true } }
       )),
+      viewedAt: {},
+      markViewed: (chatId) => set((state) => ({ viewedAt: { ...state.viewedAt, [chatId]: Date.now() } })),
     }),
     { name: "delegate-preferences", version: 1 },
   ),

@@ -87,6 +87,8 @@ interface KannaSidebarProps {
   onCollapse: () => void
   onExpand: () => void
   onCreateChat: (projectId: string) => void
+  /** A click on a channel: its delegator, or its new chat page (the one being written if there is one). */
+  onOpenProjectNewChat: (projectId: string) => void
   /** The New Chat row: a chat in the current project, no picker. */
   onCompose: () => void
   onForkChat: (chat: SidebarChatRow) => void
@@ -331,6 +333,7 @@ function KannaSidebarImpl({
   onCollapse,
   onExpand,
   onCreateChat,
+  onOpenProjectNewChat,
   onCompose,
   onForkChat,
   currentProjectId,
@@ -594,13 +597,14 @@ function KannaSidebarImpl({
   const channelActions = useMemo<ChannelActions>(() => ({
     editorLabel,
     onCreateChat,
+    onOpenNewChat: onOpenProjectNewChat,
     onRenameProject,
     onCopyPath,
     onOpenExternalPath,
     onShowArchivedProject: setArchivedProjectId,
     onHideProject,
     onSetProjectPinned,
-  }), [editorLabel, onCopyPath, onCreateChat, onHideProject, onOpenExternalPath, onRenameProject, onSetProjectPinned])
+  }), [editorLabel, onCopyPath, onCreateChat, onHideProject, onOpenExternalPath, onOpenProjectNewChat, onRenameProject, onSetProjectPinned])
 
   // The chat hover card again, for the chats inside a channel's card. Stable,
   // so the memoized channel rows are not re-rendered by it.

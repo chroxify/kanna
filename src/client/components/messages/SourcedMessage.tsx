@@ -1,13 +1,16 @@
 import { useMemo, useRef, type ReactNode } from "react"
-import { CalendarClock, CornerUpRight, Split } from "lucide-react"
-import type { ChatAttachment, HydratedTranscriptMessage, MessageSource } from "../../../shared/types"
+import { CalendarClock, CornerUpRight, MessageCircle, Split, X } from "lucide-react"
+import type { ChatAttachment, MessageSource } from "../../../shared/types"
 import { stripSystemMessages } from "../../../shared/message-preview"
-import { ADOPTED_REPORT_STATUS, isInterimReportStatus, splitReportSections, type ReportSection } from "../../../shared/report-sections"
+import { ADOPTED_REPORT_STATUS, reportOutcome, splitReportSections, type ReportSection } from "../../../shared/report-sections"
+import { formatTicketNumbers, reportTicketNumbers } from "../../lib/tickets"
+import { useTicketBoard } from "../../stores/ticketBoardStore"
+import { useTicketTranscript } from "../tickets/ticket-transcript"
 import { cn } from "../../lib/utils"
 import { useChatReferenceActions, useChatSchedules, useSidebarThread } from "../chat-ui/chat-reference"
 import { formatScheduleTrigger } from "../chat-ui/widgets/SchedulesWidget"
 import { CLAMP_LINES, ClampedMessageText, FOLD_SURFACE_ATTRIBUTE } from "./ClampedMessageText"
-import { ChatReplyQuote, inlineChatToolExcerpt, inlineChatToolTarget, isChatToolCall, type ChatToolCall } from "./ChatToolMessage"
+import { ChatReplyQuote } from "./ChatToolMessage"
 import { ScheduleCardBox } from "./ScheduleToolMessage"
 import { QUOTE_MARK_CENTER_PX, TOOL_QUOTE_CLASS } from "./tool-card"
 import { USER_BUBBLE_CLASS, UserMessageAttachments } from "./UserMessage"
@@ -24,39 +27,15 @@ import { USER_BUBBLE_CLASS, UserMessageAttachments } from "./UserMessage"
  * (`ChatReplyQuote`), or the schedule's card, joined to the bubble by a short
  * line (`ReplyQuoteRow`). The bubble holds only the text, held to a few lines as
  * every prompt's is (ClampedMessageText).
+ *
+ * A sub-chat's report is the exception: no bubble and no quote, only a line
+ * per sub-chat saying it replied (`ReportMarker`).
  */
 
-/** The call in this chat's transcript that a sub-chat's report answers. */
-export interface PromptDelegation {
-  chatId: string
-  call: ChatToolCall
-}
-
 /**
- * Keep `latest` pointing at the newest call to each chat, one message at a
- * time. A report answers the last thing its sub-chat was sent: the call that
- * started it, or a message sent to it since.
- */
-export function noteDelegation(latest: Map<string, ChatToolCall>, message: HydratedTranscriptMessage) {
-  if (message.kind !== "tool" || !isChatToolCall(message)) return
-  const chatId = inlineChatToolTarget(message)
-  if (chatId) latest.set(chatId, message)
-}
-
-/** The calls a message from `source` answers, of those seen so far. */
-export function delegationsFor(latest: ReadonlyMap<string, ChatToolCall>, source: MessageSource | undefined): PromptDelegation[] | undefined {
-  if (source?.kind !== "report" || latest.size === 0) return undefined
-  const found: PromptDelegation[] = []
-  for (const chatId of source.chatIds) {
-    const call = latest.get(chatId)
-    if (call) found.push({ chatId, call })
-  }
-  return found.length > 0 ? found : undefined
-}
-
-/**
- * What a sourced message shows, one part per bubble. A report covering
- * several sub-chats is several parts, each beside the chat that said it.
+ * What a sourced message shows, one part per bubble, or for a report one
+ * part per line. A report covering several sub-chats is several parts, each
+ * tied to the chat that said it.
  */
 export function sourcedSections(content: string, source: MessageSource): ReportSection[] {
   if (source.kind !== "report") {
@@ -75,13 +54,10 @@ export function sourcedSections(content: string, source: MessageSource): ReportS
  * it was, for a chat the sidebar has not heard of, a schedule deleted since,
  * and the exported viewer, which has neither.
  */
-export function SourceQuote({ source, chatId, delegations, interim = false }: {
+export function SourceQuote({ source, chatId }: {
   source: MessageSource
   /** For a report: the sub-chat this part is from. */
   chatId: string | null
-  delegations?: readonly PromptDelegation[]
-  /** For a report: the sub-chat had not finished when it sent this. */
-  interim?: boolean
 }) {
   const schedules = useChatSchedules()
 
@@ -111,17 +87,9 @@ export function SourceQuote({ source, chatId, delegations, interim = false }: {
 
   if (source.kind === "agent") return <ChatReplyQuote chatId={source.chatId} title="Another agent" />
 
-  // What the sub-chat was asked, where the call that asked it is loaded. The
-  // quote is the sub-chat's row either way.
-  const delegation = chatId ? delegations?.find((candidate) => candidate.chatId === chatId) : undefined
-  return (
-    <ChatReplyQuote
-      chatId={chatId}
-      title={chatId ? "Sub-chat" : "Sub-chats"}
-      excerpt={delegation ? inlineChatToolExcerpt(delegation.call) : null}
-      interim={interim}
-    />
-  )
+  // A report draws its own line (`ReportMarker`), not a quote. This is for
+  // completeness, should one ever be drawn as a quoted bubble.
+  return <ChatReplyQuote chatId={chatId} title={chatId ? "Sub-chat" : "Sub-chats"} />
 }
 
 /** A chat's name in a sentence, opening the chat where there is one to open. */
@@ -218,20 +186,87 @@ export function ReplyQuoteRow({ children }: { children: ReactNode }) {
   )
 }
 
-/** The quote for one part of a sourced message. */
-export function SectionQuote({ section, source, delegations }: {
+/**
+ * One sub-chat's part of a report, as its parent draws it: a line in the
+ * look of a tool call's row, naming the chat and what happened ("Flicker fix
+ * replied · still working"). A click opens the sub-chat as a chat card does.
+ *
+ * There is no bubble with the reply in it, and no Show More. The reply still
+ * goes to this chat's agent whole, and the agent relays what matters in its
+ * next message, so a bubble here would say the same thing twice. The line is
+ * what is left of it: that the sub-chat answered, and where to read it.
+ *
+ * The title is the chat's live one, from the sidebar. A chat the sidebar
+ * does not know is named for what it is, and is not a link.
+ */
+export function ReportMarker({ section, outcome, tickets = [], flash = false }: {
   section: ReportSection
-  source: MessageSource
-  delegations?: readonly PromptDelegation[]
+  /** What to say happened, where the header cannot: see QueuedUserMessage. */
+  outcome?: string
+  /**
+   * The tickets the sub-chat was working on, in a delegator's transcript
+   * (`useReportTicketNumbers`): named after the words, "Web replied #13", so the
+   * line says what the reply was about. It still opens the chat.
+   */
+  tickets?: readonly number[]
+  flash?: boolean
 }) {
-  return <SourceQuote source={source} chatId={section.chatId} delegations={delegations} interim={isInterimReportStatus(section.status)} />
+  const actions = useChatReferenceActions()
+  const thread = useSidebarThread(section.chatId)
+  const chatId = section.chatId
+  const failed = section.status === "failed"
+  const label = `${thread?.title || "A sub-chat"} ${outcome ?? reportOutcome(section.status)}`
+  const content = (
+    <span className={cn("grid min-w-0 items-center gap-1.5", tickets.length > 0 ? "grid-cols-[auto_1fr_auto]" : "grid-cols-[auto_1fr]")}>
+      {/* A tool row's mark slot, mark and words (ToolCallMessage). */}
+      <span className="relative flex h-5 w-5 items-center justify-center">
+        {failed
+          ? <X aria-hidden className="size-4 text-destructive" />
+          : <MessageCircle aria-hidden className="size-4 text-muted-icon" />}
+      </span>
+      <span className="h-5 min-w-0 truncate text-left font-medium text-foreground/80">{label}</span>
+      {tickets.length > 0 ? <span className="h-5 shrink-0 tabular-nums text-muted-foreground">{formatTicketNumbers(tickets)}</span> : null}
+    </span>
+  )
+  const rowClass = cn("not-prose flex min-w-0 max-w-full rounded-md text-sm", flash && "kanna-jump-flash")
+
+  if (!thread || !actions || !chatId) return <div className={rowClass}>{content}</div>
+  const open = () => actions.onOpenChat(chatId)
+  return (
+    <button
+      type="button"
+      onClick={open}
+      // The middle button, which `onOpenChat` reads as "in a tab".
+      onAuxClick={(event) => { if (event.button === 1) open() }}
+      className={cn(rowClass, "cursor-pointer outline-none transition-opacity hover:opacity-60 focus-visible:ring-2 focus-visible:ring-ring")}
+    >
+      {content}
+    </button>
+  )
+}
+
+const NO_TICKET_NUMBERS: ReadonlyMap<string, number[]> = new Map()
+
+/**
+ * Each sub-chat's tickets in a report, by number: the source's ticket ids,
+ * numbered from the board of the chat whose transcript this is. Empty for
+ * any other message, and in an ordinary chat, which has no board.
+ */
+export function useReportTicketNumbers(source: MessageSource): ReadonlyMap<string, number[]> {
+  const tickets = source.kind === "report" ? source.tickets : undefined
+  const board = useTicketBoard(useTicketTranscript().chatId)
+  return useMemo(() => {
+    if (!tickets || !board) return NO_TICKET_NUMBERS
+    const byId = new Map(board.tickets.map((ticket) => [ticket.id, ticket.number]))
+    const numbers = reportTicketNumbers(tickets, (id) => byId.get(id))
+    return numbers.size > 0 ? numbers : NO_TICKET_NUMBERS
+  }, [board, tickets])
 }
 
 /** One part of a delivered message: its quote, the line, and its bubble. */
-function SourcedPart({ section, source, delegations, steered, flash }: {
+function SourcedPart({ section, source, steered, flash }: {
   section: ReportSection
   source: MessageSource
-  delegations?: readonly PromptDelegation[]
   steered: boolean
   flash: boolean
 }) {
@@ -241,7 +276,7 @@ function SourcedPart({ section, source, delegations, steered, flash }: {
     // the quote as wide as its own, whichever is the longer.
     <div ref={partRef} className="flex min-w-0 max-w-[85%] flex-col items-start sm:max-w-[80%]">
       <ReplyQuoteRow>
-        <SectionQuote section={section} source={source} delegations={delegations} />
+        <SourceQuote source={source} chatId={section.chatId} />
       </ReplyQuoteRow>
       <div className="flex min-w-0 max-w-full items-center gap-2">
         <div {...{ [FOLD_SURFACE_ATTRIBUTE]: "" }} className={cn(USER_BUBBLE_CLASS, "px-3.5 py-1.5", flash && "kanna-jump-flash")}>
@@ -271,27 +306,37 @@ interface Props {
   steered?: boolean
   /** Light the bubbles: a jump just landed on this message. See UserMessage. */
   flash?: boolean
-  delegations?: readonly PromptDelegation[]
 }
 
-export function SourcedMessage({ content, source, attachments = [], steered = false, flash = false, delegations }: Props) {
+export function SourcedMessage({ content, source, attachments = [], steered = false, flash = false }: Props) {
   const sections = useMemo(() => sourcedSections(content, source), [content, source])
+  const ticketNumbers = useReportTicketNumbers(source)
+
+  if (source.kind === "report") {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <UserMessageAttachments attachments={attachments} align="start" />
+        {sections.map((section, index) => isAdoptionNotice(section) ? (
+          // 2px in, so its 16px mark is centred where a line's 20px slot
+          // centres its own, and its words start where the lines' do.
+          <div key={index} className="max-w-[85%] pl-0.5 sm:max-w-[80%]">
+            <AdoptionNotice section={section} />
+          </div>
+        ) : (
+          <ReportMarker key={index} section={section} tickets={section.chatId ? ticketNumbers.get(section.chatId) : undefined} flash={flash} />
+        ))}
+      </div>
+    )
+  }
 
   return (
     <div className="flex flex-col items-start gap-2">
       <UserMessageAttachments attachments={attachments} align="start" />
-      {sections.map((section, index) => isAdoptionNotice(section) ? (
-        // Level with a bubble's text, 14px in, so a notice between two
-        // bubbles reads as part of the same column.
-        <div key={index} className="max-w-[85%] px-3.5 sm:max-w-[80%]">
-          <AdoptionNotice section={section} />
-        </div>
-      ) : (
+      {sections.map((section, index) => (
         <SourcedPart
           key={index}
           section={section}
           source={source}
-          delegations={delegations}
           steered={steered && index === 0}
           flash={flash}
         />

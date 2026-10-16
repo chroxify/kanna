@@ -340,9 +340,10 @@ Please check the latest error first.`,
     expect(html).not.toContain("from an automation")
     expect(html).not.toContain("from another agent")
     expect(html).not.toContain("from a sub-chat")
-    // Each sender is said once, by the quote over its bubble. Nothing
-    // here knows the chats or the schedule, so each quote is the plain line.
-    for (const sender of ["Automation", "Another agent", "Sub-chat"]) expect(html.split(`>${sender}<`).length - 1).toBe(1)
+    // Each sender is said once, by the quote over its bubble or, for a
+    // report, by its line. Nothing here knows the chats or the schedule, so
+    // each is named for what it is.
+    for (const sender of ["Automation", "Another agent", "A sub-chat replied"]) expect(html.split(`>${sender}<`).length - 1).toBe(1)
   })
 
   test("a prompt nobody typed sits on the agent's side, in a prompt's bubble", () => {
@@ -353,8 +354,8 @@ Please check the latest error first.`,
     expect(typed).not.toContain("items-start")
     expect(typed).toContain(bubble)
 
+    // A report is the exception: a line, not a bubble. See below.
     const sources: MessageSource[] = [
-      { kind: "report", chatIds: ["c"] },
       { kind: "agent", chatId: "c" },
       { kind: "schedule", scheduleId: "s" },
     ]
@@ -380,48 +381,7 @@ Please check the latest error first.`,
     expect(html).not.toContain("Show more")
   })
 
-  test("a report quotes the call that started its sub-chat", () => {
-    const at = (minute: number) => new Date(2026, 6, 19, 8, minute).toISOString()
-    const call = (id: string, toolName: string, payload: Record<string, unknown>, rawResult: Record<string, unknown>, minute: number): HydratedTranscriptMessage => ({
-      id, kind: "tool", toolKind: "chat", toolName, toolId: id, input: { payload }, rawResult, resultEntryId: `result-${id}`, timestamp: at(minute),
-    })
-    const report = (id: string, minute: number): HydratedTranscriptMessage => ({
-      id,
-      kind: "user_prompt",
-      content: "<system-message>\nSub-chat completed: [Parser audit](/chat/child) (chat id child)\n</system-message>\n\nall clear",
-      source: { kind: "report", chatIds: ["child"] },
-      timestamp: at(minute),
-    })
-    const started = call("chat-1", "create_chat", { message: "audit the parser", title: "Parser audit" }, { chatId: "child", title: "Parser audit" }, 1)
-
-    const html = renderTranscript([started, report("user-1", 5)])
-    // The card where the call sits says what the call did. The quote on the
-    // report says what the report is to, in the words that call used.
-    const quote = ">audit the parser<"
-    expect(html.split("Started a sub-chat · audit the parser").length - 1).toBe(1)
-    expect(html.split(quote).length - 1).toBe(1)
-    expect(html.indexOf("Started a sub-chat")).toBeLessThan(html.indexOf(quote))
-
-    // A report answers the last thing its sub-chat was sent.
-    const followUp = renderTranscript([
-      started,
-      report("user-1", 5),
-      call("chat-2", "send_message", { chatId: "child", message: "now the lexer" }, { started: true }, 6),
-      report("user-2", 9),
-    ])
-    const second = followUp.slice(followUp.indexOf('id="msg-user-2"'))
-    expect(second).toContain(">now the lexer<")
-    expect(second).not.toContain("audit the parser")
-
-    // With the call outside what is loaded, the quote is the chat's row and
-    // nothing under it.
-    const alone = renderTranscript([report("user-1", 5)])
-    expect(alone).toContain(">Sub-chat<")
-    expect(alone).not.toContain("truncate pl-[26px]")
-    expect(alone).toContain("all clear")
-  })
-
-  test("a report on several sub-chats is a bubble for each, beside its own quote", () => {
+  test("a report is a line per sub-chat in a tool row's look, and nothing of the reply", () => {
     const html = renderTranscript([
       {
         id: "chat-1", kind: "tool", toolKind: "chat", toolName: "create_chat", toolId: "chat-1",
@@ -444,15 +404,19 @@ Please check the latest error first.`,
       },
     ])
     const report = html.slice(html.indexOf('id="msg-user-1"'))
-    expect(report.split("max-height:5lh").length - 1).toBe(2)
-    // The rule that divided them in one bubble has nothing to divide in two.
-    expect(report).not.toContain("<hr")
-    // In order: the first sub-chat's call, its words, then the second with no call to quote.
-    const words = report.indexOf("Why did the scarecrow")
-    // The second quote is its chat's row alone: it is found after the first sub-chat's words.
-    const order = [report.indexOf(">tell a joke<"), words, report.indexOf(">Sub-chat<", words), report.indexOf("credentials expired")]
+    // The parent's agent relays what matters, so the reply is not drawn again.
+    expect(report).not.toContain("Why did the scarecrow")
+    expect(report).not.toContain("credentials expired")
+    expect(report).not.toContain("max-height:")
+    expect(report).not.toContain("rounded-2xl")
+    // No quote of what the sub-chat was asked, and no line joining one.
+    expect(report).not.toContain(">tell a joke<")
+    expect(report).not.toContain("h-[14px] w-[3px]")
+    const order = [report.indexOf(">A sub-chat replied<"), report.indexOf(">A sub-chat failed<")]
     expect(order.every((position) => position >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
+    // The call's own card still says what it asked.
+    expect(html).toContain("Started a sub-chat · tell a joke")
   })
 
   test("a chat that opens with an agent's message gets a boundary of its own", () => {
@@ -501,8 +465,6 @@ Please check the latest error first.`,
         timestamp: new Date().toISOString(),
       },
     ])
-    expect(html).toContain("Why did the scarecrow win an award?")
-    expect(html).toContain("credentials expired")
     expect(html).not.toContain("chat id")
     expect(html).not.toContain("Sub-chat completed")
     expect(html).not.toContain("system-message")

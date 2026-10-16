@@ -6,8 +6,8 @@
  * header that names it with `(chat id …)`, then its latest reply. From the
  * second one with something to say, a `---` rule comes first.
  *
- * A reader wants each answer beside the chat that gave it, so a client draws
- * one bubble per part. This is the only place that reads the header. It
+ * A reader wants each answer tied to the chat that gave it, so a client draws
+ * one line per part. This is the only place that reads the header. It
  * takes three things from it and no prose: the chat id, the status word after
  * `Sub-chat`, and for an adopted chat the id of the chat that adopted it.
  */
@@ -44,6 +44,21 @@ export const ADOPTED_REPORT_STATUS = "adopted"
  */
 export function isInterimReportStatus(status: string | null): boolean {
   return status === "running" || status === "waiting_on_subagent" || status === "waiting_on_subchats"
+}
+
+/**
+ * What happened, as the words after a sub-chat's title on the line its
+ * parent draws for a report: "Flicker fix replied · still working". Read
+ * from the status word in the header. A reply written while work was still
+ * going is still a reply, so it says both. A header with no status word is
+ * read as a reply.
+ */
+export function reportOutcome(status: string | null): string {
+  if (isInterimReportStatus(status)) return "replied · still working"
+  if (status === "failed") return "failed"
+  if (status === "needs_input") return "needs input"
+  if (status === "cancelled") return "was stopped"
+  return "replied"
 }
 
 /**

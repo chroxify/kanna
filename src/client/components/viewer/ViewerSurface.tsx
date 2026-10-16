@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import { FOCUS_FALLBACK_IGNORE_ATTRIBUTE } from "../../app/chatFocusPolicy"
 import { isEscapeClaimed, resolveEscapePress, VIEWER_FIELDS_KEEP_ESCAPE_ATTRIBUTE } from "../../lib/escape-key"
 import { cn } from "../../lib/utils"
+import { useScrollMemory } from "./scroll-memory"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
 
 /**
@@ -45,8 +46,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
  * Bottom padding for content that scrolls in the card and would otherwise end
  * hard on the window's edge where the card runs off it: a file's last line,
  * the last changed file. Nothing where the card is inset and has its own
- * bottom edge. Not for content that fills the card (a chat, a graph, a
- * table), which is meant to meet the edge.
+ * bottom edge. Not for content that fills the card (a chat, a table), which
+ * is meant to meet the edge.
  */
 export const VIEWER_END_PAD_CLASS = "group-data-[bleed]/viewer:pb-4"
 
@@ -58,6 +59,10 @@ export interface ViewerPlacement {
 
 const ViewerPlacementContext = createContext<ViewerPlacement | null>(null)
 export const ViewerPlacementProvider = ViewerPlacementContext.Provider
+/** For a view that lays itself out differently expanded: a delegator's board turns into columns. */
+export function useViewerPlacement(): ViewerPlacement | null {
+  return useContext(ViewerPlacementContext)
+}
 
 /**
  * The pane this card is in has a floor under what is opened in it (see
@@ -158,14 +163,38 @@ function isTypingTarget(target: EventTarget | null) {
   return target.isContentEditable || target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT"
 }
 
-/** Where each remembered body was left; see `scrollMemoryKey`. */
-const scrollMemory = new Map<string, number>()
 
 export interface ViewerNavigation {
   index: number
   count: number
   onPrevious: () => void
   onNext: () => void
+  /** What the buttons are called, for a view that steps through things of its own ("Previous ticket · K"). */
+  previousLabel?: string
+  nextLabel?: string
+  /**
+   * For a list with ends that does not wrap: false at that end, which
+   * dims its button and leaves its key with nothing to do.
+   */
+  hasPrevious?: boolean
+  hasNext?: boolean
+}
+
+/**
+ * What a key does to a card's navigation, or null for nothing: j or ] for
+ * the next item, k or [ for the previous. Nothing for a key something
+ * nearer has answered (a menu), one held with a modifier, one typed in a
+ * field, or one with nowhere to step to.
+ */
+export function viewerNavigationStep(
+  event: { key: string; defaultPrevented: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean },
+  { navigation, typing }: { navigation: ViewerNavigation | undefined; typing: boolean },
+): "next" | "previous" | null {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return null
+  if (!navigation || navigation.count < 2 || typing) return null
+  if (event.key === "j" || event.key === "]") return navigation.hasNext === false ? null : "next"
+  if (event.key === "k" || event.key === "[") return navigation.hasPrevious === false ? null : "previous"
+  return null
 }
 
 export function ViewerSurface({
@@ -251,15 +280,7 @@ export function ViewerSurface({
   }, [scrollKey])
 
   // Before paint, so the list is never seen at its top first.
-  useLayoutEffect(() => {
-    const body = bodyRef.current
-    if (!scrollMemoryKey || !body) return
-    const remembered = scrollMemory.get(scrollMemoryKey)
-    if (remembered) body.scrollTop = remembered
-    const remember = () => scrollMemory.set(scrollMemoryKey, body.scrollTop)
-    body.addEventListener("scroll", remember, { passive: true })
-    return () => body.removeEventListener("scroll", remember)
-  }, [scrollMemoryKey])
+  useScrollMemory(scrollMemoryKey, bodyRef)
 
   // Focus comes here on open, so its keys work at once and nothing behind
   // (the composer, now inert) keeps it. A card that asks to be quiet about
@@ -286,8 +307,7 @@ export function ViewerSurface({
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return
-      // A card on its way out, or under another (the graph, under the chat
-      // picked from it), is not the pane any more.
+      // A card on its way out, or under another, is not the pane any more.
       if (!surfaceRef.current || surfaceRef.current.closest("[inert]")) return
       const action = resolveEscapePress({
         repeat: event.repeat,
@@ -307,15 +327,11 @@ export function ViewerSurface({
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       // Something closer to the key (a menu, a field) already answered it.
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      if (!navigation || navigation.count < 2 || isTypingTarget(event.target) || !ownsKeys()) return
-      if (event.key === "j" || event.key === "]") {
-        event.preventDefault()
-        navigation.onNext()
-      } else if (event.key === "k" || event.key === "[") {
-        event.preventDefault()
-        navigation.onPrevious()
-      }
+      const step = viewerNavigationStep(event, { navigation, typing: isTypingTarget(event.target) })
+      if (!step || !navigation || !ownsKeys()) return
+      event.preventDefault()
+      if (step === "next") navigation.onNext()
+      else navigation.onPrevious()
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
@@ -357,7 +373,9 @@ export function ViewerSurface({
           {back ? <div className="-ml-2 flex shrink-0 items-center">{back}</div> : null}
           {icon ? <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-4">{icon}</span> : null}
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
-            <span className="min-w-0 max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">{title}</span>
+            {/* The cap keeps room for the subtitle. A title alone (a
+                delegator's list, headed by its name) has the row to itself. */}
+            <span className={cn("min-w-0 truncate text-sm font-medium text-foreground", subtitle ? "max-w-[60%] shrink-0" : "flex-1")}>{title}</span>
             {subtitle ? <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{subtitle}</span> : null}
           </div>
         </div>
@@ -368,8 +386,8 @@ export function ViewerSurface({
             <>
               <ViewerDivider />
               <span className="shrink-0 px-1 text-xs tabular-nums text-muted-foreground">{navigation.index + 1} of {navigation.count}</span>
-              <ViewerIconButton label="Previous (k)" onClick={navigation.onPrevious}><ChevronUp /></ViewerIconButton>
-              <ViewerIconButton label="Next (j)" onClick={navigation.onNext}><ChevronDown /></ViewerIconButton>
+              <ViewerIconButton label={navigation.previousLabel ?? "Previous (k)"} disabled={navigation.hasPrevious === false} onClick={navigation.onPrevious}><ChevronUp /></ViewerIconButton>
+              <ViewerIconButton label={navigation.nextLabel ?? "Next (j)"} disabled={navigation.hasNext === false} onClick={navigation.onNext}><ChevronDown /></ViewerIconButton>
             </>
           ) : null}
           <ViewerDivider />
@@ -396,9 +414,11 @@ export function ViewerDivider() {
 }
 
 /** A header control: an icon, named by its tooltip, lit when it's the active choice. */
-export function ViewerIconButton({ label, active = false, onClick, children }: {
+export function ViewerIconButton({ label, active = false, disabled = false, onClick, children }: {
   label: string
   active?: boolean
+  /** Dimmed and inert, but still named by its tooltip: `aria-disabled`, not `disabled`, which would take the tooltip too. */
+  disabled?: boolean
   onClick: () => void
   children: ReactNode
 }) {
@@ -409,10 +429,12 @@ export function ViewerIconButton({ label, active = false, onClick, children }: {
           type="button"
           aria-label={label}
           aria-pressed={active || undefined}
-          onClick={onClick}
+          aria-disabled={disabled || undefined}
+          onClick={disabled ? undefined : onClick}
           className={cn(
             "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4",
             active && "bg-muted text-foreground",
+            disabled && "cursor-default opacity-40 hover:bg-transparent hover:text-muted-foreground",
           )}
         >
           {children}
