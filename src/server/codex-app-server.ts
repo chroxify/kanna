@@ -98,6 +98,7 @@ interface PendingTurn {
   turnId: string | null
   model: string
   planMode: boolean
+  skipPlanApproval: boolean
   queue: AsyncQueue<HarnessEvent>
   startedToolIds: Set<string>
   handledDynamicToolIds: Set<string>
@@ -188,6 +189,11 @@ export interface StartCodexTurnArgs {
   model: string
   /** The chat is a delegator, which its instructions say. */
   delegator?: boolean
+  /**
+   * The turn's message came from another agent, so nobody is there to approve
+   * a plan. A plan-mode turn then ends with the plan as its reply.
+   */
+  skipPlanApproval?: boolean
   effort?: CodexReasoningEffort
   serviceTier?: ServiceTier
   content: string
@@ -1067,6 +1073,7 @@ export class CodexAppServerManager {
       turnId: null,
       model: args.model,
       planMode: args.planMode,
+      skipPlanApproval: Boolean(args.skipPlanApproval),
       queue,
       startedToolIds: new Set(),
       handledDynamicToolIds: new Set(),
@@ -1827,7 +1834,15 @@ export class CodexAppServerManager {
       const planText = pendingTurn.latestPlanText?.trim()
         || renderPlanMarkdownFromSteps(pendingTurn.latestPlanSteps).trim()
 
-      if (planText) {
+      if (planText && pendingTurn.skipPlanApproval) {
+        // The plan item is in no transcript entry of its own: the approval
+        // card is what shows it. Without the card it goes in as the reply,
+        // which is what the sender's report carries.
+        pendingTurn.queue.push({
+          type: "transcript",
+          entry: timestamped({ kind: "assistant_text", text: planText }),
+        })
+      } else if (planText) {
         pendingTurn.turnId = null
         const tool = {
           kind: "tool" as const,

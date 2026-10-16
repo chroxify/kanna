@@ -42,7 +42,7 @@ describe("resolveChatOpen", () => {
     expect(resolveChatOpen(request({ chatId: "main", preview: { chatId: "other", back: [] } }))).toEqual({ kind: "stay" })
   })
 
-  test("on the graph's page the page's own chat is navigated to", () => {
+  test("the page's own chat is navigated to when the main view is not showing it", () => {
     expect(resolveChatOpen(request({ chatId: "main", pageShowsTranscript: false }))).toEqual({ kind: "navigate" })
   })
 
@@ -102,7 +102,7 @@ describe("chatIdFromChatPath", () => {
   })
 
   test("is null for anything else", () => {
-    expect(chatIdFromChatPath("/graph/abc")).toBeNull()
+    expect(chatIdFromChatPath("/settings/abc")).toBeNull()
     expect(chatIdFromChatPath("/chat/")).toBeNull()
   })
 })

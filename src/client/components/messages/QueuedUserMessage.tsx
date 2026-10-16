@@ -1,18 +1,17 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import type { MessageSource, QueuedChatMessage } from "../../../shared/types"
 import type { ReportSection } from "../../../shared/report-sections"
 import { stripSystemMessages } from "../../../shared/message-preview"
 import { cn } from "../../lib/utils"
 import { Button } from "../ui/button"
 import { CLAMP_LINES, ClampedMessageText, FOLD_SURFACE_ATTRIBUTE } from "./ClampedMessageText"
-import { AdoptionNotice, isAdoptionNotice, ReplyQuoteRow, SectionQuote, sourcedSections, type PromptDelegation } from "./SourcedMessage"
+import { AdoptionNotice, isAdoptionNotice, ReplyQuoteRow, ReportMarker, SourceQuote, sourcedSections, useReportTicketNumbers } from "./SourcedMessage"
 import { UserMessageAttachments } from "./UserMessage"
+import { TicketReplyQuoteRow } from "../tickets/TicketReplyMessage"
 import { ArrowUp, X } from "lucide-react"
 
 interface QueuedUserMessageProps {
   message: QueuedChatMessage
-  /** For a queued report: the calls in the transcript it answers. See SourcedMessage. */
-  delegations?: readonly PromptDelegation[]
   /** Each may return the command's promise, which is how long the row stays dimmed. */
   onRemove: () => void | Promise<void>
   onSendNow: () => void | Promise<void>
@@ -82,7 +81,6 @@ function RemoveButton({ corner, onRemove, disabled }: { corner: "start" | "end";
 
 interface QueuedFormProps {
   message: QueuedChatMessage
-  delegations?: readonly PromptDelegation[]
   /** A press on Remove or Send now is on its way to the server. */
   busy: boolean
   onRemove: () => void
@@ -96,7 +94,7 @@ interface QueuedFormProps {
  */
 const QUEUED_ROW_CLASS = "flex flex-col gap-2 py-2 transition-opacity duration-150 ease-out motion-reduce:transition-none"
 
-export function QueuedUserMessage({ message, delegations, onRemove, onSendNow }: QueuedUserMessageProps) {
+export function QueuedUserMessage({ message, onRemove, onSendNow }: QueuedUserMessageProps) {
   const [busy, setBusy] = useState(false)
   // Held until the command settles, not until the row goes: if the server
   // refuses, the message is still queued and has to be usable again.
@@ -104,19 +102,23 @@ export function QueuedUserMessage({ message, delegations, onRemove, onSendNow }:
     setBusy(true)
     void Promise.resolve(action()).finally(() => setBusy(false))
   }
-  const form = { message, delegations, busy, onRemove: carryOut(onRemove), onSendNow: carryOut(onSendNow) }
+  const form = { message, busy, onRemove: carryOut(onRemove), onSendNow: carryOut(onSendNow) }
+  if (message.source?.kind === "report") return <QueuedReport {...form} source={message.source} />
+  // The user's reply on a ticket waits as anything they typed does, with the ticket quoted over it.
+  if (message.source?.kind === "ticket") return <QueuedTypedMessage {...form} quote={<TicketReplyQuoteRow source={message.source} />} />
   return message.source
     ? <QueuedSourcedMessage {...form} source={message.source} />
     : <QueuedTypedMessage {...form} />
 }
 
-function QueuedTypedMessage({ message, busy, onRemove, onSendNow }: QueuedFormProps) {
+function QueuedTypedMessage({ message, busy, onRemove, onSendNow, quote }: QueuedFormProps & { quote?: ReactNode }) {
   // What the sent message will show: without the parts meant for the agent.
   const content = stripSystemMessages(message.content)
   return (
     <div className={cn(QUEUED_ROW_CLASS, "items-end", busy && "opacity-60")}>
       <UserMessageAttachments attachments={message.attachments} />
       <div className="flex max-w-[85%] sm:max-w-[80%] flex-col items-end">
+        {quote}
         {/* Rendered even for an attachment-only message: the bubble carries
             Send now and Remove, and without it an image queued with no text
             could not be sent early or taken back. */}
@@ -143,65 +145,80 @@ function QueuedTypedMessage({ message, busy, onRemove, onSendNow }: QueuedFormPr
 }
 
 /**
- * A queued message the user did not type: a report or an automation that
- * arrived mid-turn. What it will be once delivered (SourcedMessage) in the
- * dashed outline of something still waiting: on the same side, so it does not
- * cross the column when its turn starts, with the same quote over it on the
- * same line, and the same clamped text.
+ * A sub-chat's report that arrived mid-turn, in the form it will take once
+ * delivered (SourcedMessage): a line per sub-chat, no bubble and no reply.
+ * The lines sit in the dashed outline of something still waiting, with Send
+ * now leading them and Remove on the far corner, as on any queued message
+ * from another chat. It is one message to send or remove, however many
+ * sub-chats it covers, so there is one of each control.
+ */
+function QueuedReport({ message, source, busy, onRemove, onSendNow }: QueuedFormProps & { source: Extract<MessageSource, { kind: "report" }> }) {
+  const sections = useMemo(() => sourcedSections(message.content, source), [message.content, source])
+  const ticketNumbers = useReportTicketNumbers(source)
+  // Nothing to read: a report on sub-chats that were stopped before they
+  // said anything. Delivered, it draws no line, as there is no reply to
+  // point at. Waiting, it still needs its controls, and still says who it
+  // is from. Without a reply, "replied" would be wrong.
+  const silent = sections.length === 0
+  const lines: ReportSection[] = silent
+    ? (source.chatIds.length > 0 ? source.chatIds : [null]).map((chatId) => ({ chatId, body: "", status: null }))
+    : sections
+
+  return (
+    <div className={cn(QUEUED_ROW_CLASS, "items-start", busy && "opacity-60")}>
+      <UserMessageAttachments attachments={message.attachments} align="start" />
+      <div className="relative group min-w-0 max-w-[85%] sm:max-w-[80%]">
+        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2.5 rounded-xl border border-dashed border-border py-1.5 pl-1.5 pr-3.5">
+          <SendNowButton onSendNow={onSendNow} disabled={busy} />
+          <div className="flex min-w-0 flex-col items-start gap-1">
+            {lines.map((section, index) => isAdoptionNotice(section)
+              ? <AdoptionNotice key={index} section={section} />
+              : <ReportMarker key={index} section={section} outcome={silent ? "reported" : undefined} tickets={section.chatId ? ticketNumbers.get(section.chatId) : undefined} />)}
+          </div>
+        </div>
+        <RemoveButton corner="end" onRemove={onRemove} disabled={busy} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A queued message the user did not type, other than a report: an automation
+ * or another chat's agent's message that arrived mid-turn. What it will be
+ * once delivered (SourcedMessage) in the dashed outline of something still
+ * waiting: on the same side, so it does not cross the column when its turn
+ * starts, with the same quote over it on the same line, and the same clamped
+ * text.
  *
  * A typed prompt's queued bubble, turned around: Send now leads the text
  * instead of trailing it, and Remove sits on the opposite corner. The quote
  * can reach over that corner, and the line between them keeps it 20px up,
  * well clear of Remove and of the 6px around it that also takes a press.
- *
- * A report covering several sub-chats is a bubble for each, as it will be
- * delivered, each under its own quote. It is still one message to send or
- * remove, so there is one of each control: Remove on the first bubble, where
- * a reader starts, and Send now in the last, where the message ends.
  */
-function QueuedSourcedMessage({ message, source, delegations, busy, onRemove, onSendNow }: QueuedFormProps & { source: MessageSource }) {
-  const sections = useMemo((): ReportSection[] => {
-    const parts = sourcedSections(message.content, source)
-    if (parts.length > 0) return parts
-    // Nothing to read: a report on sub-chats that were stopped before they
-    // said anything. It still waits its turn, and still says who it is from.
-    return [{ chatId: source.kind === "report" && source.chatIds.length === 1 ? source.chatIds[0]! : null, body: "", status: null }]
-  }, [message.content, source])
+function QueuedSourcedMessage({ message, source, busy, onRemove, onSendNow }: QueuedFormProps & { source: MessageSource }) {
+  // All of it for the agent leaves nothing to read. It still waits its
+  // turn, and still says who it is from.
+  const body = useMemo(() => sourcedSections(message.content, source)[0]?.body ?? "", [message.content, source])
 
   return (
     <div className={cn(QUEUED_ROW_CLASS, "items-start", busy && "opacity-60")}>
       <UserMessageAttachments attachments={message.attachments} align="start" />
-      {sections.map((section, index) => {
-        const first = index === 0
-        const last = index === sections.length - 1
-        const notice = isAdoptionNotice(section)
-        const text = notice
-          ? <AdoptionNotice section={section} />
-          : section.body
-            ? <ClampedMessageText text={section.body} lines={CLAMP_LINES.sent} />
-            : <p className="text-muted-foreground">Queued</p>
-        return (
-          <div key={index} className="flex min-w-0 max-w-[85%] flex-col items-start sm:max-w-[80%]">
-            {/* A notice is the news itself, with no one to quote. */}
-            {notice ? null : (
-              <ReplyQuoteRow>
-                <SectionQuote section={section} source={source} delegations={delegations} />
-              </ReplyQuoteRow>
-            )}
-            <div className="relative group min-w-0 max-w-full">
-              <div {...{ [FOLD_SURFACE_ATTRIBUTE]: "" }} className={cn(
-                QUEUED_BUBBLE_CLASS,
-                "min-w-0 py-1.5",
-                last ? "grid grid-cols-[auto_minmax(0,1fr)] items-end gap-2.5 pl-1.5 pr-3.5" : "px-3.5",
-              )}>
-                {last ? <SendNowButton onSendNow={onSendNow} disabled={busy} /> : null}
-                <div className="min-w-0">{text}</div>
-              </div>
-              {first ? <RemoveButton corner="end" onRemove={onRemove} disabled={busy} /> : null}
+      <div className="flex min-w-0 max-w-[85%] flex-col items-start sm:max-w-[80%]">
+        <ReplyQuoteRow>
+          <SourceQuote source={source} chatId={null} />
+        </ReplyQuoteRow>
+        <div className="relative group min-w-0 max-w-full">
+          <div {...{ [FOLD_SURFACE_ATTRIBUTE]: "" }} className={cn(QUEUED_BUBBLE_CLASS, "grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-end gap-2.5 py-1.5 pl-1.5 pr-3.5")}>
+            <SendNowButton onSendNow={onSendNow} disabled={busy} />
+            <div className="min-w-0">
+              {body
+                ? <ClampedMessageText text={body} lines={CLAMP_LINES.sent} />
+                : <p className="text-muted-foreground">Queued</p>}
             </div>
           </div>
-        )
-      })}
+          <RemoveButton corner="end" onRemove={onRemove} disabled={busy} />
+        </div>
+      </div>
     </div>
   )
 }

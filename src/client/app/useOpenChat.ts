@@ -26,8 +26,7 @@ export type OpenChat = (chatId: string, options?: OpenChatOptions) => void
 
 /**
  * Whether the main view is showing this chat's transcript: the chat is the
- * page's and the route is its chat route. On the graph's page (`/graph/<id>`)
- * the chat is the page's but its tree is drawn where the transcript would be.
+ * page's and the route is its chat route.
  *
  * Read off the address, once, from inside a click handler or a render that a
  * route change redoes anyway: the hook below must not re-render its callers
@@ -41,7 +40,7 @@ export function isChatInMainView(chatId: string): boolean {
 /**
  * Open a chat from inside another chat's view: THE entry point for a click on
  * a Kanna chat link, a delegation card, a reply quote, a Tasks row, a hover
- * card's Open, a graph node. The chat opens in the previewer beside the one
+ * card's Open. The chat opens in the previewer beside the one
  * you are in, whatever it is to it; the rule is `resolveChatOpen` in
  * lib/chat-open.
  *
@@ -92,19 +91,20 @@ export function useOpenChat(): OpenChat {
       if (action.kind === "close-preview") viewerStore.close()
       if (options?.jump) goTo()
     } else if (action.kind === "preview") {
-      // A trail that began at the graph or at a delegator's list still ends
+      // A trail that began at a delegator's board or ticket still ends
       // there: stepping from one chat to the next inside the previewer
       // carries it along, and a chat picked from the list starts one. A chat
       // opened from the page starts a new trail, with neither behind it.
       const inPane = options?.from === "preview"
-      const graph = inPane && item?.kind === "chat" ? item.graph : undefined
-      const delegated = !inPane ? undefined : item?.kind === "delegated" ? item.chatId : item?.kind === "chat" ? item.delegated : undefined
+      const delegated = !inPane ? undefined : item?.kind === "delegated" || item?.kind === "ticket" ? item.chatId : item?.kind === "chat" ? item.delegated : undefined
+      // A chat opened from a ticket's chip keeps the ticket to go back to.
+      const ticket = !inPane ? undefined : item?.kind === "ticket" ? item.ticketId : item?.kind === "chat" ? item.ticket : undefined
       viewerStore.open({
         kind: "chat",
         chatId,
         ...(action.back.length > 0 ? { back: action.back } : {}),
-        ...(graph ? { graph } : {}),
         ...(delegated ? { delegated } : {}),
+        ...(delegated && ticket ? { ticket } : {}),
       })
       if (options?.jump) viewerStore.setChatJump(chatId, options.jump)
     } else {

@@ -11,8 +11,7 @@ import { REPLY_QUOTE_WIDTH_CLASS } from "./SourcedMessage"
  * A sub-chat is in no list of chats (`isSubChat`), so the way back to its
  * parent has to be in its own transcript. It is: the message that started the
  * sub-chat came from the parent's agent, and over its bubble is the parent's
- * row, the same quote the parent draws on the report that comes back
- * (`ChatReplyQuote`).
+ * row (`ChatReplyQuote`).
  *
  * That message is not always there to carry it. A chat opens on its last
  * stretch, and in a long one the opening message is pages above, not loaded.

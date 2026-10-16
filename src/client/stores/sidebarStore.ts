@@ -178,17 +178,16 @@ export function useSidebarChatStatus(chatId: string | null): KannaStatus | null 
 }
 
 /**
- * Whether the sidebar has heard of a message in the chat. Known before the
- * chat's own snapshot arrives, like the status above; false for an unknown
- * chat.
+ * Whether the sidebar lists the chat as a new chat: no message yet, and still
+ * under the name it was made with. The same test the chat's own snapshot is
+ * put to once it arrives, so the new chat page can be up before that.
  */
-export function useSidebarChatHasMessages(chatId: string | null): boolean {
+export function useSidebarChatIsNew(chatId: string | null): boolean {
   return useSidebarStore((state) => {
     if (!chatId) return false
     for (const group of state.data.projectGroups) {
       const chat = group.chats.find((row) => row.chatId === chatId)
-        ?? (group.archivedChats ?? []).find((row) => row.chatId === chatId)
-      if (chat) return chat.lastMessageAt != null
+      if (chat) return chat.lastMessageAt == null && chat.title === "New Chat"
     }
     return false
   })

@@ -5,12 +5,21 @@ interface Props {
   message: ProcessedTextMessage
 }
 
-export function TextMessage({ message }: Props) {
+/**
+ * An agent's words, as the transcript draws them: full-width markdown, no
+ * avatar and no name. Apart from the message so a delegator's reply on a
+ * ticket is this and not a copy of its classes.
+ */
+export function AssistantText({ text }: { text: string }) {
   return (
     // <VerticalLineContainer className="w-full">
       <div className="text-pretty prose prose-sm dark:prose-invert px-0.5 w-full max-w-full space-y-4">
-        <TranscriptMarkdown text={message.text} />
+        <TranscriptMarkdown text={text} />
       </div>
     // </VerticalLineContainer>
   )
+}
+
+export function TextMessage({ message }: Props) {
+  return <AssistantText text={message.text} />
 }

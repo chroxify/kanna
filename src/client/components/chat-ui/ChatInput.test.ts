@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { PROVIDERS } from "../../../shared/types"
+import { useChatInputStore } from "../../stores/chatInputStore"
+import { useChatPreferencesStore } from "../../stores/chatPreferencesStore"
 import { ChatInput, getClipboardImageFiles, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
 
 function createClipboardItem(args: {
@@ -136,5 +138,42 @@ describe("ChatInput", () => {
     expect(html).toContain("absolute inset-0 h-full w-full cursor-pointer opacity-0")
     expect(html.indexOf('aria-label="Add attachment"')).toBeGreaterThan(html.indexOf('placeholder="Build something..."'))
     expect(html).not.toContain('type="file" multiple="" class="hidden"')
+  })
+
+  test("draftKey keeps the draft apart from the chat's own", () => {
+    useChatInputStore.getState().setDraft("chat-1", "the chat's draft")
+    useChatInputStore.getState().setDraft("ticket:chat-1:tk_00000d", "the ticket's draft")
+    const props = { onSubmit: async () => undefined, disabled: false, activeProvider: null, availableProviders: PROVIDERS, chatId: "chat-1" }
+
+    const ticket = renderToStaticMarkup(createElement(ChatInput, { ...props, draftKey: "ticket:chat-1:tk_00000d" }))
+    expect(ticket).toContain("the ticket&#x27;s draft")
+    expect(ticket).not.toContain("the chat&#x27;s draft")
+    expect(renderToStaticMarkup(createElement(ChatInput, props))).toContain("the chat&#x27;s draft")
+
+    useChatInputStore.getState().clearDraft("chat-1")
+    useChatInputStore.getState().clearDraft("ticket:chat-1:tk_00000d")
+  })
+
+  test("a ticket's composer and its delegator's share the delegator's settings, and only the draft is the ticket's", () => {
+    const claude = PROVIDERS.find((provider) => provider.id === "claude")!
+    const chosen = claude.models.find((model) => model.id !== claude.defaultModel)!
+    const props = { onSubmit: async () => undefined, disabled: false, activeProvider: "claude" as const, availableProviders: PROVIDERS, chatId: "deleg-1" }
+
+    // Set from the ticket's composer: it writes by the delegator's chat id.
+    useChatPreferencesStore.getState().setChatComposerModel("deleg-1", chosen.id)
+    const ticket = renderToStaticMarkup(createElement(ChatInput, { ...props, draftKey: "ticket:deleg-1:tk_00000d" }))
+    const chat = renderToStaticMarkup(createElement(ChatInput, props))
+    expect(ticket).toContain(`>${chosen.label}<`)
+    expect(chat).toContain(`>${chosen.label}<`)
+    // A chat with no setting of its own shows its default, not this one.
+    expect(renderToStaticMarkup(createElement(ChatInput, { ...props, chatId: "another-chat" }))).not.toContain(`>${chosen.label}<`)
+    // The options row is there, with Attach where it always is.
+    expect(ticket).toContain("<span>Attach</span>")
+
+    // And the other way round: what the chat's composer sets, the ticket's shows.
+    const back = claude.models.find((model) => model.id !== chosen.id)!
+    useChatPreferencesStore.getState().setChatComposerModel("deleg-1", back.id)
+    expect(renderToStaticMarkup(createElement(ChatInput, { ...props, draftKey: "ticket:deleg-1:tk_00000d" }))).toContain(`>${back.label}<`)
+    expect(useChatPreferencesStore.getState().getComposerState("deleg-1").model).toBe(back.id)
   })
 })

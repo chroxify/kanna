@@ -212,7 +212,10 @@ function ThreadSectionsImpl({
     && sections.archived.length === 0
   ) return null
 
-  const renderRow = (thread: SidebarThread) => (
+  // `delegatorMark` is off for the Delegators section alone: its heading
+  // says what its rows are. A delegator anywhere else here (pinned, or
+  // archived) has only its mark to say so.
+  const renderRow = (thread: SidebarThread, delegatorMark = true) => (
     <ThreadRow
       key={thread.chatId}
       thread={thread}
@@ -222,6 +225,7 @@ function ThreadSectionsImpl({
       nowMs={nowMs}
       dimIdleTitles={false}
       showProjectIcon={showProjectIcons}
+      delegatorMark={delegatorMark}
       onSelect={onSelectChat}
       onCreateChat={onCreateChat}
       onRenameChat={onRenameChat}
@@ -250,7 +254,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {group.threads.map(renderRow)}
+                {group.threads.map((thread) => renderRow(thread, group.key !== "delegators"))}
               </div>
             ) : null}
           </div>
@@ -274,7 +278,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {relevant.map(renderRow)}
+                {relevant.map((thread) => renderRow(thread))}
               </div>
             ) : null}
           </div>
@@ -294,7 +298,7 @@ function ThreadSectionsImpl({
             />
             {isExpanded ? (
               <div className="space-y-[2px] mb-3">
-                {bucket.threads.map(renderRow)}
+                {bucket.threads.map((thread) => renderRow(thread))}
               </div>
             ) : null}
           </div>

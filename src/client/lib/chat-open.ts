@@ -1,7 +1,7 @@
 /**
  * What opening a chat from inside another chat's view does: a click on a
- * Kanna chat link, a delegation card, a reply quote, a Tasks row, a node of
- * the graph.
+ * Kanna chat link, a delegation card, a reply quote, a Tasks row, a ticket's
+ * chat.
  *
  * It opens in the previewer, beside the chat you are reading, whatever the
  * two are to each other: a sub-chat, its parent, or a chat that only gets a
@@ -26,8 +26,8 @@ export interface ChatOpenRequest {
   /** The page's chat: the one its composer sends to. Null on a page without one. */
   pageChatId: string | null
   /**
-   * Whether the main view is showing the page's chat as a transcript. False
-   * on the graph's page, which is on a chat but draws its tree in its place.
+   * Whether the main view is showing the page's chat as a transcript: the
+   * page is on the chat and its route is the chat's.
    */
   pageShowsTranscript: boolean
   /** What the previewer is on, or null while it holds no chat. */
@@ -67,8 +67,8 @@ export function resolveChatOpen(request: ChatOpenRequest): ChatOpenAction {
     // Clicked in the previewed chat (its link back to its parent, say), the
     // chat is right there under or beside the previewer.
     if (request.from === "preview" && preview) return { kind: "close-preview" }
-    // Clicked in its own transcript, it is what you are looking at. On the
-    // graph's page it is not, and its node is the way to its transcript.
+    // Clicked in its own transcript, it is what you are looking at. Where the
+    // main view is not showing it, the click is the way to it.
     return { kind: request.pageShowsTranscript ? "stay" : "navigate" }
   }
 

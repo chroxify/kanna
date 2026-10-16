@@ -47,7 +47,7 @@ async function until(predicate: () => boolean) {
 describe("shared Kanna display tools", () => {
   test("attachment inputs omit descriptions and captions", async () => {
     const spec = kannaToolSpecs().find(tool => tool.name === "send_attachments")!
-    expect(Object.keys(spec.inputSchema.properties ?? {})).toEqual(["attachments"])
+    expect(Object.keys(spec.inputSchema.properties ?? {})).toEqual(["attachments", "ticketId"])
     expect(JSON.stringify(spec.inputSchema)).not.toContain('"caption"')
     const { runtime } = setup()
     const result = await runtime.execute("send_attachments", attachments)
@@ -60,8 +60,9 @@ describe("shared Kanna display tools", () => {
   test("replaces show_chart with a general visualization tool and keeps only metadata in headers", async () => {
     expect(KANNA_TOOL_NAMES).toEqual([
       "show_visualization", "send_attachments", "generate_images",
-      "get_context", "list_chats", "read_chat", "create_chat", "fork_chat", "send_message", "wait_for_chats",
+      "get_context", "list_chats", "read_chat", "create_chat", "fork_chat", "send_message",
       "cancel_chat", "update_chat", "update_queued_message", "set_schedule", "list_schedules", "delete_schedule",
+      "create_ticket", "update_ticket", "reply_to_ticket", "read_ticket", "list_tickets",
     ])
     const { runtime, entries } = setup()
     expect(await runtime.execute("show_visualization", visualization)).toMatchObject({ structuredContent: { displayed: true } })
@@ -188,14 +189,21 @@ describe("shared Kanna display tools", () => {
     const tools = createPiKannaTools(runtime)
     const validate = (name: string, input: Record<string, unknown>) =>
       validateToolArguments(tools.find(tool => tool.name === name)!, { type: "toolCall", id: "pi-1", name, arguments: input })
-    expect(validate("wait_for_chats", { chatIds: ["a", "b"], mode: "any", timeoutSeconds: 30 }))
-      .toEqual({ chatIds: ["a", "b"], mode: "any", timeoutSeconds: 30 })
+    expect(validate("list_chats", { status: "running", limit: 10, offset: 20, includeArchived: true }))
+      .toEqual({ status: "running", limit: 10, offset: 20, includeArchived: true })
     expect(validate("set_schedule", { message: "ping", dailyAt: "09:00", weekdays: [1, 3], planMode: true }))
       .toEqual({ message: "ping", dailyAt: "09:00", weekdays: [1, 3], planMode: true })
+    expect(validate("read_chat", { chatId: "c", after: -1, textOffset: 50000, lastTurns: 1, kinds: ["reply", "tool_result"], limit: 5 }))
+      .toEqual({ chatId: "c", after: -1, textOffset: 50000, lastTurns: 1, kinds: ["reply", "tool_result"], limit: 5 })
+    expect(() => validate("read_chat", { chatId: "c", kinds: ["assistant"] })).toThrow("Validation failed")
     expect(validate("create_chat", { message: "go" })).toEqual({ message: "go" })
     expect(() => validate("create_chat", {})).toThrow("Validation failed")
     // Without a server behind the runtime the tools say so instead of failing oddly.
     expect(await runtime.execute("list_chats", {})).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("not available") }] })
+  })
+  test("every tool description fits in what Claude Code shows of one (2,048 characters)", () => {
+    const over = kannaToolSpecs().filter((spec) => spec.description.length > 2_048).map((spec) => spec.name)
+    expect(over).toEqual([])
   })
   test("HTTP MCP authenticates requests and isolates chats", async () => {
     const first = setup(), second = setup()

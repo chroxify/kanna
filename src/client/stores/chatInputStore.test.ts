@@ -6,8 +6,61 @@ describe("chatInputStore", () => {
     useChatInputStore.setState({
       drafts: {},
       draftStartedAt: {},
+      draftTouchedAt: {},
       attachmentDrafts: {},
+      startedChats: {},
     })
+  })
+
+  test("a draft is last touched when its text or its attachments last changed, and not once both are gone", () => {
+    const store = useChatInputStore.getState()
+    const attachment = { id: "a", kind: "file", displayName: "a.txt" } as never
+    store.setDraft("chat-1", "typed")
+    expect(useChatInputStore.getState().draftTouchedAt["chat-1"]).toBeGreaterThan(0)
+
+    store.setAttachmentDrafts("chat-1", [attachment])
+    store.setDraft("chat-1", "")
+    // The attachment is still staged, so there is still a draft.
+    expect(useChatInputStore.getState().draftTouchedAt["chat-1"]).toBeGreaterThan(0)
+    store.setAttachmentDrafts("chat-1", [])
+    expect(useChatInputStore.getState().draftTouchedAt["chat-1"]).toBeUndefined()
+  })
+
+  test("moving a draft takes all of it to the other chat and leaves nothing behind", () => {
+    const store = useChatInputStore.getState()
+    const attachment = { id: "a", kind: "file", displayName: "a.txt" } as never
+    store.setDraft("gone", "written before lunch")
+    store.setAttachmentDrafts("gone", [attachment])
+    const before = useChatInputStore.getState()
+
+    store.moveDraft("gone", "fresh")
+
+    const after = useChatInputStore.getState()
+    expect(after.drafts).toEqual({ fresh: "written before lunch" })
+    expect(after.attachmentDrafts).toEqual({ fresh: [attachment] })
+    expect(after.draftStartedAt).toEqual({ fresh: before.draftStartedAt.gone! })
+    expect(after.draftTouchedAt).toEqual({ fresh: before.draftTouchedAt.gone! })
+  })
+
+  test("a started chat is remembered while it has a draft or is young enough to get one", () => {
+    const day = 24 * 60 * 60 * 1000
+    useChatInputStore.setState({
+      drafts: { "old-with-draft": "kept" },
+      startedChats: {
+        "old-with-draft": { projectId: "p", at: Date.now() - 3 * day },
+        "old-empty": { projectId: "p", at: Date.now() - 3 * day },
+        "young-empty": { projectId: "p", at: Date.now() - 1000 },
+      },
+    })
+
+    useChatInputStore.getState().rememberStartedChat("new", "q")
+
+    const { startedChats } = useChatInputStore.getState()
+    expect(Object.keys(startedChats).sort()).toEqual(["new", "old-with-draft", "young-empty"])
+    expect(startedChats.new?.projectId).toBe("q")
+
+    useChatInputStore.getState().forgetStartedChat("new")
+    expect(useChatInputStore.getState().startedChats.new).toBeUndefined()
   })
 
   test("stamps a draft when it appears, and leaves it alone as you keep typing", () => {
