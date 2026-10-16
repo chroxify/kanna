@@ -70,7 +70,9 @@ export function EditableTitle({ title, onRename }: { title: string; onRename: (t
           event.preventDefault()
           beginEditing()
         }}
-        className="min-w-0 cursor-text truncate rounded-sm text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        // Clamped rather than `truncate`, so the open tab can give way in a
+        // full bar like the others (`TAB_TITLE_CLAMP` in `ChatTabs`).
+        className="min-w-0 cursor-text line-clamp-1 break-all rounded-sm text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {shown}
       </span>

@@ -24,6 +24,15 @@ const alongTheBar: Modifier = ({ transform }) => ({ ...transform, y: 0 })
 /** The strong ease-out the app uses for UI that answers a pointer (`--ease-snappy`). */
 const TAB_MOVE_TRANSITION = { duration: 200, easing: "cubic-bezier(0.23, 1, 0.32, 1)" }
 
+/**
+ * A title cut to one line with an ellipsis, as `truncate` does, but by
+ * clamping wrapped lines rather than refusing to wrap: a `nowrap` title's
+ * least width is all of it, so a group of tabs could not shrink without
+ * spilling over the next group. This one's least width is a letter, so the
+ * tabs' own floor is what holds, and past it the bar scrolls.
+ */
+const TAB_TITLE_CLAMP = "line-clamp-1 break-all"
+
 interface TabProps {
   tab: ChatTab
   /** Absent for a chat the sidebar hasn't reported yet (one just created). */
@@ -115,7 +124,7 @@ const Tab = memo(function Tab({ tab, thread, active, isNew, editorLabel, actions
       {active ? (
         <EditableTitle title={title} onRename={(next) => onRename(tab.chatId, next)} />
       ) : (
-        <span className="min-w-0 truncate font-medium">{title}</span>
+        <span className={cn("min-w-0 font-medium", TAB_TITLE_CLAMP)}>{title}</span>
       )}
       {/* Laid over the tab's end, not given room in it: the title gets the
           whole tab, and the button appears on top of its tail when the tab is
@@ -244,7 +253,10 @@ function TabGroup({ projectId, title, iconUrl, collapsed, tabCount, onToggle, on
       role="group"
       aria-label={title}
       data-chat-tab-group={projectId}
-      className="pointer-events-auto mx-px flex h-[32px] min-w-0 shrink items-center rounded-[10px] border border-border/70 bg-background"
+      // No `min-w-0`, here or on the tabs' row: a group gives way only as far
+      // as its tabs' floors add up, and past that the bar scrolls. Below its
+      // content, the tabs would spill out over the next group.
+      className="pointer-events-auto mx-px flex h-[32px] shrink items-center rounded-[10px] border border-border/70 bg-background"
     >
       <button
         type="button"
@@ -261,7 +273,7 @@ function TabGroup({ projectId, title, iconUrl, collapsed, tabCount, onToggle, on
       {children ? (
         <>
           <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-          <div className="flex min-w-0 shrink items-center">{children}</div>
+          <div className="flex shrink items-center">{children}</div>
         </>
       ) : null}
       {collapsed ? null : (
